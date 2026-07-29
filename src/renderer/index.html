@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trae Pet</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Main pet container -->
+  <div id="pet-container">
+    <!-- Live2D canvas area -->
+    <div id="canvas-wrapper">
+      <div id="live2d-canvas"></div>
+      <!-- Fallback canvas (shown if Live2D fails to load) -->
+      <canvas id="fallback-canvas" width="280" height="380" style="display:none;"></canvas>
+      <!-- Effect overlay (ZZZ, !, etc.) -->
+      <div id="effect-overlay"></div>
+    </div>
+
+    <!-- Status bar -->
+    <div id="status-bar">
+      <div id="status-header">
+        <span id="pet-state-text">初始化中...</span>
+        <button id="menu-btn" title="菜单">&#9776;</button>
+      </div>
+      <div id="project-list">
+        <div class="project-item empty">等待 Trae IDE 连接...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Context menu -->
+  <div id="context-menu" class="hidden">
+    <div class="menu-item" id="menu-install-hooks">安装 Hook 集成</div>
+    <div class="menu-item" id="menu-test-busy">测试: 忙碌状态</div>
+    <div class="menu-item" id="menu-test-alert">测试: 提醒状态</div>
+    <div class="menu-item" id="menu-test-sleep">测试: 睡觉状态</div>
+    <div class="menu-divider"></div>
+    <div class="menu-item danger" id="menu-quit">退出</div>
+  </div>
+
+  <!-- Load libraries -->
+  <!-- Try local first, fallback to CDN -->
+  <script>
+    // Dynamic script loader with fallback
+    function loadScript(localPath, cdnUrl) {
+      return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = localPath;
+        script.onload = resolve;
+        script.onerror = () => {
+          // Try CDN
+          const cdnScript = document.createElement('script');
+          cdnScript.src = cdnUrl;
+          cdnScript.onload = resolve;
+          cdnScript.onerror = reject;
+          document.head.appendChild(cdnScript);
+        };
+        document.head.appendChild(script);
+      });
+    }
+
+    async function loadAllLibs() {
+      // 1. PixiJS
+      await loadScript(
+        '../../node_modules/pixi.js/dist/pixi.min.js',
+        'https://cdn.jsdelivr.net/npm/pixi.js@7.4.0/dist/pixi.min.js'
+      );
+      // 2. Cubism Core SDK
+      await loadScript(
+        '../../assets/libs/live2dcubismcore.min.js',
+        'https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js'
+      );
+      // 3. pixi-live2d-display
+      await loadScript(
+        '../../node_modules/pixi-live2d-display/dist/index.min.js',
+        'https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js'
+      );
+
+      // All loaded, start the app
+      window.dispatchEvent(new CustomEvent('libs-ready'));
+    }
+
+    loadAllLibs().catch(err => {
+      console.error('Failed to load libraries:', err);
+      // Start with fallback mode
+      window.dispatchEvent(new CustomEvent('libs-failed'));
+    });
+  </script>
+
+  <!-- Main renderer script -->
+  <script src="renderer.js"></script>
+</body>
+</html>

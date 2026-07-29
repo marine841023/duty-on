@@ -1,0 +1,70 @@
+{
+  "name": "trae-pet",
+  "version": "1.0.0",
+  "description": "Live2D desktop pet for monitoring Trae IDE AI task status",
+  "main": "src/main/index.js",
+  "author": "Trae Pet",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "postinstall": "node scripts/download-assets.js",
+    "dist": "electron-builder --win portable",
+    "dist:installer": "electron-builder --win nsis",
+    "dist:dir": "electron-builder --win --dir"
+  },
+  "dependencies": {
+    "pixi-live2d-display": "^0.4.0",
+    "pixi.js": "^7.4.0"
+  },
+  "devDependencies": {
+    "electron": "^28.3.3",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.traepet.desktop",
+    "productName": "TraePet",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "hooks/**/*",
+      "node_modules/**/*",
+      "scripts/**/*",
+      "package.json",
+      "!**/*.{md,markdown}",
+      "!**/.{git,gitignore,DS_Store}",
+      "!release/**",
+      "!build/**"
+    ],
+    "extraResources": [
+      {
+        "from": "hooks",
+        "to": "hooks"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "TraePet-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "TraePet-${version}.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "TraePet-Setup-${version}.${ext}"
+    }
+  }
+}

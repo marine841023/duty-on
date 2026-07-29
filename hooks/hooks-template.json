@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& \"$env:USERPROFILE\\.trae-pet\\hooks\\trae-hook-bridge.ps1\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& \"$env:USERPROFILE\\.trae-pet\\hooks\\trae-hook-bridge.ps1\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& \"$env:USERPROFILE\\.trae-pet\\hooks\\trae-hook-bridge.ps1\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& \"$env:USERPROFILE\\.trae-pet\\hooks\\trae-hook-bridge.ps1\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& \"$env:USERPROFILE\\.trae-pet\\hooks\\trae-hook-bridge.ps1\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "& \"$env:USERPROFILE\\.trae-pet\\hooks\\trae-hook-bridge.ps1\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
