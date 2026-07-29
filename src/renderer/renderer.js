@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Renderer - Live2D pet rendering, state animations, and UI management.
  *
  * Responsibilities:
@@ -186,12 +186,9 @@ function applyStateParameters(internalModel) {
  */
 function setParam(coreModel, id, value) {
   try {
-    const param = coreModel.getParameterValueById(id);
-    if (param !== undefined && param !== null) {
-      coreModel.setParameterValueById(id, value);
-    }
+    coreModel.setParameterValueById(id, value);
   } catch (e) {
-    // Parameter doesn't exist, skip
+    // Parameter doesn't exist on this model, skip.
   }
 }
 
@@ -471,8 +468,11 @@ function setupIPC() {
 }
 
 function flashWindowAttention() {
-  // The window shake is handled by CSS
-  // Could add sound here in the future
+  // CSS shake is handled in updateStateUI; ask the main process to flash the
+  // taskbar / pulse opacity as an additional attention signal.
+  if (window.petAPI) {
+    window.petAPI.flashAttention();
+  }
 }
 
 // ===== Context Menu =====

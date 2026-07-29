@@ -9,8 +9,7 @@
  */
 
 const http = require('http');
-
-const PORT = 17521;
+const { PORT, HOST } = require('./config');
 
 function createServer(stateManager) {
   const server = http.createServer((req, res) => {
@@ -32,6 +31,11 @@ function createServer(stateManager) {
       req.on('end', () => {
         try {
           const event = JSON.parse(body);
+          // Diagnostic: log Notification payloads so real Trae events can be
+          // inspected to tune config.NOTIFICATION_*_TYPES. Remove once tuned.
+          if (event.hook_event_name === 'Notification') {
+            console.log('[PetServer] Notification payload:', JSON.stringify(event));
+          }
           stateManager.handleHookEvent(event);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true }));
@@ -83,8 +87,8 @@ function createServer(stateManager) {
     res.end(JSON.stringify({ error: 'Not found' }));
   });
 
-  server.listen(PORT, '127.0.0.1', () => {
-    console.log(`[PetServer] Listening on http://127.0.0.1:${PORT}`);
+  server.listen(PORT, HOST, () => {
+    console.log(`[PetServer] Listening on http://${HOST}:${PORT}`);
   });
 
   server.on('error', (err) => {

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Electron Main Process
  * - Creates transparent, always-on-top, frameless window
  * - Starts HTTP server for Trae IDE hook events
@@ -9,15 +9,13 @@
 const { app, BrowserWindow, ipcMain, screen } = require('electron');
 const path = require('path');
 const { StateManager } = require('./state-manager');
-const { createServer, PORT } = require('./server');
+const { createServer } = require('./server');
+const config = require('./config');
 
 // Global references (prevent GC)
 let mainWindow = null;
 let stateManager = null;
 let httpServer = null;
-
-const WINDOW_WIDTH = 320;
-const WINDOW_HEIGHT = 520;
 
 /**
  * Get the path to the hooks directory.
@@ -58,10 +56,10 @@ function createMainWindow() {
   const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
 
   mainWindow = new BrowserWindow({
-    width: WINDOW_WIDTH,
-    height: WINDOW_HEIGHT,
-    x: screenWidth - WINDOW_WIDTH - 20,   // Bottom-right corner
-    y: screenHeight - WINDOW_HEIGHT - 20,
+    width: config.WINDOW_WIDTH,
+    height: config.WINDOW_HEIGHT,
+    x: screenWidth - config.WINDOW_WIDTH - config.WINDOW_MARGIN,   // Bottom-right corner
+    y: screenHeight - config.WINDOW_HEIGHT - config.WINDOW_MARGIN,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
@@ -137,24 +135,67 @@ ipcMain.on('set-click-through', (_, ignore) => {
 
 ipcMain.on('bring-to-front', async (_, projectPath) => {
   if (!projectPath) return;
-  try {
-    const { exec } = require('child_process');
-    const projectName = path.basename(projectPath);
-    const psScript = `
-      Add-Type -AssemblyName Microsoft.VisualBasic
-      $windows = Get-Process | Where-Object { $_.MainWindowTitle -like '*${projectName}*' -and $_.ProcessName -like '*Trae*' }
-      if ($windows) {
-        [Microsoft.VisualBasic.Interaction]::AppActivate($windows[0].Id)
+  const { execFile } = require('child_process');
+  const projectName = path.basename(projectPath);
+
+  // Fixed PowerShell script — NO user-data interpolation. Project name/path are
+  // passed via env vars and read with $env: inside the script. Matching uses
+  // literal -eq / IndexOf (never -like on user data), so names like O'Brien or
+  // test[1] cannot break parsing or inject commands.
+  const psScript = `
+    $name = $env:TRAE_PET_FOCUS_NAME
+    $windows = Get-Process | Where-Object { $_.ProcessName -eq 'Trae' -and $_.MainWindowTitle -ne '' }
+    if (-not $windows) { exit 0 }
+    $target = $null
+    # 1. Exact match on the leading folder segment of the title (literal -eq).
+    foreach ($w in $windows) {
+      $folder = ($w.MainWindowTitle -split ' - ')[0]
+      if ($folder -eq $name) { $target = $w; break }
+    }
+    # 2. Fallback: case-insensitive literal substring match.
+    if (-not $target) {
+      foreach ($w in $windows) {
+        if ($w.MainWindowTitle.IndexOf($name, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $target = $w; break }
       }
-    `;
-    exec(`powershell -Command "${psScript.replace(/"/g, '\\"')}"`, { timeout: 5000 });
-  } catch (e) {
-    console.error('Failed to bring window to front:', e);
-  }
+    }
+    # 3. Last resort: activate any Trae window.
+    if (-not $target) { $target = @($windows)[0] }
+    Add-Type -AssemblyName Microsoft.VisualBasic
+    [Microsoft.VisualBasic.Interaction]::AppActivate($target.Id)
+  `;
+
+  execFile(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command', psScript],
+    {
+      timeout: 5000,
+      env: { ...process.env, TRAE_PET_FOCUS_NAME: projectName, TRAE_PET_FOCUS_PATH: projectPath },
+    },
+    (err) => {
+      if (err && err.killed) {
+        console.warn(`[bring-to-front] timed out for project "${projectName}"`);
+      } else if (err) {
+        console.warn(`[bring-to-front] powershell failed for "${projectName}":`, err.message);
+      }
+    }
+  );
 });
 
 ipcMain.on('quit', () => {
   app.quit();
+});
+
+ipcMain.on('flash-attention', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  // skipTaskbar:true makes flashFrame invisible on Windows, so also surface the
+  // window and pulse opacity as a reliable visible attention signal.
+  mainWindow.flashFrame(true);
+  mainWindow.showInactive();
+  const origOpacity = mainWindow.getOpacity();
+  mainWindow.setOpacity(0.4);
+  setTimeout(() => {
+    if (!mainWindow.isDestroyed()) mainWindow.setOpacity(origOpacity);
+  }, 200);
 });
 
 ipcMain.handle('install-hooks', async () => {
@@ -212,17 +253,18 @@ async function installHooks() {
     }
   }
 
-  // Build the hook command (PowerShell call to the bridge script)
-  const hookCommand = `& "${bridgeDst}"`;
+  // Build the hook command (PowerShell call to the bridge script).
+  // Use $env:USERPROFILE form for portability across machines/profiles,
+  // matching hooks/hooks-template.json.
+  const hookCommand = `& "$env:USERPROFILE\\.trae-pet\\hooks\\trae-hook-bridge.ps1"`;
 
-  const traePetHooks = {
-    SessionStart: [{ hooks: [{ type: 'command', command: hookCommand, timeout: 5 }] }],
-    UserPromptSubmit: [{ hooks: [{ type: 'command', command: hookCommand, timeout: 5 }] }],
-    PreToolUse: [{ hooks: [{ type: 'command', command: hookCommand, timeout: 5 }] }],
-    PostToolUse: [{ hooks: [{ type: 'command', command: hookCommand, timeout: 5 }] }],
-    Stop: [{ hooks: [{ type: 'command', command: hookCommand, timeout: 5 }] }],
-    Notification: [{ hooks: [{ type: 'command', command: hookCommand, timeout: 5 }] }],
-  };
+  // Build hook entries from the centralized event list (config.HOOK_EVENTS).
+  const traePetHooks = {};
+  for (const eventName of config.HOOK_EVENTS) {
+    traePetHooks[eventName] = [{
+      hooks: [{ type: 'command', command: hookCommand, timeout: config.BRIDGE_TIMEOUT_SEC }],
+    }];
+  }
 
   // Merge: preserve existing hooks that aren't ours
   if (!existingHooks.version) existingHooks.version = 1;

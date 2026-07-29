@@ -15,13 +15,10 @@
  */
 
 const { EventEmitter } = require('events');
+const config = require('./config');
 
-// How long (ms) without events before a working session is considered idle
-const WORKING_TIMEOUT = 5 * 60 * 1000;       // 5 minutes
-// How long (ms) without events before a session is removed entirely
-const SESSION_TIMEOUT = 30 * 60 * 1000;       // 30 minutes
-// How long (ms) before a confirmation-needed re-alerts
-const ALERT_REMINDER = 60 * 1000;             // 1 minute
+// Timeouts (centralized in config.js)
+const { WORKING_TIMEOUT, SESSION_TIMEOUT, ALERT_REMINDER } = config;
 
 class StateManager extends EventEmitter {
   constructor() {
@@ -30,6 +27,7 @@ class StateManager extends EventEmitter {
     this.sessions = new Map();
     this.overallState = 'sleeping';
     this._timer = null;
+    this._alertTimer = null;
     this._lastAlertTime = 0;
   }
 
@@ -75,13 +73,9 @@ class StateManager extends EventEmitter {
         break;
 
       case 'PreToolUse':
-        // If transitioning from confirmation-needed, clear the alert
-        if (session.status === 'confirmation-needed') {
-          session.status = 'working';
-          session.alertMessage = null;
-        } else if (session.status !== 'confirmation-needed') {
-          session.status = 'working';
-        }
+        // AI is about to use a tool — always working (clears any pending alert).
+        session.status = 'working';
+        session.alertMessage = null;
         break;
 
       case 'PostToolUse':
@@ -123,22 +117,29 @@ class StateManager extends EventEmitter {
    * @returns {boolean}
    */
   _checkConfirmationNeeded(event) {
-    // The Notification event's stdin includes a "notification_type" or message
-    // If the tool_name or notification content indicates waiting for user input
+    // Classify a Notification event as "needs user confirmation" vs "task complete".
+    // Priority (tune the whitelists in config.js after inspecting real payloads):
+    //   1. explicit completion type  -> false (task done)
+    //   2. explicit confirmation type -> true
+    //   3. tool_name on a Notification -> true (tool awaiting authorization)
+    //   4. message matches confirm keyword -> true
+    //   5. ambiguous -> ALERT_ON_AMBIGUOUS_NOTIFICATION (default false)
+    if (event.notification_type && config.NOTIFICATION_COMPLETE_TYPES.includes(event.notification_type)) {
+      return false;
+    }
+    if (event.notification_type && config.NOTIFICATION_CONFIRM_TYPES.includes(event.notification_type)) {
+      return true;
+    }
     if (event.tool_name) {
-      // PreToolUse with ask permission → confirmation needed
       return true;
     }
-    // Check if there's a notification message indicating confirmation
-    if (event.notification_type && event.notification_type !== 'task_complete') {
-      return true;
+    if (event.message) {
+      const lower = String(event.message).toLowerCase();
+      if (config.NOTIFICATION_CONFIRM_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()))) {
+        return true;
+      }
     }
-    // Default: if Notification fires during a working state, treat as confirmation
-    const session = this.sessions.get(event.session_id);
-    if (session && session.status === 'working') {
-      return true;
-    }
-    return false;
+    return config.ALERT_ON_AMBIGUOUS_NOTIFICATION;
   }
 
   /**
@@ -197,12 +198,8 @@ class StateManager extends EventEmitter {
         this.emit('alert', this.getSnapshot());
       }
     }
-
-    // Check if we need to re-remind about an alert
-    if (newState === 'alert' && Date.now() - this._lastAlertTime > ALERT_REMINDER) {
-      this._lastAlertTime = Date.now();
-      this.emit('alert', this.getSnapshot());
-    }
+    // Re-reminders are handled by _checkAndRemindAlert() on an independent timer
+    // (see startCleanupTimer), so they fire even without new events arriving.
   }
 
   /**
@@ -274,7 +271,23 @@ class StateManager extends EventEmitter {
    */
   startCleanupTimer() {
     if (this._timer) clearInterval(this._timer);
-    this._timer = setInterval(() => this.cleanupStaleSessions(), 60 * 1000); // Every minute
+    this._timer = setInterval(() => this.cleanupStaleSessions(), config.CLEANUP_INTERVAL_MS);
+
+    // Independent timer for alert re-reminders (does not rely on new events arriving).
+    if (this._alertTimer) clearInterval(this._alertTimer);
+    this._alertTimer = setInterval(() => this._checkAndRemindAlert(), config.ALERT_REMINDER);
+  }
+
+  /**
+   * Re-emit 'alert' if still in alert state and the reminder interval has elapsed.
+   * Driven by an independent timer so reminders fire even without new events.
+   */
+  _checkAndRemindAlert() {
+    if (this.overallState !== 'alert') return;
+    if (Date.now() - this._lastAlertTime >= ALERT_REMINDER) {
+      this._lastAlertTime = Date.now();
+      this.emit('alert', this.getSnapshot());
+    }
   }
 
   /**
@@ -284,6 +297,10 @@ class StateManager extends EventEmitter {
     if (this._timer) {
       clearInterval(this._timer);
       this._timer = null;
+    }
+    if (this._alertTimer) {
+      clearInterval(this._alertTimer);
+      this._alertTimer = null;
     }
   }
 

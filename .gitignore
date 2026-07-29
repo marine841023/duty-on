@@ -25,3 +25,4 @@ assets/libs/live2dcubismcore.min.js
 
 # Trae workspace docs
 .trae/
+node_modules

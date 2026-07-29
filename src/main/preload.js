@@ -13,5 +13,6 @@ contextBridge.exposeInMainWorld('petAPI', {
   dragWindow: (deltaX, deltaY) => ipcRenderer.send('drag-window', deltaX, deltaY),
   setClickThrough: (ignore) => ipcRenderer.send('set-click-through', ignore),
   bringToFront: (projectPath) => ipcRenderer.send('bring-to-front', projectPath),
+  flashAttention: () => ipcRenderer.send('flash-attention'),
   quit: () => ipcRenderer.send('quit'),
 });
