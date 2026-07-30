@@ -21,7 +21,7 @@ const config = require('./config');
 const { WORKING_TIMEOUT, SESSION_TIMEOUT, ALERT_REMINDER } = config;
 
 class StateManager extends EventEmitter {
-  constructor() {
+  constructor(options = {}) {
     super();
     /** @type {Map<string, SessionInfo>} */
     this.sessions = new Map();
@@ -29,6 +29,10 @@ class StateManager extends EventEmitter {
     this._timer = null;
     this._alertTimer = null;
     this._lastAlertTime = 0;
+    this._lastSignature = null;
+    this.lastEventAt = 0;
+    // Injectable clock for testability (defaults to real time).
+    this._now = options.now || (() => Date.now());
   }
 
   /**
@@ -47,7 +51,7 @@ class StateManager extends EventEmitter {
         projectName: project_name || this._extractProjectName(project_path || event.cwd || ''),
         status: 'idle',
         lastEvent: hook_event_name,
-        lastEventTime: Date.now(),
+        lastEventTime: this._now(),
         alertMessage: null,
       };
       this.sessions.set(session_id, session);
@@ -58,7 +62,8 @@ class StateManager extends EventEmitter {
     if (project_path) session.projectPath = project_path;
 
     session.lastEvent = hook_event_name;
-    session.lastEventTime = Date.now();
+    session.lastEventTime = this._now();
+    this.lastEventAt = session.lastEventTime;
 
     // State transitions based on event
     switch (hook_event_name) {
@@ -188,18 +193,36 @@ class StateManager extends EventEmitter {
     const oldState = this.overallState;
     this.overallState = newState;
 
-    // Always emit update (sessions may have changed even if overall state didn't)
-    this.emit('update', this.getSnapshot());
+    // Dirty check: only emit 'update' when the meaningful snapshot changed.
+    // lastEventTime/timestamp are excluded so repeated events don't spam updates.
+    const signature = this._snapshotSignature();
+    if (this._lastSignature !== signature) {
+      this._lastSignature = signature;
+      this.emit('update', this.getSnapshot());
+    }
 
     if (oldState !== newState) {
       this.emit('state-change', { from: oldState, to: newState });
       if (newState === 'alert') {
-        this._lastAlertTime = Date.now();
+        this._lastAlertTime = this._now();
         this.emit('alert', this.getSnapshot());
       }
     }
     // Re-reminders are handled by _checkAndRemindAlert() on an independent timer
     // (see startCleanupTimer), so they fire even without new events arriving.
+  }
+
+  /**
+   * Build a stable signature of the meaningful snapshot fields (excludes
+   * lastEventTime and timestamp) for dirty-checking in _recomputeState.
+   */
+  _snapshotSignature() {
+    const parts = [];
+    for (const s of this.sessions.values()) {
+      parts.push(`${s.sessionId}|${s.projectName}|${s.projectPath}|${s.status}|${s.lastEvent}|${s.alertMessage}`);
+    }
+    parts.sort();
+    return `${this.overallState}::${parts.join(';;')}`;
   }
 
   /**
@@ -226,7 +249,8 @@ class StateManager extends EventEmitter {
     return {
       overallState: this.overallState,
       sessions,
-      timestamp: Date.now(),
+      lastEventAt: this.lastEventAt,
+      timestamp: this._now(),
     };
   }
 
@@ -234,7 +258,7 @@ class StateManager extends EventEmitter {
    * Clean up stale sessions (called periodically).
    */
   cleanupStaleSessions() {
-    const now = Date.now();
+    const now = this._now();
     let changed = false;
 
     for (const [id, session] of this.sessions.entries()) {
@@ -284,8 +308,8 @@ class StateManager extends EventEmitter {
    */
   _checkAndRemindAlert() {
     if (this.overallState !== 'alert') return;
-    if (Date.now() - this._lastAlertTime >= ALERT_REMINDER) {
-      this._lastAlertTime = Date.now();
+    if (this._now() - this._lastAlertTime >= ALERT_REMINDER) {
+      this._lastAlertTime = this._now();
       this.emit('alert', this.getSnapshot());
     }
   }
@@ -310,6 +334,7 @@ class StateManager extends EventEmitter {
    */
   removeSession(sessionId) {
     if (this.sessions.delete(sessionId)) {
+      this._lastSignature = null; // force update emission
       this._recomputeState();
     }
   }
@@ -319,6 +344,7 @@ class StateManager extends EventEmitter {
    */
   clearAll() {
     this.sessions.clear();
+    this._lastSignature = null; // force update emission
     this._recomputeState();
   }
 }
