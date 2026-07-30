@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- CSP: allow self + inline scripts (needed for the dynamic script loader) + jsdelivr CDN -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http://127.0.0.1:17521 https://cdn.jsdelivr.net https://cubism.live2d.com;">
   <title>Trae Pet</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -32,10 +35,17 @@
 
   <!-- Context menu -->
   <div id="context-menu" class="hidden">
+    <div class="menu-label">切换形象</div>
+    <div id="model-list"><!-- model items populated dynamically --></div>
+    <div class="menu-divider"></div>
     <div class="menu-item" id="menu-install-hooks">安装 Hook 集成</div>
+    <div class="menu-item" id="menu-hook-status">Hook 状态<span class="menu-hint" id="hook-status-hint">未检查</span></div>
+    <div class="menu-divider"></div>
     <div class="menu-item" id="menu-test-busy">测试: 忙碌状态</div>
     <div class="menu-item" id="menu-test-alert">测试: 提醒状态</div>
     <div class="menu-item" id="menu-test-sleep">测试: 睡觉状态</div>
+    <div class="menu-divider"></div>
+    <div class="menu-item" id="menu-play-motion">切换动作</div>
     <div class="menu-divider"></div>
     <div class="menu-item danger" id="menu-quit">退出</div>
   </div>
@@ -72,10 +82,13 @@
         '../../assets/libs/live2dcubismcore.min.js',
         'https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js'
       );
-      // 3. pixi-live2d-display
+      // 3. pixi-live2d-display — use the Cubism 4 only build. The combined
+      //    index.min.js throws "Could not find Cubism 2 runtime" if live2d.min.js
+      //    is absent, which aborts registration of PIXI.live2d.Live2DModel.
+      //    Our models are all Cubism 4 (.moc3), so cubism4.min.js is sufficient.
       await loadScript(
-        '../../node_modules/pixi-live2d-display/dist/index.min.js',
-        'https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js'
+        '../../node_modules/pixi-live2d-display/dist/cubism4.min.js',
+        'https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js'
       );
 
       // All loaded, start the app

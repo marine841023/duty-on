@@ -15,7 +15,7 @@ let live2dModel = null;
 let currentState = 'sleeping';
 let currentSnapshot = { overallState: 'sleeping', sessions: [] };
 let effectsTimer = null;
-let usingFallback = false;
+let hooksInstalled = false;    // cached hook install status (for hint refresh)
 
 // Model URLs to try (in order)
 const MODEL_URLS = [
@@ -23,11 +23,31 @@ const MODEL_URLS = [
   'https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display/test/assets/hiyori/hiyori_pro_t10.model3.json',
 ];
 
+// ===== Constants =====
+const PIXI_WIDTH = 300;
+const PIXI_HEIGHT = 380;
+const EFFECT_INTERVAL_MS = 2000;
+const MOTION_NAMES = ['Tap', 'FlickUp', 'Shake'];
+const STATE_LABELS = {
+  sleeping: '💤 睡觉中',
+  working: '⚡ 忙碌中',
+  alert: '🔔 需要确认!',
+};
+const STATE_COLORS = {
+  sleeping: '#7b9eff',
+  working: '#ffc832',
+  alert: '#ff6666',
+};
+
 // ===== Initialize =====
 async function init() {
   setupIPC();
   setupContextMenu();
   setupDrag();
+
+  // Fetch available models + persisted choice from the main process, then
+  // build the model-switching menu.
+  await loadModelCatalog();
 
   // Wait for libraries to load
   const libsReady = await waitForLibs();
@@ -40,14 +60,67 @@ async function init() {
     // Fallback to canvas animation
     initFallbackCanvas();
     setPetState('sleeping');
-    updateStateUI('sleeping');
   }
+
+  // Ensure the "初始化中..." placeholder is replaced with the real state
+  // label. setPetState('sleeping') is a no-op when currentState is already
+  // 'sleeping' (its guard clause returns early), so we must call updateStateUI
+  // directly to refresh the text + status bar.
+  updateStateUI(currentState);
 
   // Start effects loop
   startEffectsLoop();
 
-  // Check if hooks are installed
+  // Check if hooks are installed + show diagnostic status
   checkHooksStatus();
+}
+
+/**
+ * Fetch the model catalog and persisted choice from the main process, then
+ * populate the "切换形象" menu.
+ */
+async function loadModelCatalog() {
+  if (!window.petAPI || !window.petAPI.getModels) return;
+  try {
+    const { models, currentModelUrl: saved } = await window.petAPI.getModels();
+    availableModels = Array.isArray(models) ? models : [];
+    currentModelUrl = saved || (availableModels[0] && availableModels[0].url) || null;
+    buildModelMenu();
+  } catch (err) {
+    console.warn('[models] Failed to load catalog:', err.message);
+  }
+}
+
+/**
+ * Build the model-switching menu items from `availableModels`.
+ */
+function buildModelMenu() {
+  const container = document.getElementById('model-list');
+  if (!container) return;
+  container.innerHTML = '';
+  for (const model of availableModels) {
+    const item = document.createElement('div');
+    item.className = 'menu-item';
+    item.dataset.url = model.url;
+    item.textContent = model.name;
+    if (model.url === currentModelUrl) item.classList.add('active');
+    item.addEventListener('click', () => {
+      if (model.url === currentModelUrl) return;
+      switchModel(model.url);
+      document.getElementById('context-menu').classList.add('hidden');
+    });
+    container.appendChild(item);
+  }
+}
+
+/**
+ * Highlight the active model in the menu.
+ */
+function updateModelMenuActive(url) {
+  const items = document.querySelectorAll('#model-list .menu-item');
+  items.forEach((el) => {
+    el.classList.toggle('active', el.dataset.url === url);
+  });
 }
 
 /**
@@ -66,78 +139,144 @@ function waitForLibs() {
 }
 
 // ===== Live2D Initialization =====
+/**
+ * Create the PixiJS application (once) and load the initial model.
+ * The model URL order is: persisted choice → built-in MODEL_URLS fallbacks.
+ */
 async function initLive2D() {
   try {
-    const PIXI = window.PIXI;
-    const { Live2DModel } = PIXI.live2d;
-
-    // Create PixiJS application
-    pixiApp = new PIXI.Application({
-      width: 300,
-      height: 380,
-      backgroundAlpha: 0,
-      antialias: true,
-      autoStart: true,
-    });
-
-    const canvasContainer = document.getElementById('live2d-canvas');
-    canvasContainer.appendChild(pixiApp.view);
-
-    // Try loading model from multiple sources
-    for (const url of MODEL_URLS) {
-      try {
-        console.log('[Live2D] Trying model:', url);
-        live2dModel = await Live2DModel.from(url);
-        break;
-      } catch (err) {
-        console.warn('[Live2D] Failed to load from:', url, err.message);
-      }
-    }
-
-    if (!live2dModel) {
-      throw new Error('All model URLs failed');
-    }
-
-    // Scale and position the model
-    const scale = Math.min(
-      pixiApp.view.width / live2dModel.width,
-      pixiApp.view.height / live2dModel.height
-    ) * 0.9;
-
-    live2dModel.scale.set(scale);
-    live2dModel.anchor.set(0.5, 1);
-    live2dModel.x = pixiApp.view.width / 2;
-    live2dModel.y = pixiApp.view.height;
-
-    pixiApp.stage.addChild(live2dModel);
-
-    // Set up model interaction
-    live2dModel.interactive = true;
-    live2dModel.buttonMode = true;
-
-    // Tap to play random motion
-// Click interaction (nito model has no defined hit areas)
-    live2dModel.on('pointerdown', () => {
-      const motions = ['Tap', 'FlickUp', 'Shake'];
-      const random = motions[Math.floor(Math.random() * motions.length)];
-      live2dModel.motion(random);
-    });
-
-    // Override update for state-based parameter control
-    const originalUpdate = live2dModel.internalModel.update.bind(live2dModel.internalModel);
-    live2dModel.internalModel.update = function (dt) {
-      originalUpdate(dt);
-      applyStateParameters(this);
-    };
-
-    // Start with sleeping state
-    setPetState('sleeping');
-
-    console.log('[Live2D] Model loaded successfully');
+    initPixiApp();
+    await loadInitialModel();
   } catch (err) {
     console.error('[Live2D] Initialization failed:', err);
     live2dModel = null;
   }
+}
+
+/**
+ * Create the PixiJS application and attach its canvas to the DOM.
+ */
+function initPixiApp() {
+  if (pixiApp) return;
+  const PIXI = window.PIXI;
+  pixiApp = new PIXI.Application({
+    width: PIXI_WIDTH,
+    height: PIXI_HEIGHT,
+    backgroundAlpha: 0,
+    antialias: true,
+    autoStart: true,
+  });
+  const canvasContainer = document.getElementById('live2d-canvas');
+  canvasContainer.appendChild(pixiApp.view);
+}
+
+/**
+ * Try loading a model from a prioritized URL list, keeping the first that
+ * succeeds. Used for the initial load (persisted choice first, then fallbacks).
+ */
+async function loadInitialModel() {
+  const { Live2DModel } = window.PIXI.live2d;
+  // Build candidate list: persisted choice first, then built-in fallbacks,
+  // then any other catalog models — deduped, nulls filtered.
+  const candidates = [
+    currentModelUrl,
+    ...MODEL_URLS,
+    ...availableModels.map((m) => m.url),
+  ].filter(Boolean);
+  const seen = new Set();
+  for (const url of candidates) {
+    if (seen.has(url)) continue;
+    seen.add(url);
+    try {
+      console.log('[Live2D] Trying model:', url);
+      live2dModel = await Live2DModel.from(url);
+      currentModelUrl = url;
+      attachModel(live2dModel);
+      setPetState('sleeping');
+      console.log('[Live2D] Model loaded successfully:', url);
+      return;
+    } catch (err) {
+      console.warn('[Live2D] Failed to load from:', url, err.message);
+    }
+  }
+  live2dModel = null;
+}
+
+/**
+ * Scale, position, and wire up interaction/parameter hooks for a model.
+ */
+function attachModel(model) {
+  const scale = Math.min(
+    pixiApp.view.width / model.width,
+    pixiApp.view.height / model.height
+  ) * 0.9;
+
+  model.scale.set(scale);
+  model.anchor.set(0.5, 1);
+  model.x = pixiApp.view.width / 2;
+  model.y = pixiApp.view.height;
+
+  pixiApp.stage.addChild(model);
+
+  model.interactive = true;
+  model.buttonMode = true;
+
+  // Tap to play random motion (nito model has no defined hit areas)
+  model.on('pointerdown', () => {
+    const random = MOTION_NAMES[Math.floor(Math.random() * MOTION_NAMES.length)];
+    model.motion(random);
+  });
+
+  // Override update for state-based parameter control
+  const originalUpdate = model.internalModel.update.bind(model.internalModel);
+  model.internalModel.update = function (dt) {
+    originalUpdate(dt);
+    applyStateParameters(this);
+  };
+}
+
+/**
+ * Switch to a different Live2D model at runtime. Destroys the current model,
+ * loads the new one, persists the choice, and updates the menu.
+ */
+async function switchModel(url) {
+  if (!window.PIXI || !window.PIXI.live2d) return;
+  const { Live2DModel } = window.PIXI.live2d;
+
+  // Show immediate feedback so the user knows the click registered.
+  const stateText = document.getElementById('pet-state-text');
+  const prevText = stateText.textContent;
+  stateText.textContent = '⏳ 切换形象中...';
+
+  // Remove + destroy the current model (keep the PixiJS app for reuse)
+  if (live2dModel) {
+    pixiApp.stage.removeChild(live2dModel);
+    try {
+      live2dModel.destroy({ children: true, texture: true, baseTexture: true });
+    } catch (e) { /* ignore cleanup errors */ }
+    live2dModel = null;
+  }
+
+  try {
+    console.log('[Live2D] Switching to:', url);
+    live2dModel = await Live2DModel.from(url);
+    currentModelUrl = url;
+    attachModel(live2dModel);
+    setPetState(currentState);
+    updateModelMenuActive(url);
+    if (window.petAPI && window.petAPI.switchModel) {
+      window.petAPI.switchModel(url);
+    }
+    console.log('[Live2D] Switched successfully:', url);
+  } catch (err) {
+    console.error('[Live2D] Switch failed, falling back:', err.message);
+    // Restore the previous model if the new one failed to load
+    await loadInitialModel();
+    stateText.textContent = '❌ 形象加载失败，已回退';
+    setTimeout(() => { stateText.textContent = prevText; }, 2000);
+    return;
+  }
+  stateText.textContent = prevText;
 }
 
 /**
@@ -194,7 +333,6 @@ function setParam(coreModel, id, value) {
 
 // ===== Fallback Canvas Animation =====
 function initFallbackCanvas() {
-  usingFallback = true;
   const canvas = document.getElementById('fallback-canvas');
   canvas.style.display = 'block';
   const ctx = canvas.getContext('2d');
@@ -273,12 +411,7 @@ function initFallbackCanvas() {
 }
 
 function getStateColor(state) {
-  switch (state) {
-    case 'sleeping': return '#7b9eff';
-    case 'working': return '#ffc832';
-    case 'alert': return '#ff6666';
-    default: return '#7b9eff';
-  }
+  return STATE_COLORS[state] || STATE_COLORS.sleeping;
 }
 
 // ===== State Management =====
@@ -292,13 +425,12 @@ function setPetState(state) {
     try {
       switch (state) {
         case 'sleeping':
-          // Play idle motion
           live2dModel.motion('Idle');
           break;
         case 'working':
-          live2dModel.motion('Tap');
-          break;
         case 'alert':
+          // Both states use the Tap motion; visual differentiation comes from
+          // applyStateParameters (eye/mouth params) and the CSS shake on alert.
           live2dModel.motion('Tap');
           break;
       }
@@ -328,12 +460,7 @@ function updateStateUI(state) {
   stateText.classList.add(`state-${state}`);
   statusBar.classList.add(`state-${state}`);
 
-  const labels = {
-    sleeping: '💤 睡觉中',
-    working: '⚡ 忙碌中',
-    alert: '🔔 需要确认!',
-  };
-  stateText.textContent = labels[state] || state;
+  stateText.textContent = STATE_LABELS[state] || state;
 
   // Shake on alert
   if (state === 'alert') {
@@ -356,7 +483,7 @@ function startEffectsLoop() {
         spawnAlertBang();
         break;
     }
-  }, 2000);
+  }, EFFECT_INTERVAL_MS);
 }
 
 function clearEffects() {
@@ -388,7 +515,9 @@ function spawnSparkle() {
 
 function spawnAlertBang() {
   const overlay = document.getElementById('effect-overlay');
-  // Only add if not already present
+  // Guard against duplicate '!' icons if the interval fires again while
+  // alert state persists — the element is only removed by clearEffects() on
+  // state transition.
   if (overlay.querySelector('.alert-bang')) return;
   const bang = document.createElement('div');
   bang.className = 'alert-bang';
@@ -454,6 +583,8 @@ function setupIPC() {
 
   window.petAPI.onStateUpdate((snapshot) => {
     updateStatusBar(snapshot);
+    // Refresh the Hook 状态 hint with the latest last-event time.
+    updateHookStatusHint(hooksInstalled, snapshot);
     if (snapshot.overallState !== currentState) {
       setPetState(snapshot.overallState);
     }
@@ -484,8 +615,16 @@ function setupContextMenu() {
     e.stopPropagation();
     const rect = menuBtn.getBoundingClientRect();
     contextMenu.classList.remove('hidden');
-    contextMenu.style.left = (rect.right - 180) + 'px';
-    contextMenu.style.top = (rect.bottom + 4) + 'px';
+    // The ☰ button sits near the bottom of the 520px window, so open the menu
+    // UPWARD (its bottom aligns just above the button). This keeps the 退出
+    // item (last in the menu) visible right above the button instead of being
+    // clipped off the bottom of the window. Clamp so it never overflows the top.
+    const menuHeight = contextMenu.offsetHeight || 400;
+    const menuWidth = contextMenu.offsetWidth || 210;
+    const top = Math.max(2, rect.top - menuHeight - 4);
+    const left = Math.max(0, rect.right - menuWidth);
+    contextMenu.style.left = left + 'px';
+    contextMenu.style.top = top + 'px';
   });
 
   document.addEventListener('click', () => {
@@ -503,28 +642,63 @@ function setupContextMenu() {
       const result = await window.petAPI.installHooks();
       if (result.success) {
         showInstallResult(true, result);
+        checkHooksStatus(); // refresh the hint after install
       } else {
         showInstallResult(false, result);
       }
     }
   });
 
+  // Menu actions
+  document.getElementById('menu-install-hooks').addEventListener('click', async () => {
+    contextMenu.classList.add('hidden');
+    if (window.petAPI) {
+      const result = await window.petAPI.installHooks();
+      if (result.success) {
+        showInstallResult(true, result);
+        checkHooksStatus(); // refresh the hint after install
+      } else {
+        showInstallResult(false, result);
+      }
+    }
+  });
+
+  document.getElementById('menu-hook-status').addEventListener('click', async () => {
+    contextMenu.classList.add('hidden');
+    if (!window.petAPI) return;
+    const status = await window.petAPI.isHooksInstalled();
+    showHookStatusDialog(status);
+  });
+
+  // Test-state buttons: change the state through the normal setPetState path
+  // (which cascades into motion, UI, and effects) but DON'T emit to the main
+  // process StateManager — these are purely local visual overrides for dev.
   document.getElementById('menu-test-busy').addEventListener('click', () => {
     contextMenu.classList.add('hidden');
     setPetState('working');
-    updateStateUI('working');
   });
 
   document.getElementById('menu-test-alert').addEventListener('click', () => {
     contextMenu.classList.add('hidden');
     setPetState('alert');
-    updateStateUI('alert');
   });
 
   document.getElementById('menu-test-sleep').addEventListener('click', () => {
     contextMenu.classList.add('hidden');
     setPetState('sleeping');
-    updateStateUI('sleeping');
+  });
+
+  document.getElementById('menu-play-motion').addEventListener('click', () => {
+    contextMenu.classList.add('hidden');
+    if (live2dModel) {
+      const random = MOTION_NAMES[Math.floor(Math.random() * MOTION_NAMES.length)];
+      try {
+        live2dModel.motion(random);
+      } catch (e) {
+        // Motion name may not exist on this model — try 'Idle' as fallback
+        try { live2dModel.motion('Idle'); } catch (e2) { /* ignore */ }
+      }
+    }
   });
 
   document.getElementById('menu-quit').addEventListener('click', () => {
@@ -536,24 +710,90 @@ function setupContextMenu() {
 
 function showInstallResult(success, result) {
   const stateText = document.getElementById('pet-state-text');
-  const original = stateText.textContent;
   if (success) {
-    stateText.textContent = '✅ Hook 安装成功!';
+    // Step-by-step guide: files are written, but Trae IDE requires manual
+    // enablement via Settings → Hooks → 启用 button.
+    stateText.textContent = '✅ 已写入配置 → 请在 Trae 设置→Hooks 中启用';
+    stateText.title = [
+      'Hook 配置文件已写入，但 Trae IDE 需要在设置中启用后才会执行：',
+      '',
+      '1. Trae IDE 已打开 hooks.json（自动弹出）',
+      '2. 在 Trae IDE 中按 Ctrl+, 打开设置',
+      '3. 搜索 "Hooks" 进入 Hooks 设置页',
+      '4. 在"全局"标签下找到已配置的 Hooks，点击齿轮→启用',
+      '   （或点"创建"按钮让 IDE 自动识别已有配置）',
+      '5. 在弹出的安全警示面板中点"启用"',
+      '6. 开一个新的 AI 会话即可触发',
+    ].join('\n');
+    // Don't auto-reset; let the state-update replace it when events arrive.
   } else {
     stateText.textContent = '❌ Hook 安装失败';
+    setTimeout(() => { updateStateUI(currentState); }, 4000);
   }
-  setTimeout(() => {
-    stateText.textContent = original;
-  }, 3000);
 }
 
 async function checkHooksStatus() {
   if (!window.petAPI) return;
   const status = await window.petAPI.isHooksInstalled();
-  if (!status.installed) {
-    const stateText = document.getElementById('pet-state-text');
-    stateText.textContent = '⚠ 请安装 Hook 集成';
+  hooksInstalled = !!status.installed;
+  updateHookStatusHint(hooksInstalled, currentSnapshot);
+  const stateText = document.getElementById('pet-state-text');
+  if (!hooksInstalled) {
+    if (currentSnapshot.sessions.length === 0 && currentState === 'sleeping') {
+      stateText.textContent = '⚠ 请点☰→安装 Hook 集成';
+      stateText.title = '点右上角☰菜单 → 安装 Hook 集成';
+    }
+  } else if (currentSnapshot.sessions.length === 0 && currentState === 'sleeping') {
+    // Hooks installed but no events ever received → user needs to enable in IDE.
+    stateText.textContent = '⚠ 请在 Trae 设置→Hooks 中启用';
+    stateText.title = [
+      'Hook 配置文件已写入，但 Trae IDE 需要在设置中手动启用：',
+      '',
+      '1. 按 Ctrl+, 打开 Trae 设置',
+      '2. 搜索 "Hooks" 进入 Hooks 设置页',
+      '3. 全局标签下 → 点"创建"或齿轮图标→启用',
+      '4. 弹出安全警示面板 → 点"启用"',
+      '5. 开一个新的 AI 会话',
+    ].join('\n');
   }
+}
+
+/**
+ * Update the Hook 状态 hint in the menu with install state + last event time.
+ */
+function updateHookStatusHint(installed, snapshot) {
+  const hint = document.getElementById('hook-status-hint');
+  if (!hint) return;
+  const parts = [];
+  if (!installed) {
+    parts.push('未安装');
+  } else if (snapshot && snapshot.lastEventAt) {
+    const ago = Math.max(0, Math.floor((Date.now() - snapshot.lastEventAt) / 1000));
+    parts.push('已连接');
+    parts.push(ago < 60 ? `${ago}s前` : `${Math.floor(ago / 60)}m前`);
+  } else {
+    parts.push('需在IDE启用');
+  }
+  hint.textContent = parts.join(' · ');
+}
+
+/**
+ * Show a transient dialog with detailed Hook diagnostic info.
+ */
+function showHookStatusDialog(status) {
+  const stateText = document.getElementById('pet-state-text');
+  const original = stateText.textContent;
+  const lines = [
+    `Hook 配置: ${status.installed ? '已安装' : '未安装'}`,
+    `bridge 脚本: ${status.bridgeExists ? '存在' : '缺失'}`,
+    `hooks.json: ${status.hooksExist ? '存在' : '缺失'}`,
+  ];
+  stateText.textContent = status.installed ? '✅ Hook 已安装' : '⚠ Hook 未安装';
+  stateText.title = lines.join('\n') + '\n\n若 IDE 不显示：设置→Hooks 启用 → 开新 AI 会话';
+  setTimeout(() => {
+    stateText.textContent = original;
+    stateText.title = '';
+  }, 4000);
 }
 
 // ===== Drag Setup =====
@@ -562,7 +802,6 @@ function setupDrag() {
   let isDragging = false;
   let lastX = 0;
   let lastY = 0;
-  let dragStartTime = 0;
   let hasMoved = false;
 
   wrapper.addEventListener('mousedown', (e) => {
@@ -571,7 +810,6 @@ function setupDrag() {
     hasMoved = false;
     lastX = e.screenX;
     lastY = e.screenY;
-    dragStartTime = Date.now();
   });
 
   document.addEventListener('mousemove', (e) => {
@@ -601,9 +839,16 @@ function setupDrag() {
     hasMoved = false;
     lastX = e.screenX;
     lastY = e.screenY;
-    dragStartTime = Date.now();
   });
 }
 
 // ===== Start =====
+// Surface uncaught renderer errors to the main-process log for diagnostics.
+window.addEventListener('error', (e) => {
+  console.error('[uncaught]', e.message, e.filename + ':' + e.lineno);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  console.error('[unhandled rejection]', e.reason && e.reason.message ? e.reason.message : e.reason);
+});
+
 init();

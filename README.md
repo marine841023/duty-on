@@ -58,7 +58,7 @@
 ### 1. 安装依赖
 
 ```bash
-cd trae-pet
+cd traeSprite
 npm install
 ```
 
@@ -88,6 +88,29 @@ npm start
 
 ### 4. 测试
 
+#### 单元测试
+
+状态机核心逻辑由 Jest 单元测试覆盖（事件→状态映射、多会话优先级、超时清理、提醒重复、脏检查）：
+
+```bash
+npm test          # 运行一次
+npm run test:watch # 监听模式
+```
+
+#### 端到端回归脚本
+
+需先启动精灵（`npm start`），再在另一个终端运行：
+
+```powershell
+# 5 步状态流转回归：sleeping → working → alert → sleeping → 清理
+.\.userdata\test-flow.ps1
+
+# Notification 白名单分类：task_complete→idle、模糊→idle、tool_name→alert
+.\.userdata\test-notification.ps1
+```
+
+#### 手动测试
+
 在精灵菜单中可以选择"测试: 忙碌/提醒/睡觉状态"来预览三种动画效果。
 
 也可以手动发送测试事件：
@@ -97,8 +120,12 @@ npm start
 $body = '{"session_id":"test-1","hook_event_name":"UserPromptSubmit","project_path":"C:\test-project","project_name":"test-project"}'
 Invoke-RestMethod -Uri 'http://127.0.0.1:17521/hook' -Method Post -Body $body -ContentType 'application/json'
 
-# 测试提醒状态
+# 测试提醒状态（带 tool_name 视为需确认 → alert）
 $body = '{"session_id":"test-1","hook_event_name":"Notification","project_path":"C:\test-project","project_name":"test-project","tool_name":"RunCommand"}'
+Invoke-RestMethod -Uri 'http://127.0.0.1:17521/hook' -Method Post -Body $body -ContentType 'application/json'
+
+# 测试任务完成通知（notification_type=task_complete → idle，不触发提醒）
+$body = '{"session_id":"test-1","hook_event_name":"Notification","project_path":"C:\test-project","project_name":"test-project","notification_type":"task_complete"}'
 Invoke-RestMethod -Uri 'http://127.0.0.1:17521/hook' -Method Post -Body $body -ContentType 'application/json'
 
 # 测试空闲状态
@@ -109,13 +136,18 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:17521/hook' -Method Post -Body $body -C
 ## 项目结构
 
 ```
-trae-pet/
-├── package.json                    # 项目配置
+traeSprite/
+├── package.json                    # 项目配置 (含 jest 测试脚本)
+├── jest.config.js                  # Jest 测试配置
 ├── src/
 │   ├── main/
 │   │   ├── index.js                # Electron 主进程 (窗口 + IPC + Hook安装)
 │   │   ├── server.js               # HTTP 服务器 (接收Hook事件)
-│   │   └── state-manager.js        # 状态管理器 (多会话追踪)
+│   │   ├── state-manager.js        # 状态管理器 (多会话追踪)
+│   │   ├── config.js               # 主进程集中配置 (端口/超时/白名单)
+│   │   ├── preload.js              # 预加载脚本 (IPC 桥接)
+│   │   └── __tests__/
+│   │       └── state-manager.test.js  # StateManager 单元测试
 │   └── renderer/
 │       ├── index.html              # 渲染进程 HTML
 │       ├── renderer.js             # Live2D渲染 + 状态动画 + UI
@@ -126,14 +158,18 @@ trae-pet/
 │   └── install-hooks.ps1           # 独立安装脚本
 ├── scripts/
 │   └── download-assets.js          # 下载 Cubism Core SDK
-└── assets/
-    ├── libs/                       # 第三方库 (Cubism Core)
-    └── live2d/                     # Live2D 模型文件
+├── assets/
+│   ├── libs/                       # 第三方库 (Cubism Core)
+│   └── live2d/                     # Live2D 模型文件
+└── .userdata/                      # 端到端测试脚本与事件 fixture
+    ├── test-flow.ps1               # 5 步状态流转回归脚本
+    ├── test-notification.ps1       # Notification 白名单分类测试
+    └── ev-*.json                   # 测试用 Hook 事件样本
 ```
 
 ## 自定义 Live2D 模型
 
-默认从 CDN 加载 Hiyori 模型。要使用自定义模型：
+默认优先加载本地 `nito` 模型（`assets/live2d/nito.model3.json`），若本地缺失则回退到 CDN 的 Hiyori 模型。要使用自定义模型：
 
 1. 将 Live2D 模型文件放入 `assets/live2d/` 目录
 2. 确保 `.model3.json` 文件存在
@@ -175,6 +211,9 @@ A: 确保重启了 Trae IDE 或开启了新的 AI 会话。检查 `~/.trae-cn/ho
 
 **Q: 精灵一直显示睡觉？**
 A: 确认精灵正在运行（检查 `http://127.0.0.1:17521/health`），并确认 Hook 已正确安装。
+
+**Q: AI 任务完成了，精灵却显示"需要确认"？**
+A: Notification 事件若没有可识别的完成/确认特征（`notification_type`、`tool_name`、关键词），会被当作模糊事件处理。默认按"任务完成"处理（不提醒）；若你希望模糊事件也触发提醒，可在 `src/main/config.js` 中将 `ALERT_ON_AMBIGUOUS_NOTIFICATION` 设为 `true`。完成类与确认类的白名单同样在该文件中调整。
 
 **Q: 多个 IDE 同时工作，状态栏显示不全？**
 A: 状态栏支持滚动，最多显示约 5 个项目。超出部分可滚动查看。

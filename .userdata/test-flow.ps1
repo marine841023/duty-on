@@ -1,3 +1,18 @@
+<#
+.SYNOPSIS
+    End-to-end regression for the 5-step session lifecycle.
+.DESCRIPTION
+    Drives the HTTP server (127.0.0.1:17521) through:
+      1. SessionStart   -> idle      (overall: sleeping)
+      2. UserPromptSubmit -> working  (overall: working)
+      3. Notification+tool_name -> confirmation-needed (overall: alert)
+      4. Stop           -> idle      (overall: sleeping)
+      5. unregister     -> cleanup
+.NOTES
+    Prerequisites: the pet app must already be running (`npm start` in another
+    terminal). Run from the project root:
+        .\.userdata\test-flow.ps1
+#>
 $base = 'http://127.0.0.1:17521'
 function Send-Hook($file) {
     $body = Get-Content -Raw $file

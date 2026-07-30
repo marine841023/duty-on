@@ -38,6 +38,61 @@ function getAssetsDir() {
   return path.join(__dirname, '..', '..', 'assets');
 }
 
+/**
+ * Scan assets/live2d/ for available Live2D models (*.model3.json).
+ * Returns [{ name, url }] where url is a renderer-relative path.
+ */
+function scanModels() {
+  const fs = require('fs');
+  const live2dDir = path.join(getAssetsDir(), 'live2d');
+  const models = [];
+  try {
+    const entries = fs.readdirSync(live2dDir);
+    for (const entry of entries) {
+      if (entry.endsWith('.model3.json')) {
+        const name = entry.replace(/\.model3\.json$/, '');
+        models.push({ name, url: `../../assets/live2d/${entry}` });
+      }
+    }
+  } catch (e) {
+    console.error('[models] Failed to scan live2d dir:', e.message);
+  }
+  return models;
+}
+
+/**
+ * Load persisted user preferences from ~/.trae-pet/config.json.
+ */
+function loadUserConfig() {
+  const fs = require('fs');
+  const os = require('os');
+  const configPath = path.join(os.homedir(), '.trae-pet', 'config.json');
+  try {
+    if (fs.existsSync(configPath)) {
+      return JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    }
+  } catch (e) {
+    console.error('[config] Failed to read user config:', e.message);
+  }
+  return {};
+}
+
+/**
+ * Persist user preferences to ~/.trae-pet/config.json.
+ */
+function saveUserConfig(userCfg) {
+  const fs = require('fs');
+  const os = require('os');
+  const configDir = path.join(os.homedir(), '.trae-pet');
+  const configPath = path.join(configDir, 'config.json');
+  try {
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(userCfg, null, 2), 'utf-8');
+  } catch (e) {
+    console.error('[config] Failed to save user config:', e.message);
+  }
+}
+
 // Single instance lock - prevent multiple pet instances
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
@@ -78,6 +133,14 @@ function createMainWindow() {
 
   // Set always-on-top level to screen-saver (highest, above normal windows)
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
+
+  // Forward renderer console messages to main-process stdout for diagnostics.
+  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    console.log(`[renderer] ${message}`);
+  });
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    console.error('[renderer] process gone:', JSON.stringify(details));
+  });
 
   // Load renderer
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
@@ -185,16 +248,26 @@ ipcMain.on('quit', () => {
   app.quit();
 });
 
+let _flashTimeout = null;
+
 ipcMain.on('flash-attention', () => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   // skipTaskbar:true makes flashFrame invisible on Windows, so also surface the
   // window and pulse opacity as a reliable visible attention signal.
   mainWindow.flashFrame(true);
   mainWindow.showInactive();
+
+  // Cancel any in-progress flash so rapid alerts don't stack timers that
+  // restore opacity to an intermediate (wrong) value.
+  if (_flashTimeout) clearTimeout(_flashTimeout);
+
   const origOpacity = mainWindow.getOpacity();
   mainWindow.setOpacity(0.4);
-  setTimeout(() => {
-    if (!mainWindow.isDestroyed()) mainWindow.setOpacity(origOpacity);
+  _flashTimeout = setTimeout(() => {
+    _flashTimeout = null;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setOpacity(origOpacity);
+    }
   }, 200);
 });
 
@@ -204,6 +277,20 @@ ipcMain.handle('install-hooks', async () => {
 
 ipcMain.handle('is-hooks-installed', async () => {
   return await checkHooksInstalled();
+});
+
+// Return available Live2D models and the persisted current choice.
+ipcMain.handle('get-models', () => {
+  const models = scanModels();
+  const userCfg = loadUserConfig();
+  return { models, currentModelUrl: userCfg.modelUrl || null };
+});
+
+// Persist the user's model choice (~/.trae-pet/config.json).
+ipcMain.on('switch-model', (_, modelUrl) => {
+  const userCfg = loadUserConfig();
+  userCfg.modelUrl = modelUrl;
+  saveUserConfig(userCfg);
 });
 
 /**
@@ -270,6 +357,10 @@ async function installHooks() {
   if (!existingHooks.version) existingHooks.version = 1;
   if (!existingHooks.hooks) existingHooks.hooks = {};
 
+  // Set execution environment to "local" (outside sandbox) so the bridge
+  // script can access 127.0.0.1:17521 and write log files.
+  existingHooks.exec_env = 'local';
+
   for (const [eventName, hookGroups] of Object.entries(traePetHooks)) {
     if (!existingHooks.hooks[eventName]) {
       existingHooks.hooks[eventName] = [];
@@ -284,7 +375,17 @@ async function installHooks() {
 
   fs.writeFileSync(traeHooksPath, JSON.stringify(existingHooks, null, 2), 'utf-8');
 
-  return { success: true, hookDir: targetHookDir, hooksPath: traeHooksPath };
+  // Auto-open hooks.json in the default editor (which should be Trae IDE if
+  // it's the currently open editor for .json files). This causes Trae to detect
+  // the new/changed hooks.json and prompt the user to enable it via the
+  // security warning panel. If Trae doesn't open it, the user can manually
+  // navigate to Settings → Hooks.
+  const { shell } = require('electron');
+  setTimeout(() => {
+    shell.openPath(traeHooksPath).catch(() => { /* ignore open errors */ });
+  }, 500);
+
+  return { success: true, hookDir: targetHookDir, hooksPath: traeHooksPath, needsEnable: true };
 }
 
 /**

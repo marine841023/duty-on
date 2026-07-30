@@ -13,8 +13,9 @@ const { PORT, HOST } = require('./config');
 
 function createServer(stateManager) {
   const server = http.createServer((req, res) => {
-    // CORS headers (allow localhost connections)
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // CORS: restrict to loopback only (the bridge script runs locally).
+    // A wildcard would allow any web page to POST fake hook events.
+    res.setHeader('Access-Control-Allow-Origin', `http://${HOST}:${PORT}`);
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
@@ -31,8 +32,12 @@ function createServer(stateManager) {
       req.on('end', () => {
         try {
           const event = JSON.parse(body);
-          // Diagnostic: log Notification payloads so real Trae events can be
-          // inspected to tune config.NOTIFICATION_*_TYPES. Remove once tuned.
+          // Diagnostic: log every incoming event so we can confirm Trae IDE
+          // hooks are firing. Concise form keeps the log readable.
+          console.log(
+            `[PetServer] event: ${event.hook_event_name} | session=${event.session_id} | project=${event.project_name || event.cwd || '?'}`
+          );
+          // Detailed Notification payload for tuning config.NOTIFICATION_*_TYPES.
           if (event.hook_event_name === 'Notification') {
             console.log('[PetServer] Notification payload:', JSON.stringify(event));
           }

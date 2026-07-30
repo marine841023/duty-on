@@ -7,37 +7,56 @@
     and sends it to the Trae Pet's local HTTP server (http://127.0.0.1:17521/hook).
     The script is designed to be fast and non-blocking - if the pet is not running,
     it exits silently without affecting the AI's workflow.
+
+    Diagnostic log is written to ~/.trae-pet/hooks/bridge.log so we can confirm
+    whether Trae IDE is actually invoking the hook.
 #>
 
 $ErrorActionPreference = 'SilentlyContinue'
 
+# --- Diagnostic logging (never breaks the hook on failure) ---
+function Write-BridgeLog($msg) {
+  try {
+    $logDir = Join-Path $env:USERPROFILE '.trae-pet\hooks'
+    $logPath = Join-Path $logDir 'bridge.log'
+    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+    $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    Add-Content -Path $logPath -Value "[$ts] $msg" -Encoding UTF8
+  } catch { }
+}
+
+Write-BridgeLog "INVOKED pid=$PID"
+
 # Read JSON from stdin
 $stdinText = [Console]::In.ReadToEnd()
+Write-BridgeLog "stdin: $stdinText"
 
 if ([string]::IsNullOrWhiteSpace($stdinText)) {
-    # No input, nothing to do
-    exit 0
+  Write-BridgeLog "empty stdin, exit"
+  exit 0
 }
 
 try {
-    $event = $stdinText | ConvertFrom-Json
+  $event = $stdinText | ConvertFrom-Json
 } catch {
-    # Invalid JSON, exit silently
-    exit 0
+  Write-BridgeLog "JSON parse failed: $_"
+  exit 0
 }
+
+Write-BridgeLog "event=$($event.hook_event_name) session=$($event.session_id)"
 
 # Get project information from environment
 $projectDir = $env:TRAE_PROJECT_DIR
 if ([string]::IsNullOrEmpty($projectDir)) {
-    $projectDir = $env:CLAUDE_PROJECT_DIR
+  $projectDir = $env:CLAUDE_PROJECT_DIR
 }
 if ([string]::IsNullOrEmpty($projectDir)) {
-    $projectDir = $event.cwd
+  $projectDir = $event.cwd
 }
 
 $projectName = ''
 if (-not [string]::IsNullOrEmpty($projectDir)) {
-    $projectName = Split-Path $projectDir -Leaf
+  $projectName = Split-Path $projectDir -Leaf
 }
 
 # Enrich the event with project info
@@ -52,15 +71,17 @@ $bodyJson = $event | ConvertTo-Json -Depth 10 -Compress
 
 # Send to Trae Pet's HTTP server (with short timeout to avoid blocking AI)
 try {
-    $response = Invoke-RestMethod -Uri 'http://127.0.0.1:17521/hook' `
-        -Method Post `
-        -Body $bodyJson `
-        -ContentType 'application/json' `
-        -TimeoutSec 2 `
-        -ErrorAction Stop
+  $response = Invoke-RestMethod -Uri 'http://127.0.0.1:17521/hook' `
+    -Method Post `
+    -Body $bodyJson `
+    -ContentType 'application/json' `
+    -TimeoutSec 2 `
+    -ErrorAction Stop
+  Write-BridgeLog "POST ok"
 } catch {
-    # Pet not running or error - exit silently, don't affect AI workflow
-    exit 0
+  Write-BridgeLog "POST failed: $($_.Exception.Message)"
+  # Pet not running or error - exit silently, don't affect AI workflow
+  exit 0
 }
 
 # Exit successfully with no stdout output (to not interfere with AI)

@@ -44,7 +44,16 @@ if (Test-Path $traeHooksPath) {
 if ($null -eq $existingHooks) {
     $existingHooks = [PSCustomObject]@{
         version = 1
+        exec_env = 'local'
         hooks = [PSCustomObject]@{}
+    }
+} else {
+    # Ensure exec_env is set to "local" (outside sandbox) so the bridge
+    # script can access 127.0.0.1:17521 and write log files.
+    if ($existingHooks.PSObject.Properties['exec_env']) {
+        $existingHooks.exec_env = 'local'
+    } else {
+        $existingHooks | Add-Member -NotePropertyName 'exec_env' -NotePropertyValue 'local'
     }
 }
 
