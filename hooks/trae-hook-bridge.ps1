@@ -46,7 +46,12 @@ try {
 Write-BridgeLog "event=$($event.hook_event_name) session=$($event.session_id)"
 
 # Get project information from environment
+# QODER_PROJECT_DIR is set when invoked by Qoder's hook runner; TRAE_PROJECT_DIR
+# / CLAUDE_PROJECT_DIR when invoked by Trae IDE. Fall back to the event's cwd.
 $projectDir = $env:TRAE_PROJECT_DIR
+if ([string]::IsNullOrEmpty($projectDir)) {
+  $projectDir = $env:QODER_PROJECT_DIR
+}
 if ([string]::IsNullOrEmpty($projectDir)) {
   $projectDir = $env:CLAUDE_PROJECT_DIR
 }

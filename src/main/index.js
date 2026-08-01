@@ -10,6 +10,7 @@ const { app, BrowserWindow, ipcMain, screen } = require('electron');
 const path = require('path');
 const { StateManager } = require('./state-manager');
 const { createServer } = require('./server');
+const { initUpdater } = require('./updater');
 const config = require('./config');
 
 // Global references (prevent GC)
@@ -107,14 +108,39 @@ app.on('second-instance', () => {
   }
 });
 
+/**
+ * Check whether a window at (x,y) with size (w,h) is visible on any display.
+ * Guards against restoring an off-screen position when monitors change.
+ */
+function isPositionOnScreen(x, y, w, h) {
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  for (const d of screen.getAllDisplays()) {
+    const b = d.bounds;
+    if (cx >= b.x && cx <= b.x + b.width && cy >= b.y && cy <= b.y + b.height) return true;
+  }
+  return false;
+}
+
 function createMainWindow() {
   const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
+
+  // Default to bottom-right; restore the last saved position if it's still on
+  // a visible screen (handles monitor layout changes between runs).
+  const userCfg = loadUserConfig();
+  let x = screenWidth - config.WINDOW_WIDTH - config.WINDOW_MARGIN;
+  let y = screenHeight - config.WINDOW_HEIGHT - config.WINDOW_MARGIN;
+  if (userCfg.windowPosition
+      && isPositionOnScreen(userCfg.windowPosition.x, userCfg.windowPosition.y, config.WINDOW_WIDTH, config.WINDOW_HEIGHT)) {
+    x = userCfg.windowPosition.x;
+    y = userCfg.windowPosition.y;
+  }
 
   mainWindow = new BrowserWindow({
     width: config.WINDOW_WIDTH,
     height: config.WINDOW_HEIGHT,
-    x: screenWidth - config.WINDOW_WIDTH - config.WINDOW_MARGIN,   // Bottom-right corner
-    y: screenHeight - config.WINDOW_HEIGHT - config.WINDOW_MARGIN,
+    x,
+    y,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
@@ -154,7 +180,93 @@ function createMainWindow() {
     mainWindow = null;
   });
 
+  // Persist window position on move (debounced) so it restores on next launch.
+  let moveTimer = null;
+  mainWindow.on('move', () => {
+    if (moveTimer) clearTimeout(moveTimer);
+    moveTimer = setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      const [px, py] = mainWindow.getPosition();
+      const cfg = loadUserConfig();
+      cfg.windowPosition = { x: px, y: py };
+      saveUserConfig(cfg);
+    }, 500);
+  });
+
   return mainWindow;
+}
+
+/**
+ * Periodically scan for open Trae IDE windows and register idle sessions for
+ * their projects. This detects newly opened IDEs before any AI activity starts
+ * — Trae IDE's SessionStart hook only fires when an AI agent session begins,
+ * not when an IDE window opens, so without scanning a new IDE is invisible to
+ * the pet until the user runs an AI task.
+ */
+/**
+ * Periodically scan for open Trae IDE windows and register idle sessions.
+ *
+ * Adaptive interval: 4s when sessions exist (detect window close quickly),
+ * 15s when no sessions (user probably has no IDE open, save CPU). Uses
+ * setTimeout recursion instead of setInterval so a slow PowerShell run can't
+ * overlap with the next tick.
+ */
+function startIdeScanner() {
+  const { execFile } = require('child_process');
+  // Enumerate ALL visible top-level windows via Win32 EnumWindows (not
+  // Get-Process.MainWindowTitle, which only returns ONE title per process —
+  // the foreground window — so a second IDE window was invisible to the
+  // scanner). Trae CN window titles look like:
+  //   "<active-file> - <project-folder> - Trae CN"
+  // The "* - Trae CN" suffix filters out non-IDE windows (Trae Pet itself,
+  // File Explorer, etc.) and the project is the second-to-last segment.
+  const psScript = `
+    if (-not ('WindowEnum' -as [type])) { Add-Type @"
+using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+public class WindowEnum {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+  [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern int GetWindowTextLength(IntPtr hWnd);
+  public static List<string> GetVisibleTitles() {
+    var titles = new List<string>();
+    EnumWindows((hWnd, lParam) => { if (IsWindowVisible(hWnd)) { int len = GetWindowTextLength(hWnd); if (len > 0) { var sb = new StringBuilder(len + 1); GetWindowText(hWnd, sb, sb.Capacity); titles.Add(sb.ToString()); } } return true; }, IntPtr.Zero);
+    return titles;
+  }
+}
+"@
+    }
+    [WindowEnum]::GetVisibleTitles() | Where-Object { $_ -like '* - Trae CN' } | ForEach-Object {
+      $parts = $_ -split ' - '
+      if ($parts.Count -ge 2) { $parts[-2] }
+    }
+  `;
+  let scanTimer = null;
+
+  const scan = () => {
+    if (!stateManager) { scheduleNext(4000); return; }
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psScript], { timeout: 5000 }, (err, stdout) => {
+      if (err || !stdout) {
+        scheduleNext(4000);
+        return;
+      }
+      // Filter empty/generic titles, dedupe.
+      const names = [...new Set(
+        stdout.split('\n').map((s) => s.trim()).filter((s) => s && s !== 'Trae' && s !== 'Trae CN')
+      )];
+      stateManager.syncDetectedWindows(names.map((projectName) => ({ projectName })));
+      // Adaptive: 4s when IDEs are open (need fast close detection), 15s when idle.
+      scheduleNext(stateManager.sessions.size > 0 ? 4000 : 15000);
+    });
+  };
+
+  const scheduleNext = (delay) => {
+    if (scanTimer) clearTimeout(scanTimer);
+    scanTimer = setTimeout(scan, delay);
+  };
+
+  scan(); // run once immediately so an already-open IDE shows up right away
 }
 
 app.whenReady().then(() => {
@@ -180,6 +292,13 @@ app.whenReady().then(() => {
 
   // Create window
   createMainWindow();
+
+  // Start the IDE window scanner (detects new IDEs without AI activity).
+  startIdeScanner();
+
+  // Initialize auto-update (electron-updater). Wires up IPC handlers and
+  // forwards update events to the renderer.
+  initUpdater(mainWindow);
 });
 
 // IPC Handlers
@@ -207,12 +326,14 @@ ipcMain.on('bring-to-front', async (_, projectPath) => {
   // test[1] cannot break parsing or inject commands.
   const psScript = `
     $name = $env:TRAE_PET_FOCUS_NAME
-    $windows = Get-Process | Where-Object { $_.ProcessName -eq 'Trae' -and $_.MainWindowTitle -ne '' }
+    $windows = Get-Process | Where-Object { $_.ProcessName -like 'Trae*' -and $_.MainWindowTitle -ne '' }
     if (-not $windows) { exit 0 }
     $target = $null
-    # 1. Exact match on the leading folder segment of the title (literal -eq).
+    # 1. Exact match on the project segment (second-to-last " - " segment) of
+    #    the title. Title format: "<active-file> - <project> - Trae CN".
     foreach ($w in $windows) {
-      $folder = ($w.MainWindowTitle -split ' - ')[0]
+      $parts = $w.MainWindowTitle -split ' - '
+      $folder = if ($parts.Count -ge 2) { $parts[-2] } else { $parts[0] }
       if ($folder -eq $name) { $target = $w; break }
     }
     # 2. Fallback: case-insensitive literal substring match.
@@ -245,6 +366,37 @@ ipcMain.on('bring-to-front', async (_, projectPath) => {
 });
 
 ipcMain.on('quit', () => {
+  app.quit();
+});
+
+// Uninstall: launch the NSIS uninstaller (generated by electron-builder in the
+// install directory) as a detached process, then quit. In dev mode, just quit.
+// The uninstaller's customUnInstall macro (installer.nsh) kills any running
+// TraePet instance so file locks don't block removal.
+ipcMain.on('uninstall-app', () => {
+  if (!app.isPackaged) {
+    app.quit();
+    return;
+  }
+  const fs = require('fs');
+  const { spawn } = require('child_process');
+  const installDir = path.dirname(process.execPath);
+  // electron-builder NSIS generates "Uninstall <productName>.exe" in the
+  // install dir. Glob for it so we don't hardcode the exact name.
+  let uninstallerPath = null;
+  try {
+    const files = fs.readdirSync(installDir);
+    const name = files.find((f) => /^uninstall.*\.exe$/i.test(f));
+    if (name) uninstallerPath = path.join(installDir, name);
+  } catch (e) {
+    console.error('[uninstall] Failed to find uninstaller:', e.message);
+  }
+  if (uninstallerPath) {
+    spawn(uninstallerPath, [], { detached: true, stdio: 'ignore' }).unref();
+  } else {
+    // Fallback: open Windows Apps & Features so the user can uninstall there.
+    spawn('cmd', ['/c', 'start', 'ms-settings:appsfeatures'], { detached: true, stdio: 'ignore' }).unref();
+  }
   app.quit();
 });
 
@@ -291,6 +443,76 @@ ipcMain.on('switch-model', (_, modelUrl) => {
   const userCfg = loadUserConfig();
   userCfg.modelUrl = modelUrl;
   saveUserConfig(userCfg);
+});
+
+// Return persisted per-state motion assignments (sleeping/working/alert).
+ipcMain.handle('get-state-motions', () => {
+  const userCfg = loadUserConfig();
+  return userCfg.stateMotions || {};
+});
+
+// Persist per-state motion assignments.
+ipcMain.on('set-state-motions', (_, motions) => {
+  const userCfg = loadUserConfig();
+  userCfg.stateMotions = motions;
+  saveUserConfig(userCfg);
+});
+
+// Return persisted appearance settings (horizontal flip, etc.).
+ipcMain.handle('get-appearance', () => {
+  const userCfg = loadUserConfig();
+  return { flipHorizontal: !!userCfg.flipHorizontal };
+});
+
+// Persist the horizontal-flip toggle.
+ipcMain.on('set-flip-horizontal', (_, enabled) => {
+  const userCfg = loadUserConfig();
+  userCfg.flipHorizontal = !!enabled;
+  saveUserConfig(userCfg);
+});
+
+// Return the persisted UI language; falls back to the OS locale (via
+// app.getLocale()) on first launch so the pet starts in the user's language.
+ipcMain.handle('get-language', () => {
+  const userCfg = loadUserConfig();
+  if (userCfg.language) return userCfg.language;
+  return app.getLocale() || 'en';
+});
+
+// Persist the user's language choice (~/.trae-pet/config.json).
+ipcMain.on('set-language', (_, lang) => {
+  const userCfg = loadUserConfig();
+  userCfg.language = lang;
+  saveUserConfig(userCfg);
+});
+
+// ===== Auto-launch (start on boot) =====
+// Reads/writes the Windows Run registry key via Electron's cross-platform API.
+// The NSIS installer also writes this key if the user opts in during install.
+ipcMain.handle('get-auto-launch', () => {
+  return app.getLoginItemSettings().openAtLogin;
+});
+
+ipcMain.on('set-auto-launch', (_, enabled) => {
+  app.setLoginItemSettings({ openAtLogin: !!enabled });
+});
+
+// Demo: inject a fake confirmation-needed session so the user can preview the
+// alert state (motion + UI). Auto-cleared after 8 seconds.
+ipcMain.on('test-alert', () => {
+  if (!stateManager) return;
+  const testSessionId = '__trae-pet-test-alert__';
+  stateManager.handleHookEvent({
+    session_id: testSessionId,
+    hook_event_name: 'Notification',
+    project_path: '',
+    project_name: '预览提醒',
+    notification_type: 'permission_request',
+    message: '预览提醒效果',
+  });
+  setTimeout(() => {
+    if (stateManager) stateManager.removeSession(testSessionId);
+  }, 8000);
 });
 
 /**
@@ -357,10 +579,8 @@ async function installHooks() {
   if (!existingHooks.version) existingHooks.version = 1;
   if (!existingHooks.hooks) existingHooks.hooks = {};
 
-  // Set execution environment to "local" (outside sandbox) so the bridge
-  // script can access 127.0.0.1:17521 and write log files.
-  existingHooks.exec_env = 'local';
-
+  // NOTE: exec_env is NOT a valid hooks.json field. The execution mode
+  // (sandbox vs local) is set in Trae IDE's Settings -> Hooks -> 运行方式.
   for (const [eventName, hookGroups] of Object.entries(traePetHooks)) {
     if (!existingHooks.hooks[eventName]) {
       existingHooks.hooks[eventName] = [];
@@ -434,6 +654,13 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   if (stateManager) stateManager.stop();
   if (httpServer) httpServer.close();
+  // Persist the final window position so it restores on next launch.
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const [px, py] = mainWindow.getPosition();
+    const cfg = loadUserConfig();
+    cfg.windowPosition = { x: px, y: py };
+    saveUserConfig(cfg);
+  }
 });
 
 } // end of single-instance lock block

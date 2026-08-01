@@ -264,8 +264,8 @@ describe('E. dirty check', () => {
 describe('F. config', () => {
   it('exposes expected port and timeouts', () => {
     expect(config.PORT).toBe(17521);
-    expect(config.WORKING_TIMEOUT).toBe(5 * 60 * 1000);
-    expect(config.SESSION_TIMEOUT).toBe(30 * 60 * 1000);
+    expect(config.WORKING_TIMEOUT).toBe(3 * 60 * 1000);
+    expect(config.SESSION_TIMEOUT).toBe(10 * 60 * 1000);
     expect(config.ALERT_REMINDER).toBe(60 * 1000);
   });
 

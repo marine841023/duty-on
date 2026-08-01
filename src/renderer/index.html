@@ -16,15 +16,18 @@
     <div id="canvas-wrapper">
       <div id="live2d-canvas"></div>
       <!-- Fallback canvas (shown if Live2D fails to load) -->
-      <canvas id="fallback-canvas" width="280" height="380" style="display:none;"></canvas>
-      <!-- Effect overlay (ZZZ, !, etc.) -->
+      <canvas id="fallback-canvas" width="280" height="320" style="display:none;"></canvas>
+      <!-- Effect overlay (legacy, kept for future full-body effects) -->
       <div id="effect-overlay"></div>
+      <!-- Head-top effects (ZZZ / working dots / !) anchored to the model's
+           bounds top-center, shifted 40px down. Capped at 40px tall. -->
+      <div id="head-effect" class="head-effect"></div>
     </div>
 
     <!-- Status bar -->
     <div id="status-bar">
       <div id="status-header">
-        <span id="pet-state-text">初始化中...</span>
+        <span id="pet-state-text" data-i18n="status.initializing">初始化中...</span>
         <button id="menu-btn" title="菜单">&#9776;</button>
       </div>
       <div id="project-list">
@@ -33,21 +36,80 @@
     </div>
   </div>
 
-  <!-- Context menu -->
+  <!-- Context menu (main view + secondary submenus) -->
   <div id="context-menu" class="hidden">
-    <div class="menu-label">切换形象</div>
-    <div id="model-list"><!-- model items populated dynamically --></div>
-    <div class="menu-divider"></div>
-    <div class="menu-item" id="menu-install-hooks">安装 Hook 集成</div>
-    <div class="menu-item" id="menu-hook-status">Hook 状态<span class="menu-hint" id="hook-status-hint">未检查</span></div>
-    <div class="menu-divider"></div>
-    <div class="menu-item" id="menu-test-busy">测试: 忙碌状态</div>
-    <div class="menu-item" id="menu-test-alert">测试: 提醒状态</div>
-    <div class="menu-item" id="menu-test-sleep">测试: 睡觉状态</div>
-    <div class="menu-divider"></div>
-    <div class="menu-item" id="menu-play-motion">切换动作</div>
-    <div class="menu-divider"></div>
-    <div class="menu-item danger" id="menu-quit">退出</div>
+    <!-- Main view -->
+    <div id="menu-main-view">
+      <div class="menu-item submenu-trigger" id="menu-models-trigger">
+        <span data-i18n="menu.switchModel">切换形象</span><span class="submenu-arrow">▶</span>
+      </div>
+      <div class="menu-item submenu-trigger" id="menu-play-motion">
+        <span data-i18n="menu.playMotion">播放动作</span><span class="submenu-arrow">▶</span>
+      </div>
+      <div class="menu-item submenu-trigger" id="menu-settings-trigger">
+        <span data-i18n="menu.actionSettings">动作设定</span><span class="submenu-arrow">▶</span>
+      </div>
+      <div class="menu-item" id="menu-flip" data-i18n="menu.flipHorizontal">左右翻转</div>
+      <div class="menu-item" id="menu-auto-launch" data-i18n="menu.autoLaunch">开机自启动</div>
+      <div class="menu-item submenu-trigger" id="menu-language-trigger">
+        <span data-i18n="menu.language">语言</span><span class="submenu-arrow">▶</span>
+      </div>
+      <div class="menu-divider"></div>
+      <div class="menu-item" id="menu-check-updates" data-i18n="menu.checkUpdates">检查新版本</div>
+      <div class="menu-item" id="menu-install-hooks" data-i18n="menu.installHooks">安装 Hook 集成</div>
+      <div class="menu-item" id="menu-hook-status"><span data-i18n="menu.hookStatus">Hook 状态</span><span class="menu-hint" id="hook-status-hint">未检查</span></div>
+      <div class="menu-divider"></div>
+      <div class="menu-item" id="menu-uninstall" data-i18n="menu.uninstall">卸载</div>
+      <div class="menu-item danger" id="menu-quit" data-i18n="menu.quit">退出</div>
+    </div>
+    <!-- 切换形象 submenu -->
+    <div id="menu-model-view" class="hidden">
+      <div class="menu-item submenu-back" id="menu-model-back">
+        <span class="submenu-arrow back">◀</span><span data-i18n="menu.back">返回</span>
+      </div>
+      <div class="menu-label" data-i18n="menu.switchModel">切换形象</div>
+      <div id="model-list"><!-- model items populated dynamically --></div>
+    </div>
+    <!-- 播放动作 submenu -->
+    <div id="menu-motion-view" class="hidden">
+      <div class="menu-item submenu-back" id="menu-motion-back">
+        <span class="submenu-arrow back">◀</span><span data-i18n="menu.back">返回</span>
+      </div>
+      <div class="menu-label" id="motion-view-label" data-i18n="menu.playMotion">播放动作</div>
+      <div id="motion-list"><!-- motion items populated dynamically --></div>
+    </div>
+    <!-- 动作设定 submenu -->
+    <div id="menu-settings-view" class="hidden">
+      <div class="menu-item submenu-back" id="menu-settings-back">
+        <span class="submenu-arrow back">◀</span><span data-i18n="menu.back">返回</span>
+      </div>
+      <div class="menu-label" data-i18n="menu.actionSettings">动作设定</div>
+      <div class="menu-item submenu-trigger settings-row" id="settings-sleeping">
+        <span class="settings-state-label" data-i18n="settings.sleeping">空闲中</span>
+        <span class="settings-state-name" id="settings-sleeping-name">哈欠</span>
+        <span class="submenu-arrow">▶</span>
+      </div>
+      <div class="menu-item submenu-trigger settings-row" id="settings-working">
+        <span class="settings-state-label" data-i18n="settings.working">忙碌中</span>
+        <span class="settings-state-name" id="settings-working-name">走路</span>
+        <span class="submenu-arrow">▶</span>
+      </div>
+      <div class="menu-item submenu-trigger settings-row" id="settings-alert">
+        <span class="settings-state-label" data-i18n="settings.alert">需要确认</span>
+        <span class="settings-state-name" id="settings-alert-name">yeah</span>
+        <span class="submenu-arrow">▶</span>
+      </div>
+      <div class="menu-divider"></div>
+      <div class="menu-item" id="menu-test-alert" data-i18n="menu.previewAlert">预览提醒效果</div>
+    </div>
+    <!-- 语言 submenu -->
+    <div id="menu-language-view" class="hidden">
+      <div class="menu-item submenu-back" id="menu-language-back">
+        <span class="submenu-arrow back">◀</span><span data-i18n="menu.back">返回</span>
+      </div>
+      <div class="menu-label" data-i18n="menu.language">语言</div>
+      <div id="language-list"><!-- language items populated dynamically --></div>
+    </div>
   </div>
 
   <!-- Load libraries -->
@@ -102,6 +164,8 @@
     });
   </script>
 
+  <!-- i18n module (must load before renderer.js so window.i18n is available) -->
+  <script src="i18n.js"></script>
   <!-- Main renderer script -->
   <script src="renderer.js"></script>
 </body>

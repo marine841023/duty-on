@@ -57,7 +57,9 @@ class StateManager extends EventEmitter {
       this.sessions.set(session_id, session);
     }
 
-    // Update session info (in case it changed)
+    // Update session info (in case it changed). project_name/path may be
+    // empty string from the bridge script; keep the previous non-empty value
+    // so a session doesn't lose its label on a later event missing the field.
     if (project_name) session.projectName = project_name;
     if (project_path) session.projectPath = project_path;
 
@@ -95,14 +97,18 @@ class StateManager extends EventEmitter {
         // 1. Tool execution needs user confirmation → confirmation-needed
         // 2. AI completed task → idle
         // We check if the event indicates confirmation is needed
-        const needsConfirmation = this._checkConfirmationNeeded(event);
-        if (needsConfirmation) {
-          session.status = 'confirmation-needed';
-          session.alertMessage = this._extractAlertMessage(event);
-        } else {
-          // Task completed notification → session goes idle
-          if (session.status === 'working') {
+        {
+          const needsConfirmation = this._checkConfirmationNeeded(event, session);
+          if (needsConfirmation) {
+            session.status = 'confirmation-needed';
+            session.alertMessage = this._extractAlertMessage(event);
+          } else {
+            // Task completed notification → clear alert and go idle.
+            // Must clear from confirmation-needed too, not just working
+            // (otherwise the pet stays "needs confirmation" after the user
+            // already confirmed and the AI finished).
             session.status = 'idle';
+            session.alertMessage = null;
           }
         }
         break;
@@ -113,34 +119,73 @@ class StateManager extends EventEmitter {
         break;
     }
 
+    // A real hook session now covers this project; remove any window-detected
+    // placeholder so the project list doesn't show a duplicate idle entry.
+    if (session.projectName) {
+      const wid = '__window:' + session.projectName;
+      if (this.sessions.has(wid)) this.sessions.delete(wid);
+    }
+
     this._recomputeState();
   }
 
   /**
    * Determine if a Notification event indicates user confirmation is needed.
+   *
+   * Uses session status as context: if the AI is currently working (user
+   * already confirmed, AI is executing), a Notification is more likely a
+   * completion notice than a new confirmation request. This prevents the
+   * "stuck in alert" bug where a post-tool Notification carrying tool_name
+   * re-triggers confirmation-needed after the user already confirmed.
+   *
    * @param {HookEvent} event
+   * @param {SessionInfo} [session] - current session for context
    * @returns {boolean}
    */
-  _checkConfirmationNeeded(event) {
-    // Classify a Notification event as "needs user confirmation" vs "task complete".
-    // Priority (tune the whitelists in config.js after inspecting real payloads):
-    //   1. explicit completion type  -> false (task done)
-    //   2. explicit confirmation type -> true
-    //   3. tool_name on a Notification -> true (tool awaiting authorization)
-    //   4. message matches confirm keyword -> true
-    //   5. ambiguous -> ALERT_ON_AMBIGUOUS_NOTIFICATION (default false)
+  _checkConfirmationNeeded(event, session) {
+    // 1. Explicit type classification (highest priority)
     if (event.notification_type && config.NOTIFICATION_COMPLETE_TYPES.includes(event.notification_type)) {
       return false;
     }
     if (event.notification_type && config.NOTIFICATION_CONFIRM_TYPES.includes(event.notification_type)) {
       return true;
     }
+
+    // 2. State context: if session is ALREADY confirmation-needed (user
+    //    confirmed but PreToolUse hasn't arrived yet, or AI finished and
+    //    sent a completion Notification), a new Notification is most likely
+    //    a completion notice, not a new confirmation request. Only treat as
+    //    confirmation if the message explicitly asks for it.
+    //    NOTE: we do NOT apply this to 'working' state, because a tool_name
+    //    Notification while working can be a legitimate new confirmation
+    //    request (AI submitted prompt → requests tool authorization).
+    if (session && session.status === 'confirmation-needed') {
+      if (event.message) {
+        const lower = String(event.message).toLowerCase();
+        if (config.NOTIFICATION_CONFIRM_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()))) {
+          return true;
+        }
+      }
+      return false; // confirmation-needed + ambiguous = completion
+    }
+
+    // 3. Non-confirmation-needed state (idle or working):
+    //    tool_name on a Notification suggests the tool is awaiting authorization.
     if (event.tool_name) {
       return true;
     }
     if (event.message) {
-      const lower = String(event.message).toLowerCase();
+      const msg = String(event.message);
+      const lower = msg.toLowerCase();
       if (config.NOTIFICATION_CONFIRM_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()))) {
+        return true;
+      }
+      // Command execution pattern: message mentions a shell command (PowerShell
+      // Verb-Noun cmdlet like "Remove-Item", or an .exe call) — strongly
+      // suggests the AI is requesting authorization to run it. This catches
+      // "Trae wants to run command: Remove-Item ..." style notifications that
+      // don't carry a tool_name field.
+      if (config.NOTIFICATION_CMD_PATTERN && config.NOTIFICATION_CMD_PATTERN.test(msg)) {
         return true;
       }
     }
@@ -305,12 +350,16 @@ class StateManager extends EventEmitter {
   /**
    * Re-emit 'alert' if still in alert state and the reminder interval has elapsed.
    * Driven by an independent timer so reminders fire even without new events.
+   * The signature is invalidated so 'update' also re-fires, keeping the
+   * project list + Hook status hint fresh while the alert persists.
    */
   _checkAndRemindAlert() {
     if (this.overallState !== 'alert') return;
     if (this._now() - this._lastAlertTime >= ALERT_REMINDER) {
       this._lastAlertTime = this._now();
+      this._lastSignature = null;
       this.emit('alert', this.getSnapshot());
+      this.emit('update', this.getSnapshot());
     }
   }
 
@@ -346,6 +395,77 @@ class StateManager extends EventEmitter {
     this.sessions.clear();
     this._lastSignature = null; // force update emission
     this._recomputeState();
+  }
+
+  /**
+   * Reconcile window-detected idle sessions with real hook sessions.
+   * Called periodically by the IDE window scanner (main process). For each
+   * detected Trae window (by project name), ensure an idle session exists
+   * unless a real hook session already covers that project. Removes sessions
+   * (both window-placeholders AND real hook sessions) whose IDE window closed.
+   *
+   * This exists because Trae IDE:
+   *   - does NOT fire SessionStart when a new IDE window opens (only on AI
+   *     session start) → scanning detects new windows.
+   *   - does NOT fire any hook when an IDE window closes → scanning prunes
+   *     stale sessions so the pet doesn't stay "working" for minutes after
+   *     the IDE was closed.
+   *
+   * Safe because syncDetectedWindows is only called on a successful scan
+   * (startIdeScanner skips on error). If a project isn't in `detected`, its
+   * window is genuinely gone.
+   *
+   * @param {{projectName: string}[]} detected
+   */
+  syncDetectedWindows(detected) {
+    const WINDOW_PREFIX = '__window:';
+    // Snapshot hook-project names BEFORE deletion so we don't create window
+    // placeholders for projects that already have a hook session.
+    const hookProjectNames = new Set();
+    for (const s of this.sessions.values()) {
+      if (!s.sessionId.startsWith(WINDOW_PREFIX)) {
+        hookProjectNames.add(s.projectName);
+      }
+    }
+    const detectedNames = new Set(detected.map((d) => d.projectName));
+    let changed = false;
+
+    // Remove ALL sessions (window-placeholders + hook sessions) for projects
+    // whose IDE window is no longer open. Trae IDE doesn't fire a hook on
+    // window close, so without this the hook session would linger until
+    // SESSION_TIMEOUT (minutes), leaving the pet stuck in working/alert.
+    for (const [id, session] of this.sessions.entries()) {
+      if (!detectedNames.has(session.projectName)) {
+        this.sessions.delete(id);
+        changed = true;
+      }
+    }
+
+    // Add window-sessions for newly detected projects without a hook session.
+    for (const name of detectedNames) {
+      if (hookProjectNames.has(name)) continue;
+      const wid = WINDOW_PREFIX + name;
+      const existing = this.sessions.get(wid);
+      if (existing) {
+        existing.lastEventTime = this._now(); // keep alive while window stays open
+      } else {
+        this.sessions.set(wid, {
+          sessionId: wid,
+          projectPath: '',
+          projectName: name,
+          status: 'idle',
+          lastEvent: 'WindowDetected',
+          lastEventTime: this._now(),
+          alertMessage: null,
+        });
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      this._lastSignature = null; // force update emission
+      this._recomputeState();
+    }
   }
 }
 

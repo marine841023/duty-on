@@ -6,6 +6,16 @@
  *   GET  /status        - Get current state snapshot (for debugging)
  *   GET  /health        - Health check
  *   POST /unregister    - Remove a session (when IDE closes)
+ *
+ * Connection handling:
+ *   The bridge script sets a 2s timeout and may disconnect before the server
+ *   finishes processing. Without explicit cleanup, these half-closed sockets
+ *   accumulate as CLOSE_WAIT and eventually exhaust the server's connection
+ *   queue — making it unresponsive (root cause of the "pet stuck on idle" bug).
+ *   We guard against this by:
+ *     1. Tracking an `ended` flag so res.end()/destroy() is called exactly once.
+ *     2. Listening for req 'close'/'error' (client disconnect) and destroying res.
+ *     3. Setting socket timeouts so idle/stale sockets are reaped automatically.
  */
 
 const http = require('http');
@@ -19,9 +29,36 @@ function createServer(stateManager) {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
+    // --- Robust response termination (prevents CLOSE_WAIT leaks) ---
+    // `ended` guards against double-end (which throws) and ensures that when
+    // the client disconnects early we still destroy the socket so it doesn't
+    // linger in CLOSE_WAIT.
+    let ended = false;
+    const safeEnd = (status, contentType, body) => {
+      if (ended) return;
+      ended = true;
+      try {
+        if (!res.headersSent) res.writeHead(status, { 'Content-Type': contentType });
+        res.end(body);
+      } catch (_) {
+        try { res.destroy(); } catch (__) { /* socket already gone */ }
+      }
+    };
+    const safeDestroy = () => {
+      if (ended) return;
+      ended = true;
+      try { res.destroy(); } catch (_) { /* already closed */ }
+    };
+
+    // Client closed the connection before we finished (e.g. bridge 2s timeout).
+    // This is the key fix: without destroying res here, the socket stays in
+    // CLOSE_WAIT forever.
+    req.on('close', safeDestroy);
+    req.on('error', safeDestroy);
+    res.on('error', safeDestroy);
+
     if (req.method === 'OPTIONS') {
-      res.writeHead(204);
-      res.end();
+      safeEnd(204);
       return;
     }
 
@@ -42,13 +79,14 @@ function createServer(stateManager) {
             console.log('[PetServer] Notification payload:', JSON.stringify(event));
           }
           stateManager.handleHookEvent(event);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
+          safeEnd(200, 'application/json', JSON.stringify({ ok: true }));
         } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          console.error('[PetServer] /hook error:', err.message);
+          safeEnd(400, 'application/json', JSON.stringify({ error: err.message }));
         }
       });
+      // If the client disconnects mid-body, 'end' won't fire — req 'close'
+      // (registered above) handles cleanup.
       return;
     }
 
@@ -62,11 +100,9 @@ function createServer(stateManager) {
           if (session_id) {
             stateManager.removeSession(session_id);
           }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
+          safeEnd(200, 'application/json', JSON.stringify({ ok: true }));
         } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          safeEnd(400, 'application/json', JSON.stringify({ error: err.message }));
         }
       });
       return;
@@ -75,22 +111,27 @@ function createServer(stateManager) {
     // GET /status - Current state snapshot
     if (req.method === 'GET' && req.url === '/status') {
       const snapshot = stateManager.getSnapshot();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(snapshot, null, 2));
+      safeEnd(200, 'application/json', JSON.stringify(snapshot, null, 2));
       return;
     }
 
     // GET /health - Health check
     if (req.method === 'GET' && req.url === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', port: PORT }));
+      safeEnd(200, 'application/json', JSON.stringify({ status: 'ok', port: PORT }));
       return;
     }
 
     // 404
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not found' }));
+    safeEnd(404, 'application/json', JSON.stringify({ error: 'Not found' }));
   });
+
+  // --- Socket timeouts: reap idle/stale connections so CLOSE_WAIT can't pile up ---
+  // Default server.timeout is 0 (never), which is why stale sockets accumulated.
+  server.timeout = 10000;          // destroy sockets idle > 10s
+  server.keepAliveTimeout = 5000;  // close keep-alive after 5s idle
+  server.headersTimeout = 8000;    // must receive headers within 8s
+  // requestTimeout (Node 18+) caps the whole request including body.
+  if ('requestTimeout' in server) server.requestTimeout = 10000;
 
   server.listen(PORT, HOST, () => {
     console.log(`[PetServer] Listening on http://${HOST}:${PORT}`);

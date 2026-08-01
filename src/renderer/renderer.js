@@ -16,6 +16,14 @@ let currentState = 'sleeping';
 let currentSnapshot = { overallState: 'sleeping', sessions: [] };
 let effectsTimer = null;
 let hooksInstalled = false;    // cached hook install status (for hint refresh)
+let oneShotPlaying = false;    // a tap-triggered motion is playing; state motion resumes when it ends
+let availableModels = [];      // catalog from main process
+let currentModelUrl = null;    // persisted/loaded model URL
+let motionPickerMode = 'play'; // 'play' = tap-to-play, 'assign' = pick for a state
+let motionPickerTarget = null; // target state when motionPickerMode === 'assign'
+let flipHorizontal = false;   // mirror the model horizontally (for left-side placement)
+let headEffectEl = null;        // #head-effect container, positioned at head-top anchor
+let isDragging = false;         // shared with setupDrag so click-through can stay off while dragging
 
 // Model URLs to try (in order)
 const MODEL_URLS = [
@@ -24,30 +32,215 @@ const MODEL_URLS = [
 ];
 
 // ===== Constants =====
-const PIXI_WIDTH = 300;
-const PIXI_HEIGHT = 380;
+const PIXI_WIDTH = 240;
+const PIXI_HEIGHT = 260;
 const EFFECT_INTERVAL_MS = 2000;
-const MOTION_NAMES = ['Tap', 'FlickUp', 'Shake'];
-const STATE_LABELS = {
-  sleeping: '💤 睡觉中',
-  working: '⚡ 忙碌中',
-  alert: '🔔 需要确认!',
-};
+// Motion priorities (match pixi-live2d-display MotionPriority: 1=IDLE, 2=NORMAL, 3=FORCE).
+const MOTION_PRIORITY_NORMAL = 2;
+const MOTION_PRIORITY_FORCE = 3;
 const STATE_COLORS = {
   sleeping: '#7b9eff',
   working: '#ffc832',
   alert: '#ff6666',
 };
 
+/**
+ * Get the localized state label for the status bar.
+ */
+function getStateLabel(state) {
+  return i18n.t(`state.${state}`);
+}
+
+// ===== i18n =====
+/**
+ * Load the UI language from the main process (persisted choice or OS locale)
+ * and set it on the i18n module. Called once during init, before any UI text
+ * is rendered.
+ */
+async function loadLanguage() {
+  if (!window.petAPI || !window.petAPI.getLanguage) return;
+  try {
+    const locale = await window.petAPI.getLanguage();
+    const lang = i18n.normalizeLocale(locale);
+    i18n.setLanguage(lang);
+  } catch (err) {
+    console.warn('[i18n] Failed to load language:', err.message);
+  }
+}
+
+/**
+ * Apply the current language to all static DOM text. Elements marked with
+ * data-i18n="key" get their textContent set from the translation table.
+ * Called on init and after a language switch. Dynamic text (status hints,
+ * project list, state label) is refreshed separately by their own updaters.
+ */
+function applyTranslations() {
+  document.querySelectorAll('[data-i18n]').forEach((el) => {
+    const key = el.dataset.i18n;
+    if (key) el.textContent = i18n.t(key);
+  });
+  // Refresh dynamic text that depends on the current language.
+  updateStateUI(currentState);
+  buildMotionMenu(motionPickerMode, motionPickerTarget);
+  buildSettingsMenu();
+  buildLanguageMenu();
+  loadAutoLaunchState();
+  updateHookStatusHint(hooksInstalled, currentSnapshot);
+  checkHooksStatus();
+  // Re-seed the project list so the "waiting" placeholder uses the new language.
+  if (currentSnapshot && currentSnapshot.sessions) {
+    updateStatusBar(currentSnapshot);
+  } else {
+    updateStatusBar({ overallState: currentState, sessions: [] });
+  }
+}
+
+/**
+ * Build the language picker submenu from i18n.getLanguages(). The current
+ * language is checkmarked. Clicking an item switches the language, persists
+ * it, and re-translates the entire UI in place.
+ */
+function buildLanguageMenu() {
+  const container = document.getElementById('language-list');
+  if (!container) return;
+  container.innerHTML = '';
+  for (const lang of i18n.getLanguages()) {
+    const item = document.createElement('div');
+    item.className = 'menu-item';
+    item.textContent = lang.name;
+    if (lang.code === i18n.currentLanguage) item.classList.add('active');
+    item.addEventListener('click', () => {
+      if (lang.code === i18n.currentLanguage) return;
+      switchLanguage(lang.code);
+    });
+    container.appendChild(item);
+  }
+}
+
+/**
+ * Switch the UI language, persist the choice, and re-translate everything.
+ * The menu stays open so the user sees the ✓ update.
+ */
+function switchLanguage(lang) {
+  i18n.setLanguage(lang);
+  if (window.petAPI && window.petAPI.setLanguage) {
+    window.petAPI.setLanguage(lang);
+  }
+  applyTranslations();
+}
+
+// ===== Auto-launch (start on boot) =====
+/**
+ * Load the current auto-launch state from the main process and update the
+ * menu checkmark accordingly.
+ */
+async function loadAutoLaunchState() {
+  const item = document.getElementById('menu-auto-launch');
+  if (!item) return;
+  try {
+    const enabled = window.petAPI && window.petAPI.getAutoLaunch
+      ? await window.petAPI.getAutoLaunch()
+      : false;
+    item.classList.toggle('active', enabled);
+  } catch (err) {
+    console.warn('[autoLaunch] Failed to read state:', err.message);
+  }
+}
+
+/**
+ * Toggle auto-launch on/off. Persists via main process (registry on Windows).
+ */
+async function toggleAutoLaunch() {
+  const item = document.getElementById('menu-auto-launch');
+  if (!item) return;
+  const newState = !item.classList.contains('active');
+  if (window.petAPI && window.petAPI.setAutoLaunch) {
+    window.petAPI.setAutoLaunch(newState);
+  }
+  item.classList.toggle('active', newState);
+}
+
+// ===== Update check =====
+let updateDownloaded = false;
+
+/**
+ * Trigger an update check via the main process (electron-updater).
+ * Status updates arrive asynchronously via onUpdateStatus.
+ */
+function checkForUpdates() {
+  if (!window.petAPI || !window.petAPI.checkForUpdates) return;
+  showUpdateStatus(i18n.t('update.checking'));
+  window.petAPI.checkForUpdates();
+}
+
+/**
+ * Display an update status message in the pet state text area.
+ * Cleared after 5 seconds (or when a new state-update arrives).
+ */
+function showUpdateStatus(message) {
+  const stateText = document.getElementById('pet-state-text');
+  if (!stateText) return;
+  stateText.textContent = message;
+}
+
+/**
+ * Handle update status events from the main process.
+ */
+function handleUpdateStatus(data) {
+  switch (data.status) {
+    case 'checking':
+      showUpdateStatus(i18n.t('update.checking'));
+      break;
+    case 'available':
+      showUpdateStatus(i18n.t('update.available', { version: data.version }));
+      break;
+    case 'not-available':
+      showUpdateStatus(i18n.t('update.notAvailable'));
+      setTimeout(() => updateStateUI(currentState), 4000);
+      break;
+    case 'downloading':
+      showUpdateStatus(i18n.t('update.downloading', { percent: data.percent || 0 }));
+      break;
+    case 'downloaded':
+      updateDownloaded = true;
+      showUpdateStatus(i18n.t('update.downloaded', { version: data.version }));
+      break;
+    case 'error':
+      if (data.errorType === 'network') {
+        showUpdateStatus(i18n.t('update.networkError'));
+      } else {
+        showUpdateStatus(i18n.t('update.error', { message: data.message || '' }));
+      }
+      setTimeout(() => updateStateUI(currentState), 5000);
+      break;
+  }
+}
+
 // ===== Initialize =====
 async function init() {
+  // Load the UI language (persisted or OS default) before any UI text renders.
+  await loadLanguage();
+  applyTranslations();
+
   setupIPC();
   setupContextMenu();
   setupDrag();
+  setupClickThrough();
+  buildMotionMenu('play');
 
   // Fetch available models + persisted choice from the main process, then
   // build the model-switching menu.
   await loadModelCatalog();
+
+  // Load persisted per-state motion assignments before the first
+  // playStateMotion() runs in initLive2D().
+  await loadStateMotions();
+  buildSettingsMenu();
+
+  // Load persisted appearance settings (horizontal flip) before the model is
+  // attached, so attachModel applies the flip on first render.
+  await loadAppearance();
+  updateFlipMenuCheck();
 
   // Wait for libraries to load
   const libsReady = await waitForLibs();
@@ -73,6 +266,11 @@ async function init() {
 
   // Check if hooks are installed + show diagnostic status
   checkHooksStatus();
+
+  // Register update status callback (electron-updater events).
+  if (window.petAPI && window.petAPI.onUpdateStatus) {
+    window.petAPI.onUpdateStatus(handleUpdateStatus);
+  }
 }
 
 /**
@@ -107,7 +305,7 @@ function buildModelMenu() {
     item.addEventListener('click', () => {
       if (model.url === currentModelUrl) return;
       switchModel(model.url);
-      document.getElementById('context-menu').classList.add('hidden');
+      closeMenu();
     });
     container.appendChild(item);
   }
@@ -165,9 +363,31 @@ function initPixiApp() {
     backgroundAlpha: 0,
     antialias: true,
     autoStart: true,
+    // Prefer the discrete GPU on dual-GPU systems (common on laptops).
+    powerPreference: 'high-performance',
   });
   const canvasContainer = document.getElementById('live2d-canvas');
   canvasContainer.appendChild(pixiApp.view);
+
+  // Fixed 24fps cap — smooth enough for Live2D idle animations while keeping
+  // CPU/GPU usage low (important over Remote Desktop where every frame adds
+  // network bandwidth). No focus/blur switching needed.
+  pixiApp.ticker.maxFPS = 24;
+
+  // FPS monitor: log average FPS once per second so we can diagnose lag.
+  // Output goes to the main-process console via webContents 'console-message'.
+  let fpsFrames = 0;
+  let fpsLast = performance.now();
+  pixiApp.ticker.add(() => {
+    fpsFrames++;
+    const now = performance.now();
+    if (now - fpsLast >= 1000) {
+      const fps = Math.round((fpsFrames * 1000) / (now - fpsLast));
+      console.log(`[FPS] ${fps} fps | focused=${document.hasFocus()} | maxFPS=${pixiApp.ticker.maxFPS}`);
+      fpsFrames = 0;
+      fpsLast = now;
+    }
+  });
 }
 
 /**
@@ -192,7 +412,10 @@ async function loadInitialModel() {
       live2dModel = await Live2DModel.from(url);
       currentModelUrl = url;
       attachModel(live2dModel);
-      setPetState('sleeping');
+      // currentState is already 'sleeping' at init, so setPetState would be a
+      // no-op — kick off the state motion directly.
+      oneShotPlaying = false;
+      playStateMotion(MOTION_PRIORITY_FORCE);
       console.log('[Live2D] Model loaded successfully:', url);
       return;
     } catch (err) {
@@ -209,9 +432,12 @@ function attachModel(model) {
   const scale = Math.min(
     pixiApp.view.width / model.width,
     pixiApp.view.height / model.height
-  ) * 0.9;
+  ) * 0.72;
 
   model.scale.set(scale);
+  // Mirror horizontally if the user enabled 左右翻转. anchor is (0.5, 1) so
+  // flipping scale.x keeps the model centered (no position jump).
+  if (flipHorizontal) model.scale.x = -scale;
   model.anchor.set(0.5, 1);
   model.x = pixiApp.view.width / 2;
   model.y = pixiApp.view.height;
@@ -221,18 +447,109 @@ function attachModel(model) {
   model.interactive = true;
   model.buttonMode = true;
 
-  // Tap to play random motion (nito model has no defined hit areas)
-  model.on('pointerdown', () => {
-    const random = MOTION_NAMES[Math.floor(Math.random() * MOTION_NAMES.length)];
-    model.motion(random);
+  const mm = model.internalModel.motionManager;
+
+  // Disable the library's built-in idle auto-play: on each motion finish it
+  // picks a RANDOM idle motion, which would break "sleeping only plays 睡觉".
+  // Pointing the idle group at a non-existent name makes that request a no-op;
+  // we drive all playback ourselves via motionFinish + playStateMotion.
+  mm.groups.idle = '__none__';
+
+  // Loop the state motion seamlessly: whenever any motion ends, replay the
+  // current state's motion (unless a one-shot is mid-flight — its own finish
+  // will resume the state motion). Deferred via setTimeout so we run after the
+  // library's same-tick complete()/idle bookkeeping.
+  mm.on('motionFinish', () => {
+    if (oneShotPlaying) {
+      oneShotPlaying = false;
+      // One-shot finished -> restore the head-top effect (ZZZ / dots / !).
+      setHeadEffectVisible(true);
+    }
+    setTimeout(() => {
+      if (!oneShotPlaying && !mm.destroyed) playStateMotion();
+    }, 0);
   });
 
-  // Override update for state-based parameter control
-  const originalUpdate = model.internalModel.update.bind(model.internalModel);
-  model.internalModel.update = function (dt) {
-    originalUpdate(dt);
-    applyStateParameters(this);
-  };
+  // Tap the pet -> play a different motion once; the state motion resumes when
+  // it finishes.
+  model.on('pointerdown', () => {
+    playRandomOneShot();
+  });
+
+  // Set up the head-top effect (ZZZ / working dots / !) for the current state.
+  setupHeadEffect();
+}
+
+/**
+ * Per-frame: track the model's bounds and move #head-effect to the head-top
+ * anchor (bounds top-center shifted 40px down). Registered on the PixiJS
+ * ticker in setupHeadEffect. getBounds() accounts for scale/anchor/animation,
+ * so the effect stays glued to the head as the model breathes/moves.
+ */
+function updateHeadEffectAnchor() {
+  if (!live2dModel || !headEffectEl) return;
+  // Throttle: getBounds() computes the full vertex bounding box and is
+  // relatively expensive. The CSS head-effect doesn't need pixel-exact
+  // per-frame tracking, so update every 3rd frame (~20fps at 60fps ticker).
+  updateHeadEffectAnchor._skip = ((updateHeadEffectAnchor._skip || 0) + 1) % 3;
+  if (updateHeadEffectAnchor._skip !== 0) return;
+  const b = live2dModel.getBounds();
+  const topX = b.x + b.width / 2;
+  const topY = b.y + 40;
+  updateHeadEffectPosition(topX, topY);
+}
+
+/**
+ * Create (or reset) the #head-effect container and seed it with the current
+ * state's effect markup. Called from attachModel once the model is on stage.
+ */
+function setupHeadEffect() {
+  headEffectEl = document.getElementById('head-effect');
+  if (!headEffectEl) return;
+  updateHeadEffectContent(currentState);
+  // Register per-frame anchor tracking so the effect follows the model.
+  // Re-register on model switch to avoid stacking listeners.
+  const PIXI = window.PIXI;
+  if (PIXI && pixiApp) {
+    pixiApp.ticker.remove(updateHeadEffectAnchor);
+    pixiApp.ticker.add(updateHeadEffectAnchor);
+  }
+}
+
+/**
+ * Swap the inner markup of #head-effect based on state. Each effect is a
+ * child anchored at bottom:0 (the 0×0 anchor point) extending upward ≤40px.
+ */
+function updateHeadEffectContent(state) {
+  if (!headEffectEl) return;
+  if (state === 'sleeping') {
+    headEffectEl.innerHTML = '<div class="zzz-effect"><span>Z</span><span>Z</span><span>Z</span></div>';
+  } else if (state === 'working') {
+    headEffectEl.innerHTML = '<div class="working-effect"><span></span><span></span><span></span></div>';
+  } else if (state === 'alert') {
+    headEffectEl.innerHTML = '<div class="alert-effect">!</div>';
+  } else {
+    headEffectEl.innerHTML = '';
+  }
+}
+
+/**
+ * Move the #head-effect anchor to (x, y) in canvas-wrapper pixel coords.
+ * Called every frame from updateDebugBounds so the effect tracks the model.
+ */
+function updateHeadEffectPosition(x, y) {
+  if (!headEffectEl) return;
+  headEffectEl.style.transform = `translate(${x}px, ${y}px)`;
+}
+
+/**
+ * Show/hide the head-top effect. Hidden while a tap-triggered one-shot motion
+ * plays (so ZZZ/dots/! don't float above a non-state animation), restored when
+ * the one-shot finishes (see motionFinish in attachModel).
+ */
+function setHeadEffectVisible(visible) {
+  if (!headEffectEl) return;
+  headEffectEl.classList.toggle('hidden', !visible);
 }
 
 /**
@@ -246,7 +563,7 @@ async function switchModel(url) {
   // Show immediate feedback so the user knows the click registered.
   const stateText = document.getElementById('pet-state-text');
   const prevText = stateText.textContent;
-  stateText.textContent = '⏳ 切换形象中...';
+  stateText.textContent = i18n.t('model.switching');
 
   // Remove + destroy the current model (keep the PixiJS app for reuse)
   if (live2dModel) {
@@ -262,7 +579,10 @@ async function switchModel(url) {
     live2dModel = await Live2DModel.from(url);
     currentModelUrl = url;
     attachModel(live2dModel);
-    setPetState(currentState);
+    // State hasn't changed (setPetState would no-op), so replay the state
+    // motion on the new model directly.
+    oneShotPlaying = false;
+    playStateMotion(MOTION_PRIORITY_FORCE);
     updateModelMenuActive(url);
     if (window.petAPI && window.petAPI.switchModel) {
       window.petAPI.switchModel(url);
@@ -272,7 +592,7 @@ async function switchModel(url) {
     console.error('[Live2D] Switch failed, falling back:', err.message);
     // Restore the previous model if the new one failed to load
     await loadInitialModel();
-    stateText.textContent = '❌ 形象加载失败，已回退';
+    stateText.textContent = i18n.t('model.switchFailed');
     setTimeout(() => { stateText.textContent = prevText; }, 2000);
     return;
   }
@@ -280,57 +600,236 @@ async function switchModel(url) {
 }
 
 /**
- * Apply Live2D parameters based on current state.
- * Called every frame after the model's internal update.
+ * Per-state default motion: each state loops ONE specific motion.
+ *   sleeping -> Flick3[1]      哈欠
+ *   working  -> FlickLeft[1]   走路
+ *   alert    -> FlickLeft[0]   yeah
  */
-function applyStateParameters(internalModel) {
-  const coreModel = internalModel.coreModel;
-  if (!coreModel) return;
+const STATE_MOTIONS = {
+  sleeping: ['Flick3', 1],       // 哈欠
+  working:  ['FlickLeft', 1],    // 走路
+  alert:    ['FlickLeft', 0],    // yeah
+};
 
-  try {
-    switch (currentState) {
-      case 'sleeping':
-        setParam(coreModel, 'PARAM_EYE_L_OPEN', 0.05);
-        setParam(coreModel, 'PARAM_EYE_R_OPEN', 0.05);
-        setParam(coreModel, 'PARAM_MOUTH_OPEN_Y', 0);
-        setParam(coreModel, 'PARAM_MOUTH_FORM', 0);
-        setParam(coreModel, 'PARAM_ANGLE_Z', -5);
-        setParam(coreModel, 'PARAM_SURP_ON', 0);
-        setParam(coreModel, 'PARAM_ANGER_ON', 0);
-        break;
-
-      case 'working':
-        setParam(coreModel, 'PARAM_EYE_L_OPEN', 1);
-        setParam(coreModel, 'PARAM_EYE_R_OPEN', 1);
-        setParam(coreModel, 'PARAM_MOUTH_FORM', 0.5);
-        setParam(coreModel, 'PARAM_MOUTH_OPEN_Y', 0.1);
-        setParam(coreModel, 'PARAM_EYE_BALL_Y', -0.3);
-        setParam(coreModel, 'PARAM_SURP_ON', 0);
-        break;
-
-      case 'alert':
-        setParam(coreModel, 'PARAM_EYE_L_OPEN', 1);
-        setParam(coreModel, 'PARAM_EYE_R_OPEN', 1);
-        setParam(coreModel, 'PARAM_SURP_ON', 1);
-        setParam(coreModel, 'PARAM_MOUTH_OPEN_Y', 0.5);
-        setParam(coreModel, 'PARAM_EYE_BALL_Y', 0.2);
-        break;
-    }
-  } catch (e) {
-    // Some parameters may not exist on all models
-  }
-}
 /**
- * Safely set a Live2D parameter value.
+ * All available motions for the menu list (group, index, i18nKey).
+ * The third element is an i18n key resolved via i18n.t() at display time.
  */
-function setParam(coreModel, id, value) {
+const ALL_MOTIONS = [
+  ['Idle', 0, 'motion.Idle.0'],
+  ['Idle', 1, 'motion.Idle.1'],
+  ['Idle', 2, 'motion.Idle.2'],
+  ['Idle', 3, 'motion.Idle.3'],
+  ['Tap', 0, 'motion.Tap.0'],
+  ['Tap', 1, 'motion.Tap.1'],
+  ['Tap', 2, 'motion.Tap.2'],
+  ['Tap', 3, 'motion.Tap.3'],
+  ['Tap', 4, 'motion.Tap.4'],
+  ['FlickUp', 0, 'motion.FlickUp.0'],
+  ['FlickUp', 1, 'motion.FlickUp.1'],
+  ['FlickUp', 2, 'motion.FlickUp.2'],
+  ['FlickDown', 0, 'motion.FlickDown.0'],
+  ['FlickDown', 1, 'motion.FlickDown.1'],
+  ['FlickRight', 0, 'motion.FlickRight.0'],
+  ['Flick3', 0, 'motion.Flick3.0'],
+  ['Flick3', 1, 'motion.Flick3.1'],
+  ['FlickLeft', 0, 'motion.FlickLeft.0'],
+  ['FlickLeft', 1, 'motion.FlickLeft.1'],
+  ['Shake', 0, 'motion.Shake.0'],
+  ['Shake', 1, 'motion.Shake.1'],
+];
+
+/**
+ * Play the current state's motion so it loops. `motionFinish` (registered in
+ * attachModel) re-triggers this on each finish for seamless looping; this is
+ * also called directly on state changes and as a periodic safety net.
+ */
+function playStateMotion(priority = MOTION_PRIORITY_NORMAL) {
+  if (!live2dModel) return;
+  const [group, idx] = STATE_MOTIONS[currentState] || STATE_MOTIONS.sleeping;
   try {
-    coreModel.setParameterValueById(id, value);
+    live2dModel.motion(group, idx, priority);
+  } catch (e) { /* ignore */ }
+}
+
+/**
+ * Periodic safety net: if no motion is currently playing (e.g. motionFinish
+ * was missed), replay the state motion. Skipped while a one-shot runs.
+ */
+function triggerPeriodicMotion() {
+  if (!live2dModel) return;
+  if (oneShotPlaying) return;
+  const mm = live2dModel.internalModel.motionManager;
+  if (mm.playing) return; // let the current motion finish; motionFinish loops it
+  playStateMotion();
+}
+
+/**
+ * Play a specific motion as a one-shot at FORCE priority (overrides the
+ * looping state motion). When it finishes, the motionFinish handler resumes
+ * the state motion.
+ */
+function playMotionOnce(group, idx) {
+  if (!live2dModel) return;
+  oneShotPlaying = true;
+  // Hide the head-top effect while the one-shot plays; motionFinish restores it.
+  setHeadEffectVisible(false);
+  try {
+    live2dModel.motion(group, idx, MOTION_PRIORITY_FORCE);
   } catch (e) {
-    // Parameter doesn't exist on this model, skip.
+    oneShotPlaying = false;
+    setHeadEffectVisible(true); // playback failed -> restore immediately
   }
 }
 
+/**
+ * Play a random motion different from the current state's (used on tap).
+ */
+function playRandomOneShot() {
+  if (!live2dModel) return;
+  const stateMotion = STATE_MOTIONS[currentState] || STATE_MOTIONS.sleeping;
+  const choices = ALL_MOTIONS.filter(([g, i]) => !(g === stateMotion[0] && i === stateMotion[1]));
+  if (!choices.length) return;
+  const [group, idx] = choices[Math.floor(Math.random() * choices.length)];
+  playMotionOnce(group, idx);
+}
+
+/**
+ * Build the motion list in the menu from ALL_MOTIONS.
+ * - mode 'play'   : clicking a motion plays it once (one-shot).
+ * - mode 'assign' : clicking a motion assigns it to `targetState` and returns
+ *                   to the 动作设定 view; the current choice is checkmarked.
+ */
+function buildMotionMenu(mode = 'play', targetState = null) {
+  const container = document.getElementById('motion-list');
+  if (!container) return;
+  container.innerHTML = '';
+  const current = (mode === 'assign' && targetState) ? STATE_MOTIONS[targetState] : null;
+  for (const [group, idx, name] of ALL_MOTIONS) {
+    const item = document.createElement('div');
+    item.className = 'menu-item';
+    item.textContent = i18n.t(name);
+    if (current && current[0] === group && current[1] === idx) {
+      item.classList.add('active');
+    }
+    if (mode === 'assign' && targetState) {
+      item.addEventListener('click', () => {
+        assignStateMotion(targetState, group, idx);
+        showView('menu-settings-view');
+      });
+    } else {
+      item.addEventListener('click', () => {
+        playMotionOnce(group, idx);
+        closeMenu();
+      });
+    }
+    container.appendChild(item);
+  }
+}
+
+/**
+ * Open the motion submenu in either play or assign mode.
+ */
+function openMotionView(mode, targetState = null) {
+  motionPickerMode = mode;
+  motionPickerTarget = targetState;
+  buildMotionMenu(mode, targetState);
+  const label = document.getElementById('motion-view-label');
+  if (label) label.textContent = (mode === 'assign') ? i18n.t('menu.selectMotion') : i18n.t('menu.playMotion');
+  showView('menu-motion-view');
+}
+
+/**
+ * Load persisted per-state motion assignments from the main process.
+ */
+async function loadStateMotions() {
+  if (!window.petAPI || !window.petAPI.getStateMotions) return;
+  try {
+    const saved = await window.petAPI.getStateMotions();
+    if (saved && typeof saved === 'object') {
+      for (const state of ['sleeping', 'working', 'alert']) {
+        const m = saved[state];
+        if (Array.isArray(m) && m.length === 2 && typeof m[0] === 'string' && Number.isInteger(m[1])) {
+          STATE_MOTIONS[state] = [m[0], m[1]];
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[motions] Failed to load state motions:', err.message);
+  }
+}
+
+/**
+ * Populate the 动作设定 view with each state's current motion name.
+ */
+function buildSettingsMenu() {
+  for (const state of ['sleeping', 'working', 'alert']) {
+    const [g, i] = STATE_MOTIONS[state] || STATE_MOTIONS.sleeping;
+    const found = ALL_MOTIONS.find(([mg, mi]) => mg === g && mi === i);
+    const name = found ? i18n.t(found[2]) : `${g}[${i}]`;
+    const el = document.getElementById(`settings-${state}-name`);
+    if (el) el.textContent = name;
+  }
+}
+
+/**
+ * Assign a motion to a state, persist it, refresh the settings view, and if
+ * the changed state is currently active, immediately switch to the new motion.
+ */
+function assignStateMotion(state, group, idx) {
+  STATE_MOTIONS[state] = [group, idx];
+  buildSettingsMenu();
+  if (window.petAPI && window.petAPI.setStateMotions) {
+    window.petAPI.setStateMotions(STATE_MOTIONS);
+  }
+  if (state === currentState) {
+    oneShotPlaying = false;
+    playStateMotion(MOTION_PRIORITY_FORCE);
+  }
+}
+
+/**
+ * Load persisted appearance settings (horizontal flip) from the main process.
+ */
+async function loadAppearance() {
+  if (!window.petAPI || !window.petAPI.getAppearance) return;
+  try {
+    const { flipHorizontal: f } = await window.petAPI.getAppearance();
+    flipHorizontal = !!f;
+  } catch (err) {
+    console.warn('[appearance] Failed to load:', err.message);
+  }
+}
+
+/**
+ * Apply the current flipHorizontal setting to the loaded model. scale.y holds
+ * the positive base scale set in attachModel; flipping scale.x mirrors it.
+ */
+function applyFlip() {
+  if (!live2dModel) return;
+  const baseScale = live2dModel.scale.y;
+  live2dModel.scale.x = flipHorizontal ? -baseScale : baseScale;
+}
+
+/**
+ * Toggle horizontal mirror, persist it, and update the menu checkmark.
+ */
+function toggleFlip() {
+  flipHorizontal = !flipHorizontal;
+  applyFlip();
+  updateFlipMenuCheck();
+  if (window.petAPI && window.petAPI.setFlipHorizontal) {
+    window.petAPI.setFlipHorizontal(flipHorizontal);
+  }
+}
+
+/**
+ * Show/hide the ✓ on the 左右翻转 menu item.
+ */
+function updateFlipMenuCheck() {
+  const item = document.getElementById('menu-flip');
+  if (item) item.classList.toggle('active', flipHorizontal);
+}
 // ===== Fallback Canvas Animation =====
 function initFallbackCanvas() {
   const canvas = document.getElementById('fallback-canvas');
@@ -420,30 +919,19 @@ function setPetState(state) {
   console.log('[State] Transition:', currentState, '→', state);
   currentState = state;
 
-  // Update Live2D motions
-  if (live2dModel) {
-    try {
-      switch (state) {
-        case 'sleeping':
-          live2dModel.motion('Idle');
-          break;
-        case 'working':
-        case 'alert':
-          // Both states use the Tap motion; visual differentiation comes from
-          // applyStateParameters (eye/mouth params) and the CSS shake on alert.
-          live2dModel.motion('Tap');
-          break;
-      }
-    } catch (e) {
-      // Motion might not exist
-    }
-  }
+  // Cancel any in-flight one-shot and immediately play the new state's motion
+  // at FORCE priority so it overrides whatever was playing.
+  oneShotPlaying = false;
+  playStateMotion(MOTION_PRIORITY_FORCE);
 
   // Update UI
   updateStateUI(state);
 
   // Clear and restart effects
   clearEffects();
+
+  // Swap the head-top effect (ZZZ / working dots / !) to match the new state.
+  updateHeadEffectContent(state);
 }
 
 function updateStateUI(state) {
@@ -460,7 +948,7 @@ function updateStateUI(state) {
   stateText.classList.add(`state-${state}`);
   statusBar.classList.add(`state-${state}`);
 
-  stateText.textContent = STATE_LABELS[state] || state;
+  stateText.textContent = getStateLabel(state);
 
   // Shake on alert
   if (state === 'alert') {
@@ -472,17 +960,11 @@ function updateStateUI(state) {
 function startEffectsLoop() {
   if (effectsTimer) clearInterval(effectsTimer);
   effectsTimer = setInterval(() => {
-    switch (currentState) {
-      case 'sleeping':
-        spawnZZZ();
-        break;
-      case 'working':
-        spawnSparkle();
-        break;
-      case 'alert':
-        spawnAlertBang();
-        break;
-    }
+    // Safety net: keep the state motion looping even if motionFinish is missed.
+    triggerPeriodicMotion();
+    // Head-top effects (ZZZ / working dots / !) are driven by CSS animations
+    // inside #head-effect and repositioned every frame by updateDebugBounds,
+    // so this loop no longer spawns DOM nodes.
   }, EFFECT_INTERVAL_MS);
 }
 
@@ -491,47 +973,13 @@ function clearEffects() {
   overlay.innerHTML = '';
 }
 
-function spawnZZZ() {
-  const overlay = document.getElementById('effect-overlay');
-  const zzz = document.createElement('div');
-  zzz.className = 'zzz';
-  zzz.textContent = 'Z';
-  zzz.style.left = (140 + Math.random() * 40) + 'px';
-  zzz.style.top = (80 + Math.random() * 20) + 'px';
-  zzz.style.fontSize = (16 + Math.random() * 8) + 'px';
-  overlay.appendChild(zzz);
-  setTimeout(() => zzz.remove(), 3000);
-}
-
-function spawnSparkle() {
-  const overlay = document.getElementById('effect-overlay');
-  const sparkle = document.createElement('div');
-  sparkle.className = 'sparkle';
-  sparkle.style.left = (100 + Math.random() * 100) + 'px';
-  sparkle.style.top = (150 + Math.random() * 50) + 'px';
-  overlay.appendChild(sparkle);
-  setTimeout(() => sparkle.remove(), 1500);
-}
-
-function spawnAlertBang() {
-  const overlay = document.getElementById('effect-overlay');
-  // Guard against duplicate '!' icons if the interval fires again while
-  // alert state persists — the element is only removed by clearEffects() on
-  // state transition.
-  if (overlay.querySelector('.alert-bang')) return;
-  const bang = document.createElement('div');
-  bang.className = 'alert-bang';
-  bang.textContent = '!';
-  overlay.appendChild(bang);
-}
-
 // ===== Status Bar Rendering =====
 function updateStatusBar(snapshot) {
   currentSnapshot = snapshot;
   const projectList = document.getElementById('project-list');
 
   if (!snapshot.sessions || snapshot.sessions.length === 0) {
-    projectList.innerHTML = '<div class="project-item empty">等待 Trae IDE 连接...</div>';
+    projectList.innerHTML = `<div class="project-item empty">${i18n.t('status.waiting')}</div>`;
     return;
   }
 
@@ -552,11 +1000,11 @@ function updateStatusBar(snapshot) {
     statusText.className = 'project-status-text';
     if (session.status === 'confirmation-needed') {
       statusText.classList.add('alert');
-      statusText.textContent = session.alertMessage || '需要确认';
+      statusText.textContent = session.alertMessage || i18n.t('status.confirmationNeeded');
     } else if (session.status === 'working') {
-      statusText.textContent = '忙碌';
+      statusText.textContent = i18n.t('status.busy');
     } else {
-      statusText.textContent = '空闲';
+      statusText.textContent = i18n.t('status.idle');
     }
 
     item.appendChild(dot);
@@ -565,9 +1013,11 @@ function updateStatusBar(snapshot) {
 
     // Click to bring IDE to front
     item.addEventListener('click', () => {
-      if (window.petAPI && session.projectPath) {
-        window.petAPI.bringToFront(session.projectPath);
-      }
+      if (!window.petAPI) return;
+      // Window-detected sessions have no projectPath; fall back to projectName
+      // (bring-to-front matches by folder name in the window title).
+      const target = session.projectPath || session.projectName;
+      if (target) window.petAPI.bringToFront(target);
     });
 
     projectList.appendChild(item);
@@ -607,51 +1057,167 @@ function flashWindowAttention() {
 }
 
 // ===== Context Menu =====
+/**
+ * Position the menu above the ☰ button, clamped to the window. The max-height
+ * is capped to the space above the button so the tall motion submenu scrolls
+ * internally instead of being clipped at the window bottom.
+ */
+function positionMenu() {
+  const menuBtn = document.getElementById('menu-btn');
+  const contextMenu = document.getElementById('context-menu');
+  const rect = menuBtn.getBoundingClientRect();
+  // Space available above the button (menu opens upward). Floor at 140 so a
+  // tiny window still shows a usable menu.
+  const maxH = Math.max(140, rect.top - 6);
+  contextMenu.style.maxHeight = maxH + 'px';
+  contextMenu.classList.remove('hidden');
+  // Measure after unhiding, then clamp upward so the bottom stays visible.
+  const menuHeight = contextMenu.offsetHeight || 200;
+  const menuWidth = contextMenu.offsetWidth || 210;
+  const top = Math.max(2, rect.top - menuHeight - 4);
+  const left = Math.max(0, rect.right - menuWidth);
+  contextMenu.style.left = left + 'px';
+  contextMenu.style.top = top + 'px';
+}
+
+/**
+ * Re-clamp the menu's vertical position after switching views — the content
+ * height differs between the main view and the motion submenu.
+ */
+function repositionMenu() {
+  const menuBtn = document.getElementById('menu-btn');
+  const contextMenu = document.getElementById('context-menu');
+  if (contextMenu.classList.contains('hidden')) return;
+  const rect = menuBtn.getBoundingClientRect();
+  const menuHeight = contextMenu.offsetHeight || 200;
+  contextMenu.style.top = Math.max(2, rect.top - menuHeight - 4) + 'px';
+}
+
+/**
+ * Show one of the three menu views (main / model / motion), hiding the others.
+ */
+function showView(viewId) {
+  for (const id of ['menu-main-view', 'menu-model-view', 'menu-motion-view', 'menu-settings-view', 'menu-language-view']) {
+    document.getElementById(id).classList.toggle('hidden', id !== viewId);
+  }
+  repositionMenu();
+}
+
+/** Hide the menu and reset it to the main view for the next open. */
+function closeMenu() {
+  document.getElementById('context-menu').classList.add('hidden');
+  showView('menu-main-view');
+}
+
 function setupContextMenu() {
   const menuBtn = document.getElementById('menu-btn');
   const contextMenu = document.getElementById('context-menu');
 
+  // Toggle open/close on ☰ click. Clicking the button doesn't bubble to the
+  // document (stopPropagation), so without a toggle a second click would just
+  // reposition the already-open menu.
   menuBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    const rect = menuBtn.getBoundingClientRect();
-    contextMenu.classList.remove('hidden');
-    // The ☰ button sits near the bottom of the 520px window, so open the menu
-    // UPWARD (its bottom aligns just above the button). This keeps the 退出
-    // item (last in the menu) visible right above the button instead of being
-    // clipped off the bottom of the window. Clamp so it never overflows the top.
-    const menuHeight = contextMenu.offsetHeight || 400;
-    const menuWidth = contextMenu.offsetWidth || 210;
-    const top = Math.max(2, rect.top - menuHeight - 4);
-    const left = Math.max(0, rect.right - menuWidth);
-    contextMenu.style.left = left + 'px';
-    contextMenu.style.top = top + 'px';
+    if (!contextMenu.classList.contains('hidden')) {
+      closeMenu();
+      return;
+    }
+    showView('menu-main-view'); // always open on the main view
+    positionMenu();
   });
 
+  // Clicking anywhere outside the menu (blank space) closes it.
   document.addEventListener('click', () => {
-    contextMenu.classList.add('hidden');
+    closeMenu();
   });
+
+  // Window losing focus (user clicked another app) also closes the menu —
+  // the transparent pet window is small and can't receive click events from
+  // outside its bounds, so the document click handler above won't fire.
+  window.addEventListener('blur', closeMenu);
 
   contextMenu.addEventListener('click', (e) => {
     e.stopPropagation();
   });
 
-  // Menu actions
-  document.getElementById('menu-install-hooks').addEventListener('click', async () => {
-    contextMenu.classList.add('hidden');
-    if (window.petAPI) {
-      const result = await window.petAPI.installHooks();
-      if (result.success) {
-        showInstallResult(true, result);
-        checkHooksStatus(); // refresh the hint after install
-      } else {
-        showInstallResult(false, result);
-      }
+  // Secondary menus: 切换形象 / 播放动作 / 动作设定  ->  pop out the list
+  document.getElementById('menu-models-trigger').addEventListener('click', () => {
+    showView('menu-model-view');
+  });
+
+  document.getElementById('menu-play-motion').addEventListener('click', () => {
+    openMotionView('play');
+  });
+
+  document.getElementById('menu-settings-trigger').addEventListener('click', () => {
+    buildSettingsMenu();
+    showView('menu-settings-view');
+  });
+
+  // State rows in 动作设定 -> open the motion picker in assign mode.
+  document.getElementById('settings-sleeping').addEventListener('click', () => {
+    openMotionView('assign', 'sleeping');
+  });
+  document.getElementById('settings-working').addEventListener('click', () => {
+    openMotionView('assign', 'working');
+  });
+  document.getElementById('settings-alert').addEventListener('click', () => {
+    openMotionView('assign', 'alert');
+  });
+
+  // 语言 -> open the language picker submenu.
+  document.getElementById('menu-language-trigger').addEventListener('click', () => {
+    showView('menu-language-view');
+  });
+
+  document.getElementById('menu-language-back').addEventListener('click', () => {
+    showView('menu-main-view');
+  });
+
+  // 开机自启动 -> toggle the Windows Run registry entry.
+  document.getElementById('menu-auto-launch').addEventListener('click', () => {
+    toggleAutoLaunch();
+  });
+
+  // 检查新版本 -> check for updates via electron-updater.
+  document.getElementById('menu-check-updates').addEventListener('click', () => {
+    closeMenu();
+    // If an update was already downloaded, clicking again installs it.
+    if (updateDownloaded) {
+      if (window.petAPI && window.petAPI.installUpdate) window.petAPI.installUpdate();
+    } else {
+      checkForUpdates();
     }
+  });
+
+  // 预览提醒效果 -> trigger a fake confirmation-needed session for 8s.
+  document.getElementById('menu-test-alert').addEventListener('click', () => {
+    closeMenu();
+    if (window.petAPI && window.petAPI.testAlert) window.petAPI.testAlert();
+  });
+
+  // ◀ 返回 -> back to the appropriate parent view (menu stays open)
+  document.getElementById('menu-model-back').addEventListener('click', () => {
+    showView('menu-main-view');
+  });
+
+  document.getElementById('menu-motion-back').addEventListener('click', () => {
+    // In assign mode the parent is the 动作设定 view; otherwise the main view.
+    showView(motionPickerMode === 'assign' ? 'menu-settings-view' : 'menu-main-view');
+  });
+
+  document.getElementById('menu-settings-back').addEventListener('click', () => {
+    showView('menu-main-view');
+  });
+
+  // 左右翻转 toggle (checkbox) — keep the menu open so the ✓ change is visible.
+  document.getElementById('menu-flip').addEventListener('click', () => {
+    toggleFlip();
   });
 
   // Menu actions
   document.getElementById('menu-install-hooks').addEventListener('click', async () => {
-    contextMenu.classList.add('hidden');
+    closeMenu();
     if (window.petAPI) {
       const result = await window.petAPI.installHooks();
       if (result.success) {
@@ -664,41 +1230,10 @@ function setupContextMenu() {
   });
 
   document.getElementById('menu-hook-status').addEventListener('click', async () => {
-    contextMenu.classList.add('hidden');
+    closeMenu();
     if (!window.petAPI) return;
     const status = await window.petAPI.isHooksInstalled();
     showHookStatusDialog(status);
-  });
-
-  // Test-state buttons: change the state through the normal setPetState path
-  // (which cascades into motion, UI, and effects) but DON'T emit to the main
-  // process StateManager — these are purely local visual overrides for dev.
-  document.getElementById('menu-test-busy').addEventListener('click', () => {
-    contextMenu.classList.add('hidden');
-    setPetState('working');
-  });
-
-  document.getElementById('menu-test-alert').addEventListener('click', () => {
-    contextMenu.classList.add('hidden');
-    setPetState('alert');
-  });
-
-  document.getElementById('menu-test-sleep').addEventListener('click', () => {
-    contextMenu.classList.add('hidden');
-    setPetState('sleeping');
-  });
-
-  document.getElementById('menu-play-motion').addEventListener('click', () => {
-    contextMenu.classList.add('hidden');
-    if (live2dModel) {
-      const random = MOTION_NAMES[Math.floor(Math.random() * MOTION_NAMES.length)];
-      try {
-        live2dModel.motion(random);
-      } catch (e) {
-        // Motion name may not exist on this model — try 'Idle' as fallback
-        try { live2dModel.motion('Idle'); } catch (e2) { /* ignore */ }
-      }
-    }
   });
 
   document.getElementById('menu-quit').addEventListener('click', () => {
@@ -706,28 +1241,29 @@ function setupContextMenu() {
       window.petAPI.quit();
     }
   });
+
+  document.getElementById('menu-uninstall').addEventListener('click', () => {
+    if (window.petAPI && window.petAPI.uninstallApp) {
+      window.petAPI.uninstallApp();
+    }
+  });
 }
 
 function showInstallResult(success, result) {
   const stateText = document.getElementById('pet-state-text');
   if (success) {
-    // Step-by-step guide: files are written, but Trae IDE requires manual
-    // enablement via Settings → Hooks → 启用 button.
-    stateText.textContent = '✅ 已写入配置 → 请在 Trae 设置→Hooks 中启用';
+    stateText.textContent = i18n.t('hook.installSuccess');
     stateText.title = [
-      'Hook 配置文件已写入，但 Trae IDE 需要在设置中启用后才会执行：',
+      i18n.t('hook.installSuccess'),
       '',
-      '1. Trae IDE 已打开 hooks.json（自动弹出）',
-      '2. 在 Trae IDE 中按 Ctrl+, 打开设置',
-      '3. 搜索 "Hooks" 进入 Hooks 设置页',
-      '4. 在"全局"标签下找到已配置的 Hooks，点击齿轮→启用',
-      '   （或点"创建"按钮让 IDE 自动识别已有配置）',
-      '5. 在弹出的安全警示面板中点"启用"',
-      '6. 开一个新的 AI 会话即可触发',
+      '1. Trae IDE -> Settings -> Hooks',
+      '2. Local auto-run',
+      '3. Enable',
+      '4. New AI session',
     ].join('\n');
     // Don't auto-reset; let the state-update replace it when events arrive.
   } else {
-    stateText.textContent = '❌ Hook 安装失败';
+    stateText.textContent = i18n.t('hook.installFailed');
     setTimeout(() => { updateStateUI(currentState); }, 4000);
   }
 }
@@ -740,20 +1276,19 @@ async function checkHooksStatus() {
   const stateText = document.getElementById('pet-state-text');
   if (!hooksInstalled) {
     if (currentSnapshot.sessions.length === 0 && currentState === 'sleeping') {
-      stateText.textContent = '⚠ 请点☰→安装 Hook 集成';
-      stateText.title = '点右上角☰菜单 → 安装 Hook 集成';
+      stateText.textContent = i18n.t('hook.pleaseInstall');
+      stateText.title = i18n.t('hook.pleaseInstall');
     }
   } else if (currentSnapshot.sessions.length === 0 && currentState === 'sleeping') {
     // Hooks installed but no events ever received → user needs to enable in IDE.
-    stateText.textContent = '⚠ 请在 Trae 设置→Hooks 中启用';
+    stateText.textContent = i18n.t('hook.pleaseEnable');
     stateText.title = [
-      'Hook 配置文件已写入，但 Trae IDE 需要在设置中手动启用：',
+      i18n.t('hook.pleaseEnable'),
       '',
-      '1. 按 Ctrl+, 打开 Trae 设置',
-      '2. 搜索 "Hooks" 进入 Hooks 设置页',
-      '3. 全局标签下 → 点"创建"或齿轮图标→启用',
-      '4. 弹出安全警示面板 → 点"启用"',
-      '5. 开一个新的 AI 会话',
+      '1. Trae IDE -> Settings -> Hooks',
+      '2. Local auto-run',
+      '3. Enable',
+      '4. New AI session',
     ].join('\n');
   }
 }
@@ -766,13 +1301,13 @@ function updateHookStatusHint(installed, snapshot) {
   if (!hint) return;
   const parts = [];
   if (!installed) {
-    parts.push('未安装');
+    parts.push(i18n.t('hook.notInstalled'));
   } else if (snapshot && snapshot.lastEventAt) {
     const ago = Math.max(0, Math.floor((Date.now() - snapshot.lastEventAt) / 1000));
-    parts.push('已连接');
-    parts.push(ago < 60 ? `${ago}s前` : `${Math.floor(ago / 60)}m前`);
+    parts.push(i18n.t('hook.connected'));
+    parts.push(ago < 60 ? i18n.t('hook.secondsAgo', { n: ago }) : i18n.t('hook.minutesAgo', { n: Math.floor(ago / 60) }));
   } else {
-    parts.push('需在IDE启用');
+    parts.push(i18n.t('hook.needsEnable'));
   }
   hint.textContent = parts.join(' · ');
 }
@@ -784,12 +1319,12 @@ function showHookStatusDialog(status) {
   const stateText = document.getElementById('pet-state-text');
   const original = stateText.textContent;
   const lines = [
-    `Hook 配置: ${status.installed ? '已安装' : '未安装'}`,
-    `bridge 脚本: ${status.bridgeExists ? '存在' : '缺失'}`,
-    `hooks.json: ${status.hooksExist ? '存在' : '缺失'}`,
+    `${i18n.t('hook.dialogConfig')}: ${status.installed ? i18n.t('hook.installed') : i18n.t('hook.notInstalledLabel')}`,
+    `${i18n.t('hook.dialogBridge')}: ${status.bridgeExists ? i18n.t('hook.exists') : i18n.t('hook.missing')}`,
+    `${i18n.t('hook.dialogHooksJson')}: ${status.hooksExist ? i18n.t('hook.exists') : i18n.t('hook.missing')}`,
   ];
-  stateText.textContent = status.installed ? '✅ Hook 已安装' : '⚠ Hook 未安装';
-  stateText.title = lines.join('\n') + '\n\n若 IDE 不显示：设置→Hooks 启用 → 开新 AI 会话';
+  stateText.textContent = status.installed ? i18n.t('hook.dialogInstalledMsg') : i18n.t('hook.dialogNotInstalledMsg');
+  stateText.title = lines.join('\n') + '\n\n' + i18n.t('hook.dialogHint');
   setTimeout(() => {
     stateText.textContent = original;
     stateText.title = '';
@@ -799,13 +1334,16 @@ function showHookStatusDialog(status) {
 // ===== Drag Setup =====
 function setupDrag() {
   const wrapper = document.getElementById('canvas-wrapper');
-  let isDragging = false;
   let lastX = 0;
   let lastY = 0;
   let hasMoved = false;
 
   wrapper.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return; // Only left click
+    // Only start dragging when the pointer is actually over the model's bounds,
+    // not on the empty canvas padding — matches the click-through hit area so
+    // the "solid red box" interior is both the tap target and the drag target.
+    if (!isPointOnModel(e.clientX, e.clientY)) return;
     isDragging = true;
     hasMoved = false;
     lastX = e.screenX;
@@ -840,6 +1378,78 @@ function setupDrag() {
     lastX = e.screenX;
     lastY = e.screenY;
   });
+}
+
+// ===== Click-Through =====
+/**
+ * Test whether a screen point (clientX/Y) is over the Live2D model's hit area.
+ * Uses the model's current world-space bounding box (getBounds()), which is
+ * the same rect as the red debug box — so the interactive area matches what
+ * the user sees as the "solid red box" interior. Empty canvas padding outside
+ * the box returns false and passes clicks through to the desktop.
+ */
+function isPointOnModel(clientX, clientY) {
+  if (!live2dModel || !pixiApp) return false;
+  const canvas = pixiApp.view;
+  const rect = canvas.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
+  if (x < 0 || y < 0 || x > rect.width || y > rect.height) return false;
+  try {
+    const b = live2dModel.getBounds();
+    return x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Dynamic click-through: let transparent (empty) areas of the window pass mouse
+ * events through to the desktop, while keeping the model, status bar, and menu
+ * interactive.
+ *
+ * Driven by mousemove — Electron forwards mousemove to the renderer even while
+ * ignoring mouse events ({forward:true}), so we can detect what's under the
+ * cursor and toggle. The model is hit-tested via PixiJS so only its real
+ * drawable area is interactive; the empty canvas padding passes through.
+ *
+ * While dragging or while the menu is open we never pass through (drag needs
+ * continuous mousemove; the menu needs click-outside to close).
+ */
+function setupClickThrough() {
+  if (!window.petAPI || !window.petAPI.setClickThrough) return;
+  let currentlyIgnoring = false;
+  const setIgnore = (ignore) => {
+    if (ignore === currentlyIgnoring) return;
+    currentlyIgnoring = ignore;
+    window.petAPI.setClickThrough(ignore);
+  };
+  const contextMenu = document.getElementById('context-menu');
+
+  document.addEventListener('mousemove', (e) => {
+    // While dragging the window or while the menu is open, never pass through.
+    if (isDragging || (contextMenu && !contextMenu.classList.contains('hidden'))) {
+      setIgnore(false);
+      return;
+    }
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    // Status bar + context menu are always interactive (menu, project list, drag).
+    if (el && el.closest('#status-bar, #context-menu')) {
+      setIgnore(false);
+      return;
+    }
+    // On the canvas: only the model itself is interactive; empty space passes through.
+    if (el && el.closest('#canvas-wrapper')) {
+      setIgnore(!isPointOnModel(e.clientX, e.clientY));
+      return;
+    }
+    // Anywhere else (transparent padding around the pet): pass through.
+    setIgnore(true);
+  });
+
+  // Safety: if the window loses focus while ignoring, re-enable mouse events
+  // so the pet doesn't become permanently click-through.
+  window.addEventListener('blur', () => setIgnore(false));
 }
 
 // ===== Start =====

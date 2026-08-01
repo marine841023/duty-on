@@ -11,15 +11,15 @@ module.exports = {
   HOST: '127.0.0.1',
 
   // ===== Window =====
-  WINDOW_WIDTH: 320,
-  WINDOW_HEIGHT: 520,
+  WINDOW_WIDTH: 260,
+  WINDOW_HEIGHT: 420,
   WINDOW_MARGIN: 20, // offset from bottom-right corner
 
   // ===== State timeouts (ms) =====
-  WORKING_TIMEOUT: 5 * 60 * 1000,   // 5 min: working -> idle if silent
-  SESSION_TIMEOUT: 30 * 60 * 1000,  // 30 min: session removed if silent
+  WORKING_TIMEOUT: 3 * 60 * 1000,   // 3 min: working -> idle if silent
+  SESSION_TIMEOUT: 10 * 60 * 1000,  // 10 min: session removed if silent (fallback; window scan is primary)
   ALERT_REMINDER: 60 * 1000,        // 1 min: re-alert interval while in alert
-  CLEANUP_INTERVAL_MS: 60 * 1000,   // cleanup timer tick
+  CLEANUP_INTERVAL_MS: 30 * 1000,   // cleanup timer tick
 
   // ===== Hook bridge =====
   BRIDGE_TIMEOUT_SEC: 5,
@@ -38,7 +38,21 @@ module.exports = {
   // Tunable after diagnosing real Trae Notification payloads — see README.
   NOTIFICATION_COMPLETE_TYPES: ['task_complete', 'idle', 'done'],
   NOTIFICATION_CONFIRM_TYPES: ['permission_request', 'confirmation', 'input_needed'],
-  NOTIFICATION_CONFIRM_KEYWORDS: ['确认', '允许', '授权', 'permission', 'confirm', 'allow', 'approve'],
+  // Keywords that indicate a Notification is asking for user confirmation.
+  // Expanded to cover "run command" / "execute command" phrasing — Trae IDE
+  // prompts like "Trae wants to run command: Remove-Item ..." must trigger
+  // alert even without a tool_name field.
+  NOTIFICATION_CONFIRM_KEYWORDS: [
+    '确认', '允许', '授权', '运行命令', '执行命令', '想要运行', '想要执行',
+    'permission', 'confirm', 'allow', 'approve',
+    'run command', 'execute command', 'wants to run', 'want to run',
+    'wants to execute', 'want to execute',
+  ],
+  // Regex matching shell-command patterns in a Notification message — when the
+  // AI requests authorization to run a command, the message usually contains
+  // the command name (PowerShell Verb-Noun cmdlet like "Remove-Item", or an
+  // .exe call). This catches messages that don't contain the keywords above.
+  NOTIFICATION_CMD_PATTERN: /\b[A-Z][a-z]+-[A-Z]\w+\b|\b\w+\.exe\b/i,
   // Ambiguous Notification received while working:
   //   false = treat as task-complete (-> idle), avoids false alerts (default)
   //   true  = treat as confirmation-needed (preserves original "alert on any" behavior)

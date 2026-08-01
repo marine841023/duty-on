@@ -1,0 +1,12 @@
+{
+  "name": "traepet-update-server",
+  "version": "1.0.0",
+  "description": "Update server for TraePet desktop pet — serves version manifests and installers",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": ["electron-updater", "update-server", "traepet"],
+  "license": "MIT"
+}

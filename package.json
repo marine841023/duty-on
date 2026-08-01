@@ -10,11 +10,13 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "postinstall": "node scripts/download-assets.js",
-    "dist": "electron-builder --win portable",
-    "dist:installer": "electron-builder --win nsis",
-    "dist:dir": "electron-builder --win --dir"
+    "dist": "electron-builder --win nsis",
+    "dist:portable": "electron-builder --win portable",
+    "dist:dir": "electron-builder --win --dir",
+    "publish": "electron-builder --win nsis --publish always"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "pixi-live2d-display": "^0.4.0",
     "pixi.js": "^7.4.0"
   },
@@ -35,12 +37,24 @@
       "assets/**/*",
       "hooks/**/*",
       "node_modules/**/*",
-      "scripts/**/*",
       "package.json",
-      "!**/*.{md,markdown}",
+      "!**/*.{md,markdown,map}",
       "!**/.{git,gitignore,DS_Store}",
       "!release/**",
-      "!build/**"
+      "!build/**",
+      "!scripts/**",
+      "!node_modules/@pixi/**",
+      "!node_modules/pixi.js/{src,lib,cjs,test,tests,types}/**",
+      "!node_modules/pixi.js/dist/{browser,cjs,esm}/**",
+      "!node_modules/pixi.js/node_modules/**",
+      "!node_modules/pixi-live2d-display/{src,lib,test,tests,types}/**"
+    ],
+    "electronLanguages": [
+      "zh-CN",
+      "zh-TW",
+      "en-US",
+      "ja",
+      "ko-KR"
     ],
     "extraResources": [
       {
@@ -51,7 +65,7 @@
     "win": {
       "target": [
         {
-          "target": "portable",
+          "target": "nsis",
           "arch": [
             "x64"
           ]
@@ -67,7 +81,13 @@
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
+      "installerLanguages": ["zh-CN", "zh-TW", "en-US", "ja", "ko-KR"],
+      "include": "build/installer.nsh",
       "artifactName": "TraePet-Setup-${version}.${ext}"
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "http://127.0.0.1:17522/updates"
     }
   }
 }

@@ -7,6 +7,9 @@ dist/
 out/
 build/
 
+# Rust build artifacts (Tauri)
+src-tauri/target/
+
 # Logs
 *.log
 .userdata/*.log
