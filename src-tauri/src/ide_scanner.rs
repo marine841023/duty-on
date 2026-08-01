@@ -69,26 +69,27 @@ use windows::Win32::UI::WindowsAndMessaging::{
 #[cfg(windows)]
 struct FocusCtx {
     name: String,
-    best: *mut Option<HWND>,
-    substring: *mut Option<HWND>,
+    best: Option<HWND>,
+    substring: Option<HWND>,
 }
 
 /// Focus the Trae IDE window whose project segment matches `name`.
 #[cfg(windows)]
 pub fn focus_project_window(name: &str) -> bool {
-    let mut best: Option<HWND> = None;
-    let mut substring_match: Option<HWND> = None;
-    let ctx = FocusCtx {
+    // The context is passed to the EnumWindows callback as a raw pointer
+    // (Win32 LPARAM has no generics); the borrow lives for the duration of
+    // the EnumWindows call, which is synchronous, so this is sound.
+    let mut ctx = FocusCtx {
         name: name.to_string(),
-        best: &mut best,
-        substring: &mut substring_match,
+        best: None,
+        substring: None,
     };
-    let lparam = LPARAM(&ctx as *const FocusCtx as isize);
+    let lparam = LPARAM(&mut ctx as *mut FocusCtx as isize);
     unsafe {
         let _ = EnumWindows(Some(focus_proc), lparam);
     }
 
-    let target = best.or(substring_match);
+    let target = ctx.best.or(ctx.substring);
     if let Some(hwnd) = target {
         unsafe {
             if IsIconic(hwnd).as_bool() {
@@ -104,7 +105,7 @@ pub fn focus_project_window(name: &str) -> bool {
 
 #[cfg(windows)]
 unsafe extern "system" fn focus_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let ctx = &*(lparam.0 as *const FocusCtx);
+    let ctx = &mut *(lparam.0 as *mut FocusCtx);
     if !IsWindowVisible(hwnd).as_bool() {
         return BOOL(1);
     }
@@ -128,12 +129,12 @@ unsafe extern "system" fn focus_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         return BOOL(1);
     };
     if folder.eq_ignore_ascii_case(&ctx.name) {
-        *ctx.best = Some(hwnd);
+        ctx.best = Some(hwnd);
     } else if title.to_lowercase().contains(&ctx.name.to_lowercase())
-        && (*ctx.best).is_none()
-        && (*ctx.substring).is_none()
+        && ctx.best.is_none()
+        && ctx.substring.is_none()
     {
-        *ctx.substring = Some(hwnd);
+        ctx.substring = Some(hwnd);
     }
     BOOL(1)
 }

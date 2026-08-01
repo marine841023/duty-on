@@ -1,5 +1,5 @@
 //! User preferences persistence — port of loadUserConfig/saveUserConfig in
-//! `src/main/index.js`. Reads/writes `~/.trae-pet/config.json`.
+//! `src/main/index.js`. Reads/writes `~/.dutyon/config.json`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,16 +26,12 @@ pub struct UserConfig {
     pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_position: Option<WindowPosition>,
-    /// Base URL of the update server (e.g. "http://example.com"). Empty until
-    /// the user provides one; the updater stays inert while empty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub update_server_url: Option<String>,
 }
 
-/// Path to `~/.trae-pet/config.json`.
+/// Path to `~/.dutyon/config.json`.
 pub fn config_path() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".trae-pet").join("config.json")
+    home.join(".dutyon").join("config.json")
 }
 
 /// Load the user config. Returns an empty default on any error (missing file,

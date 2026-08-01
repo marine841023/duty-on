@@ -6,7 +6,7 @@
   <!-- CSP: allow self + inline scripts (needed for the dynamic script loader) + jsdelivr CDN -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http://127.0.0.1:17521 https://cdn.jsdelivr.net https://cubism.live2d.com;">
-  <title>Trae Pet</title>
+  <title>Duty On</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -52,8 +52,6 @@
       <div id="live2d-canvas"></div>
       <!-- Fallback canvas (shown if Live2D fails to load) -->
       <canvas id="fallback-canvas" width="280" height="320" style="display:none;"></canvas>
-      <!-- Effect overlay (legacy, kept for future full-body effects) -->
-      <div id="effect-overlay"></div>
       <!-- Head-top effects (ZZZ / working dots / !) anchored to the model's
            bounds top-center, shifted 40px down. Capped at 40px tall. -->
       <div id="head-effect" class="head-effect"></div>
@@ -90,7 +88,6 @@
         <span data-i18n="menu.language">语言</span><span class="submenu-arrow">▶</span>
       </div>
       <div class="menu-divider"></div>
-      <div class="menu-item" id="menu-check-updates" data-i18n="menu.checkUpdates">检查新版本</div>
       <div class="menu-item" id="menu-install-hooks" data-i18n="menu.installHooks">安装 Hook 集成</div>
       <div class="menu-item" id="menu-hook-status"><span data-i18n="menu.hookStatus">Hook 状态</span><span class="menu-hint" id="hook-status-hint">未检查</span></div>
       <div class="menu-divider"></div>

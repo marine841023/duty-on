@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    Standalone installer for Trae Pet Hook integration.
+    Standalone installer for DutyOn (开工啦) Hook integration.
 .DESCRIPTION
     Copies the hook bridge script and creates the hooks.json configuration
-    for Trae IDE. Can be run independently of the Electron app.
+    for Trae IDE. Can be run independently of the DutyOn app.
 .EXAMPLE
     .\install-hooks.ps1
 #>
@@ -11,12 +11,12 @@
 $ErrorActionPreference = 'Stop'
 
 $userHome = $env:USERPROFILE
-$hookDir = Join-Path $userHome ".trae-pet\hooks"
+$hookDir = Join-Path $userHome ".dutyon\hooks"
 $bridgeSrc = Join-Path $PSScriptRoot "trae-hook-bridge.ps1"
 $bridgeDst = Join-Path $hookDir "trae-hook-bridge.ps1"
 $traeHooksPath = Join-Path $userHome ".trae-cn\hooks.json"
 
-Write-Host "=== Trae Pet Hook Installer ===" -ForegroundColor Cyan
+Write-Host "=== DutyOn Hook Installer ===" -ForegroundColor Cyan
 
 # 1. Create hook directory and copy bridge script
 Write-Host "[1/3] Installing bridge script..." -ForegroundColor Yellow
@@ -60,20 +60,20 @@ foreach ($eventName in $events) {
     # Check if this event already has hooks
     $existingArray = $existingHooks.hooks.$eventName
 
-    # Filter out any existing trae-pet hooks
+    # Filter out any existing pet hooks (current .dutyon + legacy .trae-pet)
     $filteredArray = @()
     if ($existingArray) {
         foreach ($group in $existingArray) {
-            $hasTraePet = $false
+            $hasPetHook = $false
             if ($group.hooks) {
                 foreach ($h in $group.hooks) {
-                    if ($h.command -and $h.command -like '*.trae-pet*') {
-                        $hasTraePet = $true
+                    if ($h.command -and ($h.command -like '*.dutyon*' -or $h.command -like '*.trae-pet*')) {
+                        $hasPetHook = $true
                         break
                     }
                 }
             }
-            if (-not $hasTraePet) {
+            if (-not $hasPetHook) {
                 $filteredArray += $group
             }
         }
@@ -109,7 +109,7 @@ Write-Host "  Hooks config: $traeHooksPath" -ForegroundColor Green
 Write-Host "[3/3] Verifying installation..." -ForegroundColor Yellow
 $bridgeExists = Test-Path $bridgeDst
 $hooksContent = Get-Content $traeHooksPath -Raw
-$hooksValid = $hooksContent -like '*.trae-pet*'
+$hooksValid = $hooksContent -like '*.dutyon*'
 
 if ($bridgeExists -and $hooksValid) {
     Write-Host ""
@@ -120,7 +120,7 @@ if ($bridgeExists -and $hooksValid) {
     Write-Host ""
     Write-Host "=== Installation may have issues ===" -ForegroundColor Red
     if (-not $bridgeExists) { Write-Host "  Bridge script not found at: $bridgeDst" -ForegroundColor Red }
-    if (-not $hooksValid) { Write-Host "  Hooks config missing trae-pet entry" -ForegroundColor Red }
+    if (-not $hooksValid) { Write-Host "  Hooks config missing dutyon entry" -ForegroundColor Red }
 }
 
 Write-Host ""

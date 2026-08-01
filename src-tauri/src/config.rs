@@ -86,7 +86,6 @@ pub const ALERT_ON_AMBIGUOUS_NOTIFICATION: bool = false;
 // Adaptive interval: 4s when sessions exist, 15s when none.
 pub const SCAN_INTERVAL_ACTIVE_MS: u64 = 4000;
 pub const SCAN_INTERVAL_IDLE_MS: u64 = 15000;
-pub const SCAN_TIMEOUT_MS: u64 = 5000;
 // Window titles look like "<file> - <project> - Trae CN".
 pub const TRAE_TITLE_SUFFIX: &str = " - Trae CN";
 // Qoder window titles look like "<file> - <project> - Qoder".

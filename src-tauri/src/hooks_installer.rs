@@ -1,5 +1,5 @@
 //! Hook installer — port of `installHooks()` / `checkHooksInstalled()` in
-//! `src/main/index.js`. Copies the bridge script to `~/.trae-pet/hooks/` and
+//! `src/main/index.js`. Copies the bridge script to `~/.dutyon/hooks/` and
 //! merges hook entries into `~/.trae-cn/hooks.json` (preserving non-pet hooks).
 
 use crate::config;
@@ -53,10 +53,17 @@ fn bridge_filename() -> &'static str {
 /// depending on the executable bit and the `~` expansion quirks of some shells.
 fn hook_command() -> String {
     if cfg!(windows) {
-        r#"& "$env:USERPROFILE\.trae-pet\hooks\trae-hook-bridge.ps1""#.to_string()
+        r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#.to_string()
     } else {
-        r#"bash "$HOME/.trae-pet/hooks/trae-hook-bridge.sh""#.to_string()
+        r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh""#.to_string()
     }
+}
+
+/// True if a hook command belongs to this app. Matches both the current
+/// `.dutyon` dir and the legacy `.trae-pet` dir so re-installs after the
+/// rename dedupe/replace pre-rename entries instead of stacking alongside.
+fn is_pet_command(cmd: &str) -> bool {
+    cmd.contains(".dutyon") || cmd.contains(".trae-pet")
 }
 
 /// Qoder's `shell` field value per platform. Qoder supports an explicit
@@ -73,7 +80,7 @@ fn qoder_shell() -> &'static str {
 
 /// Merge pet hook entries into a hooks config file, preserving any other keys
 /// already present (e.g. Qoder's `enabledPlugins`). For each event in `events`,
-/// removes existing trae-pet groups (to avoid duplicates on re-install) then
+/// removes existing pet groups (to avoid duplicates on re-install) then
 /// appends a fresh group. `shell` is written into each hook entry when given
 /// (Qoder honors it; Trae ignores the unknown field, so we only set it for
 /// Qoder). `add_version` writes a Trae-style `version: 1` top-level field.
@@ -114,7 +121,7 @@ fn merge_hooks_into_file(
             }
             let arr = hooks.entry(event.to_string()).or_insert(json!([]));
             if let Some(a) = arr.as_array_mut() {
-                // Remove existing trae-pet hook groups (avoid duplicates).
+                // Remove existing pet hook groups (avoid duplicates).
                 a.retain(|g| {
                     g["hooks"]
                         .as_array()
@@ -122,7 +129,7 @@ fn merge_hooks_into_file(
                             !hs.iter().any(|h| {
                                 h["command"]
                                     .as_str()
-                                    .map(|c| c.contains(".trae-pet"))
+                                    .map(|c| is_pet_command(c))
                                     .unwrap_or(false)
                             })
                         })
@@ -156,7 +163,7 @@ pub fn install(hooks_source_dir: &Path) -> InstallResult {
     }
 
     let home = home();
-    let target_hook_dir = home.join(".trae-pet").join("hooks");
+    let target_hook_dir = home.join(".dutyon").join("hooks");
     if let Err(e) = fs::create_dir_all(&target_hook_dir) {
         return InstallResult {
             success: false,
@@ -261,13 +268,13 @@ pub fn is_installed() -> InstalledStatus {
     let home = home();
     let trae_hooks_path = home.join(".trae-cn").join("hooks.json");
     let qoder_hooks_path = home.join(".qoder").join("settings.json");
-    let bridge_path = home.join(".trae-pet").join("hooks").join(bridge_filename());
+    let bridge_path = home.join(".dutyon").join("hooks").join(bridge_filename());
 
     let bridge_exists = bridge_path.exists();
 
     let trae_hooks_contain_pet = if trae_hooks_path.exists() {
         fs::read_to_string(&trae_hooks_path)
-            .map(|c| c.contains(".trae-pet"))
+            .map(|c| is_pet_command(&c))
             .unwrap_or(false)
     } else {
         false
@@ -275,7 +282,7 @@ pub fn is_installed() -> InstalledStatus {
 
     let qoder_hooks_contain_pet = if qoder_hooks_path.exists() {
         fs::read_to_string(&qoder_hooks_path)
-            .map(|c| c.contains(".trae-pet"))
+            .map(|c| is_pet_command(&c))
             .unwrap_or(false)
     } else {
         false
@@ -303,7 +310,7 @@ mod tests {
     /// must set the `shell` field on each hook entry.
     #[test]
     fn qoder_merge_preserves_other_keys_and_adds_hooks() {
-        let dir = std::env::temp_dir().join("trae-pet-qoder-merge-test");
+        let dir = std::env::temp_dir().join("duty-on-qoder-merge-test");
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("settings.json");
         let original = r#"{
@@ -312,7 +319,7 @@ mod tests {
         }"#;
         fs::write(&path, original).unwrap();
 
-        let cmd = r#"& "$env:USERPROFILE\.trae-pet\hooks\trae-hook-bridge.ps1""#;
+        let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#;
         merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, cmd, Some("powershell"), false)
             .unwrap();
 
@@ -342,12 +349,12 @@ mod tests {
     /// set a `shell` field (Trae ignores it; we leave it off for cleanliness).
     #[test]
     fn trae_merge_adds_version_and_all_events_no_shell() {
-        let dir = std::env::temp_dir().join("trae-pet-trae-merge-test");
+        let dir = std::env::temp_dir().join("duty-on-trae-merge-test");
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("hooks.json");
         fs::write(&path, "{}").unwrap();
 
-        let cmd = r#"& "$env:USERPROFILE\.trae-pet\hooks\trae-hook-bridge.ps1""#;
+        let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#;
         merge_hooks_into_file(&path, config::HOOK_EVENTS, cmd, None, true).unwrap();
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -362,15 +369,15 @@ mod tests {
     }
 
     /// Re-running install must not stack duplicate hook groups (dedup by the
-    /// `.trae-pet` marker in the command string).
+    /// pet marker in the command string).
     #[test]
     fn merge_is_idempotent_no_duplicates() {
-        let dir = std::env::temp_dir().join("trae-pet-idempotent-test");
+        let dir = std::env::temp_dir().join("duty-on-idempotent-test");
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("settings.json");
         fs::write(&path, "{}").unwrap();
 
-        let cmd = r#"bash "$HOME/.trae-pet/hooks/trae-hook-bridge.sh""#;
+        let cmd = r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh""#;
         merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, cmd, Some("bash"), false).unwrap();
         merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, cmd, Some("bash"), false).unwrap();
 
@@ -383,6 +390,42 @@ mod tests {
                 ev
             );
         }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Pre-rename installs used the `.trae-pet` dir. A fresh install must
+    /// replace those legacy groups (not stack alongside them), and non-pet
+    /// groups must be preserved.
+    #[test]
+    fn merge_replaces_legacy_trae_pet_entries() {
+        let dir = std::env::temp_dir().join("duty-on-legacy-dedup-test");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("settings.json");
+        let legacy = r#"{
+            "hooks": {
+                "Stop": [
+                    { "hooks": [{ "type": "command", "command": "bash \"$HOME/.trae-pet/hooks/trae-hook-bridge.sh\"" }] },
+                    { "hooks": [{ "type": "command", "command": "echo someone-else" }] }
+                ]
+            }
+        }"#;
+        fs::write(&path, legacy).unwrap();
+
+        let cmd = r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh""#;
+        merge_hooks_into_file(&path, &["Stop"], cmd, Some("bash"), false).unwrap();
+
+        let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let arr = v["hooks"]["Stop"].as_array().unwrap();
+        // Legacy pet group replaced by the new one; the third-party group kept.
+        assert_eq!(arr.len(), 2);
+        let cmds: Vec<&str> = arr
+            .iter()
+            .filter_map(|g| g["hooks"][0]["command"].as_str())
+            .collect();
+        assert!(cmds.iter().any(|c| c.contains(".dutyon")));
+        assert!(!cmds.iter().any(|c| c.contains(".trae-pet")));
+        assert!(cmds.iter().any(|c| c.contains("someone-else")));
 
         let _ = fs::remove_dir_all(&dir);
     }

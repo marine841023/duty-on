@@ -21,7 +21,6 @@
     // ===== Events (renderer → main, main → renderer) =====
     onStateUpdate: (cb) => on('state-update', cb),
     onAlert: (cb) => on('alert', cb),
-    onUpdateStatus: (cb) => on('update-status', cb),
 
     // ===== Hooks =====
     installHooks: () => invoke('install_hooks'),
@@ -46,10 +45,6 @@
     // ===== Auto-launch =====
     getAutoLaunch: () => invoke('get_auto_launch'),
     setAutoLaunch: (enabled) => invoke('set_auto_launch', { enabled }),
-
-    // ===== Update =====
-    checkForUpdates: () => invoke('check_for_updates'),
-    installUpdate: () => invoke('install_update'),
 
     // ===== Test / window control =====
     testAlert: () => invoke('test_alert'),

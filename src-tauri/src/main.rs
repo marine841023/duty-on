@@ -16,5 +16,5 @@ fn main() {
             "--disable-gpu",
         );
     }
-    trae_pet_lib::run();
+    duty_on_lib::run();
 }

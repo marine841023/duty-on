@@ -1,4 +1,4 @@
-//! TraePet — Live2D desktop pet for monitoring Trae IDE AI task status.
+//! DutyOn （开工啦） — Live2D desktop pet for monitoring Trae IDE AI task status.
 //! Tauri 2.0 rewrite of the Electron app. See `.trae/documents/tauri-rewrite-plan.md`.
 
 mod click_through;
@@ -9,7 +9,6 @@ mod ide_scanner;
 mod models;
 mod server;
 mod state_manager;
-mod updater;
 mod user_config;
 
 use crate::state_manager::{current_millis, SharedStateManager, StateManager};
@@ -29,7 +28,7 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
@@ -55,8 +54,6 @@ pub fn run() {
             commands::set_language,
             commands::get_auto_launch,
             commands::set_auto_launch,
-            commands::check_for_updates,
-            commands::install_update,
             commands::test_alert,
             commands::drag_window,
             commands::set_click_through,

@@ -1,14 +1,14 @@
 <#
 .SYNOPSIS
-    Trae IDE Hook Bridge - Forwards hook events to the Trae Pet desktop application.
+    Trae IDE Hook Bridge - Forwards hook events to the DutyOn (开工啦) desktop application.
 .DESCRIPTION
     This script is called by Trae IDE's Hook system for each AI lifecycle event.
     It reads the hook event JSON from stdin, enriches it with project information,
-    and sends it to the Trae Pet's local HTTP server (http://127.0.0.1:17521/hook).
+    and sends it to the DutyOn app's local HTTP server (http://127.0.0.1:17521/hook).
     The script is designed to be fast and non-blocking - if the pet is not running,
     it exits silently without affecting the AI's workflow.
 
-    Diagnostic log is written to ~/.trae-pet/hooks/bridge.log so we can confirm
+    Diagnostic log is written to ~/.dutyon/hooks/bridge.log so we can confirm
     whether Trae IDE is actually invoking the hook.
 #>
 
@@ -17,7 +17,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 # --- Diagnostic logging (never breaks the hook on failure) ---
 function Write-BridgeLog($msg) {
   try {
-    $logDir = Join-Path $env:USERPROFILE '.trae-pet\hooks'
+    $logDir = Join-Path $env:USERPROFILE '.dutyon\hooks'
     $logPath = Join-Path $logDir 'bridge.log'
     if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
     $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
@@ -74,7 +74,7 @@ $event | Add-Member -NotePropertyName "timestamp" -NotePropertyValue ([DateTimeO
 # Convert back to JSON for sending
 $bodyJson = $event | ConvertTo-Json -Depth 10 -Compress
 
-# Send to Trae Pet's HTTP server (with short timeout to avoid blocking AI)
+# Send to DutyOn's HTTP server (with short timeout to avoid blocking AI)
 try {
   $response = Invoke-RestMethod -Uri 'http://127.0.0.1:17521/hook' `
     -Method Post `

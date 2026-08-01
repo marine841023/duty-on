@@ -429,7 +429,9 @@ impl StateManager {
 
         let session_ids: Vec<String> = self.sessions.keys().cloned().collect();
         for id in session_ids {
-            let elapsed = now - self.sessions.get(&id).map(|s| s.last_event_time).unwrap_or(0);
+            // saturating_sub: a system clock rollback (NTP sync, manual change)
+            // would otherwise make this u64 subtraction underflow and panic.
+            let elapsed = now.saturating_sub(self.sessions.get(&id).map(|s| s.last_event_time).unwrap_or(0));
             // Remove sessions unheard from for a long time.
             if elapsed > config::SESSION_TIMEOUT {
                 self.sessions.remove(&id);
@@ -464,7 +466,7 @@ impl StateManager {
         if self.overall_state != PetState::Alert {
             return;
         }
-        if self.now_ms() - self.last_alert_time >= config::ALERT_REMINDER {
+        if self.now_ms().saturating_sub(self.last_alert_time) >= config::ALERT_REMINDER {
             self.last_alert_time = self.now_ms();
             self.last_signature = None;
             let snap = self.get_snapshot();
@@ -479,13 +481,6 @@ impl StateManager {
             self.last_signature = None; // force update emission
             self.recompute_state();
         }
-    }
-
-    /// Clear all sessions.
-    pub fn clear_all(&mut self) {
-        self.sessions.clear();
-        self.last_signature = None;
-        self.recompute_state();
     }
 
     /// Number of sessions (used by the IDE scanner for adaptive interval).

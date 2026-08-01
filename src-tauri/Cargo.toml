@@ -1,12 +1,12 @@
 [package]
-name = "trae-pet"
+name = "duty-on"
 version = "1.0.0"
 description = "Live2D desktop pet for monitoring Trae IDE AI task status"
-authors = ["Trae Pet"]
+authors = ["DutyOn"]
 edition = "2021"
 
 [lib]
-name = "trae_pet_lib"
+name = "duty_on_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]
@@ -14,7 +14,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
-tauri-plugin-shell = "2"
+tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }

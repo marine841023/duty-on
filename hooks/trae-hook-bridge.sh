@@ -3,17 +3,17 @@
 #
 # Called by Trae IDE's Hook system for each AI lifecycle event. Reads the hook
 # event JSON from stdin, enriches it with project information, and POSTs it to
-# the Trae Pet local HTTP server (http://127.0.0.1:17521/hook).
+# the DutyOn (开工啦) local HTTP server (http://127.0.0.1:17521/hook).
 #
 # Non-blocking by design: if the pet is not running or any step fails, exit 0
 # silently so the AI's workflow is never affected.
 #
-# Diagnostic log: ~/.trae-pet/hooks/bridge.log
+# Diagnostic log: ~/.dutyon/hooks/bridge.log
 
 # Never let a failure here break the AI workflow.
 set +e
 
-LOG_DIR="$HOME/.trae-pet/hooks"
+LOG_DIR="$HOME/.dutyon/hooks"
 LOG_PATH="$LOG_DIR/bridge.log"
 PET_URL="http://127.0.0.1:17521/hook"
 

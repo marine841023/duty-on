@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "TraePet",
+  "productName": "DutyOn",
   "version": "1.0.0",
-  "identifier": "com.traepet.desktop",
+  "identifier": "com.dutyon.desktop",
   "build": {
     "frontendDist": "../frontend",
     "beforeDevCommand": "",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Trae Pet",
+        "title": "Duty On",
         "width": 260,
         "height": 420,
         "transparent": true,

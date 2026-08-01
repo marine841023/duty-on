@@ -2,8 +2,8 @@
  * Internationalization (i18n) module.
  *
  * Supports: 简体中文 (zh-CN), 繁體中文 (zh-TW), English (en), 日本語 (ja), 한국어 (ko).
- * Default language is detected from the OS locale (via main process); falls back
- * to English if the detected language isn't in the supported list.
+ * Default language is detected from the OS locale (via the Rust backend);
+ * falls back to English if the detected language isn't in the supported list.
  *
  * Usage:
  *   i18n.setLanguage('ja');
@@ -84,15 +84,6 @@ const TRANSLATIONS = {
     'motion.Shake.1': '摇头',
     'menu.autoLaunch': '开机自启动',
     'menu.uninstall': '卸载',
-    'menu.checkUpdates': '检查新版本',
-    'update.checking': '正在检查更新...',
-    'update.available': '发现新版本 v{version}，正在下载...',
-    'update.notAvailable': '当前已是最新版本',
-    'update.downloading': '正在下载更新... {percent}%',
-    'update.downloaded': 'v{version} 已下载，点击安装',
-    'update.error': '更新检查失败: {message}',
-    'update.networkError': '无法连接升级服务器，请到网站下载最新安装包进行覆盖安装',
-    'update.devMode': '开发模式下不可用',
   },
 
   'zh-TW': {
@@ -164,15 +155,6 @@ const TRANSLATIONS = {
     'motion.Shake.1': '搖頭',
     'menu.autoLaunch': '開機自啟動',
     'menu.uninstall': '解除安裝',
-    'menu.checkUpdates': '檢查新版本',
-    'update.checking': '正在檢查更新...',
-    'update.available': '發現新版本 v{version}，正在下載...',
-    'update.notAvailable': '當前已是最新版本',
-    'update.downloading': '正在下載更新... {percent}%',
-    'update.downloaded': 'v{version} 已下載，點擊安裝',
-    'update.error': '更新檢查失敗: {message}',
-    'update.networkError': '無法連接升級伺服器，請到網站下載最新安裝包進行覆蓋安裝',
-    'update.devMode': '開發模式下不可用',
   },
 
   'en': {
@@ -244,15 +226,6 @@ const TRANSLATIONS = {
     'motion.Shake.1': 'Shake Head',
     'menu.autoLaunch': 'Start on Boot',
     'menu.uninstall': 'Uninstall',
-    'menu.checkUpdates': 'Check for Updates',
-    'update.checking': 'Checking for updates...',
-    'update.available': 'New version v{version} available, downloading...',
-    'update.notAvailable': 'You are on the latest version',
-    'update.downloading': 'Downloading update... {percent}%',
-    'update.downloaded': 'v{version} downloaded, click to install',
-    'update.error': 'Update check failed: {message}',
-    'update.networkError': 'Cannot connect to the update server. Please download the latest installer from the website and install it over the current version.',
-    'update.devMode': 'Not available in dev mode',
   },
 
   'ja': {
@@ -324,15 +297,6 @@ const TRANSLATIONS = {
     'motion.Shake.1': '首を振る',
     'menu.autoLaunch': '起動時に自動開始',
     'menu.uninstall': 'アンインストール',
-    'menu.checkUpdates': 'アップデート確認',
-    'update.checking': 'アップデートを確認中...',
-    'update.available': '新しいバージョン v{version} があります。ダウンロード中...',
-    'update.notAvailable': '最新バージョンです',
-    'update.downloading': 'アップデートをダウンロード中... {percent}%',
-    'update.downloaded': 'v{version} ダウンロード完了、クリックしてインストール',
-    'update.error': 'アップデート確認失敗: {message}',
-    'update.networkError': 'アップデートサーバーに接続できません。Webサイトから最新のインストーラーをダウンロードして上書きインストールしてください。',
-    'update.devMode': '開発モードでは利用できません',
   },
 
   'ko': {
@@ -404,15 +368,6 @@ const TRANSLATIONS = {
     'motion.Shake.1': '고개 젓기',
     'menu.autoLaunch': '부팅 시 자동 시작',
     'menu.uninstall': '제거',
-    'menu.checkUpdates': '업데이트 확인',
-    'update.checking': '업데이트 확인 중...',
-    'update.available': '새 버전 v{version} 발견, 다운로드 중...',
-    'update.notAvailable': '최신 버전입니다',
-    'update.downloading': '업데이트 다운로드 중... {percent}%',
-    'update.downloaded': 'v{version} 다운로드 완료, 클릭하여 설치',
-    'update.error': '업데이트 확인 실패: {message}',
-    'update.networkError': '업데이트 서버에 연결할 수 없습니다. 웹사이트에서 최신 설치 프로그램을 다운로드하여 덮어쓰기 설치하세요.',
-    'update.devMode': '개발 모드에서 사용 불가',
   },
 };
 
@@ -429,8 +384,9 @@ const SUPPORTED_LANGUAGES = [
 ];
 
 /**
- * Map an Electron/Chromium locale string to a supported language code.
- * Electron locales look like 'zh-CN', 'zh-TW', 'en-US', 'ja-JP', 'ko-KR'.
+ * Map an OS locale string to a supported language code. The locale comes
+ * from the Rust backend (get_language command, via the sys-locale crate)
+ * and looks like 'zh-CN', 'zh-TW', 'en-US', 'ja-JP', 'ko-KR'.
  * We normalize to our 5 supported codes, falling back to 'en'.
  */
 function normalizeLocale(locale) {

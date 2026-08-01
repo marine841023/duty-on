@@ -160,62 +160,6 @@ async function toggleAutoLaunch() {
   item.classList.toggle('active', newState);
 }
 
-// ===== Update check =====
-let updateDownloaded = false;
-
-/**
- * Trigger an update check via the main process (electron-updater).
- * Status updates arrive asynchronously via onUpdateStatus.
- */
-function checkForUpdates() {
-  if (!window.petAPI || !window.petAPI.checkForUpdates) return;
-  showUpdateStatus(i18n.t('update.checking'));
-  window.petAPI.checkForUpdates();
-}
-
-/**
- * Display an update status message in the pet state text area.
- * Cleared after 5 seconds (or when a new state-update arrives).
- */
-function showUpdateStatus(message) {
-  const stateText = document.getElementById('pet-state-text');
-  if (!stateText) return;
-  stateText.textContent = message;
-}
-
-/**
- * Handle update status events from the main process.
- */
-function handleUpdateStatus(data) {
-  switch (data.status) {
-    case 'checking':
-      showUpdateStatus(i18n.t('update.checking'));
-      break;
-    case 'available':
-      showUpdateStatus(i18n.t('update.available', { version: data.version }));
-      break;
-    case 'not-available':
-      showUpdateStatus(i18n.t('update.notAvailable'));
-      setTimeout(() => updateStateUI(currentState), 4000);
-      break;
-    case 'downloading':
-      showUpdateStatus(i18n.t('update.downloading', { percent: data.percent || 0 }));
-      break;
-    case 'downloaded':
-      updateDownloaded = true;
-      showUpdateStatus(i18n.t('update.downloaded', { version: data.version }));
-      break;
-    case 'error':
-      if (data.errorType === 'network') {
-        showUpdateStatus(i18n.t('update.networkError'));
-      } else {
-        showUpdateStatus(i18n.t('update.error', { message: data.message || '' }));
-      }
-      setTimeout(() => updateStateUI(currentState), 5000);
-      break;
-  }
-}
-
 // ===== Initialize =====
 async function init() {
   if (window.__petSendLog) window.__petSendLog('info', '[init] start');
@@ -273,11 +217,6 @@ async function init() {
 
   // Check if hooks are installed + show diagnostic status
   checkHooksStatus();
-
-  // Register update status callback (electron-updater events).
-  if (window.petAPI && window.petAPI.onUpdateStatus) {
-    window.petAPI.onUpdateStatus(handleUpdateStatus);
-  }
 
   // Post-init diagnostic: check rendering state after 3s to diagnose
   // "completely transparent / can't click" issues.
@@ -447,7 +386,7 @@ function initPixiApp() {
   pixiApp.ticker.maxFPS = 24;
 
   // FPS monitor: log average FPS once per second so we can diagnose lag.
-  // Output goes to the main-process console via webContents 'console-message'.
+  // Output goes to the webview console (devtools is opened in debug builds).
   let fpsFrames = 0;
   let fpsLast = performance.now();
   pixiApp.ticker.add(() => {
@@ -614,7 +553,7 @@ function updateHeadEffectContent(state) {
 
 /**
  * Move the #head-effect anchor to (x, y) in canvas-wrapper pixel coords.
- * Called every frame from updateDebugBounds so the effect tracks the model.
+ * Called from updateHeadEffectAnchor so the effect tracks the model.
  */
 function updateHeadEffectPosition(x, y) {
   if (!headEffectEl) return;
@@ -1006,9 +945,6 @@ function setPetState(state) {
   // Update UI
   updateStateUI(state);
 
-  // Clear and restart effects
-  clearEffects();
-
   // Swap the head-top effect (ZZZ / working dots / !) to match the new state.
   updateHeadEffectContent(state);
 }
@@ -1041,15 +977,9 @@ function startEffectsLoop() {
   effectsTimer = setInterval(() => {
     // Safety net: keep the state motion looping even if motionFinish is missed.
     triggerPeriodicMotion();
-    // Head-top effects (ZZZ / working dots / !) are driven by CSS animations
-    // inside #head-effect and repositioned every frame by updateDebugBounds,
-    // so this loop no longer spawns DOM nodes.
+    // Head-top effects (ZZZ / working dots / !) are CSS animations inside
+    // #head-effect, repositioned on the ticker by updateHeadEffectAnchor.
   }, EFFECT_INTERVAL_MS);
-}
-
-function clearEffects() {
-  const overlay = document.getElementById('effect-overlay');
-  overlay.innerHTML = '';
 }
 
 // ===== Status Bar Rendering =====
@@ -1106,7 +1036,7 @@ function updateStatusBar(snapshot) {
 // ===== IPC Setup =====
 function setupIPC() {
   if (!window.petAPI) {
-    console.warn('[IPC] petAPI not available (preload not loaded)');
+    console.warn('[IPC] petAPI not available (bridge not loaded)');
     return;
   }
 
@@ -1264,17 +1194,6 @@ function setupContextMenu() {
     toggleAutoLaunch();
   });
 
-  // 检查新版本 -> check for updates via electron-updater.
-  document.getElementById('menu-check-updates').addEventListener('click', () => {
-    closeMenu();
-    // If an update was already downloaded, clicking again installs it.
-    if (updateDownloaded) {
-      if (window.petAPI && window.petAPI.installUpdate) window.petAPI.installUpdate();
-    } else {
-      checkForUpdates();
-    }
-  });
-
   // 预览提醒效果 -> trigger a fake confirmation-needed session for 8s.
   document.getElementById('menu-test-alert').addEventListener('click', () => {
     closeMenu();
@@ -1426,7 +1345,7 @@ function setupDrag() {
     if (e.button !== 0) return; // Only left click
     // Only start dragging when the pointer is actually over the model's bounds,
     // not on the empty canvas padding — matches the click-through hit area so
-    // the "solid red box" interior is both the tap target and the drag target.
+    // the model interior is both the tap target and the drag target.
     if (!isPointOnModel(e.clientX, e.clientY)) return;
     isDragging = true;
     // Keep the window clickable for the whole drag — the cursor may leave the
@@ -1473,10 +1392,9 @@ function setupDrag() {
 // ===== Click-Through =====
 /**
  * Test whether a screen point (clientX/Y) is over the Live2D model's hit area.
- * Uses the model's current world-space bounding box (getBounds()), which is
- * the same rect as the red debug box — so the interactive area matches what
- * the user sees as the "solid red box" interior. Empty canvas padding outside
- * the box returns false and passes clicks through to the desktop.
+ * Uses the model's current world-space bounding box (getBounds()); empty
+ * canvas padding outside the box returns false and passes clicks through to
+ * the desktop.
  */
 function isPointOnModel(clientX, clientY) {
   if (!live2dModel || !pixiApp) return false;

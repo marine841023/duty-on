@@ -1,20 +1,18 @@
-//! Tauri commands — the 21 IPC handlers from `src/main/preload.js`, backed by
-//! Rust. Each `#[tauri::command]` maps 1:1 to a `window.petAPI` method exposed
-//! to the renderer via `frontend/tauri-bridge.js`.
+//! Tauri commands — IPC handlers backed by Rust. Each `#[tauri::command]`
+//! maps 1:1 to a `window.petAPI` method exposed to the renderer via
+//! `frontend/tauri-bridge.js`.
 
 use crate::click_through::{ClickRegion, ClickThroughState};
 use crate::hooks_installer;
 use crate::ide_scanner;
 use crate::models;
 use crate::state_manager::{HookEvent, SharedStateManager};
-use crate::updater;
 use crate::user_config;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_autostart::ManagerExt;
-use tauri_plugin_shell::ShellExt;
 
 // ===== Hooks =====
 
@@ -26,7 +24,7 @@ pub fn install_hooks(app: AppHandle) -> Value {
         // Open hooks.json in the default editor (Trae IDE if it owns .json)
         // so Trae detects the change and prompts the user to enable it.
         if let Some(hooks_path) = &result.hooks_path {
-            let _ = app.shell().open(hooks_path, None);
+            let _ = tauri_plugin_opener::open_path(hooks_path, None::<&str>);
         }
     }
     serde_json::to_value(result).unwrap_or(json!({ "success": false }))
@@ -123,23 +121,11 @@ pub fn set_auto_launch(app: AppHandle, enabled: bool) {
     let _ = if enabled { mgr.enable() } else { mgr.disable() };
 }
 
-// ===== Update =====
-
-#[tauri::command]
-pub fn check_for_updates(app: AppHandle) {
-    updater::check_for_updates(&app);
-}
-
-#[tauri::command]
-pub fn install_update(app: AppHandle) {
-    updater::install_update(&app);
-}
-
 // ===== Test alert =====
 
 #[tauri::command]
 pub async fn test_alert(state: State<'_, SharedStateManager>) -> Result<(), String> {
-    let test_id = "__trae-pet-test-alert__".to_string();
+    let test_id = "__duty-on-test-alert__".to_string();
     let event = HookEvent {
         session_id: test_id.clone(),
         hook_event_name: "Notification".to_string(),
@@ -235,7 +221,7 @@ pub fn quit(app: AppHandle) {
 #[tauri::command]
 pub fn uninstall_app(app: AppHandle) {
     // In dev, just quit. In packaged mode, the NSIS uninstaller lives next to
-    // the exe as "Uninstall TraePet.exe"; launch it detached, then exit.
+    // the exe as "Uninstall DutyOn.exe"; launch it detached, then exit.
     #[cfg(windows)]
     {
         let exe = std::env::current_exe().ok();

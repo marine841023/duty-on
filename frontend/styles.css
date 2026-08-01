@@ -51,37 +51,6 @@ html, body {
   transform: translate(-50%, -50%);
 }
 
-/* ===== Effect Overlay ===== */
-#effect-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  overflow: visible;
-  z-index: 10;
-}
-
-/* Alert exclamation effect */
-.alert-bang {
-  position: absolute;
-  top: 20px;
-  left: 50%;
-  transform: translateX(-50%);
-  font-size: 32px;
-  font-weight: 900;
-  color: #ff4444;
-  text-shadow: 0 0 12px rgba(255, 68, 68, 0.6), 2px 2px 0 #fff;
-  animation: alert-bounce 0.5s ease-in-out infinite alternate;
-  z-index: 20;
-}
-
-@keyframes alert-bounce {
-  0% { transform: translateX(-50%) translateY(0) scale(1); }
-  100% { transform: translateX(-50%) translateY(-8px) scale(1.1); }
-}
-
 /* Shake animation for alert state */
 .shake {
   animation: shake 0.3s ease-in-out infinite;
@@ -95,8 +64,8 @@ html, body {
 
 /* ===== Head-Top Effects (ZZZ / working dots / !) =====
    #head-effect is a 0×0 point positioned via transform: translate(x, y) by
-   JS, where (x, y) is the model's bounds top-center shifted 40px down (the
-   red crosshair in updateDebugBounds). Effect children anchor at bottom:0
+   JS, where (x, y) is the model's bounds top-center shifted 40px down (see
+   updateHeadEffectAnchor in renderer.js). Effect children anchor at bottom:0
    (the point itself) and extend upward, capped at 40px tall. */
 .head-effect {
   position: absolute;
