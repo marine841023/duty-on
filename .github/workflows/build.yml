@@ -48,21 +48,16 @@ jobs:
           body: |
             ## What's new
 
-            ### Features
-            - Right-click the pet to open the settings menu
-            - Status bar: working projects in amber, idle projects' label in green
-            - Projects sorted alphabetically (stable order — no more reshuffling on state change)
-            - Alert state persists until you answer (no more auto-dismissal after 3 minutes)
-
             ### Bug Fixes
-            - Hook command uses `-ExecutionPolicy Bypass` to survive restricted PowerShell policies on managed/corporate machines
-            - Window title parsing handles elevated-process suffixes (`[管理员]` / `[Administrator]`)
-            - Hook resources bundled correctly (no more `_up_` path issue in packaged builds)
-            - Hook installer tolerates BOM / corrupt JSON / non-array event values (backs up and rebuilds)
-            - Scanner diagnostic logging to `~/.dutyon/frontend.log` for troubleshooting
+            - Fixed window scanning hanging when a busy CMD/console window is open: title reads now filter by IDE process name first (pure kernel query, never hangs) and fall back to a 250 ms timed read (`SendMessageTimeoutW`), so IDE status keeps updating in real time even while a long-running command executes
+            - Fixed Qoder sessions being dropped when the IDE window title temporarily changes to a non-standard format (e.g. installer dialogs): windows of the same IDE kind now suppress the miss grace countdown
+
+            ### Housekeeping
+            - Removed internal open-source ops guide; technical notes moved to `docs/technical-notes.md`
+            - Synced version numbers (Cargo.toml / tauri.conf.json) to 1.1.1
 
             ### Tested
-            - 62 unit tests passing
+            - 64 unit tests passing
 
   # macOS / Linux matrix — uncomment to enable:
   # release-unix:

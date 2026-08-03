@@ -579,6 +579,15 @@ impl StateManager {
 
         let detected_names: std::collections::HashSet<&str> =
             detected.iter().map(|d| d.name.as_str()).collect();
+        // IDE kinds still visible in the detected window list. When a hook
+        // session's project name disappears from detected (e.g., the IDE
+        // title changed to a setup/loading page whose project segment differs
+        // from the real project), we check whether a window of the same IDE
+        // kind is still detected. If so, the IDE is still running — just
+        // its title format changed — and we suppress the miss so the hook
+        // session isn't killed prematurely.
+        let detected_ides: std::collections::HashSet<IdeKind> =
+            detected.iter().map(|d| d.ide.clone()).collect();
         let mut changed = false;
 
         // On Windows, EnumWindows is reliable — an empty list means "no IDE
@@ -601,6 +610,18 @@ impl StateManager {
                     self.sessions.remove(&id);
                     changed = true;
                 } else {
+                    // If a window of the same IDE kind is still detected
+                    // (just with a different project segment), the IDE is
+                    // still running — its title simply changed format (e.g.,
+                    // Qoder showing a setup page like "安装 - Qoder" instead
+                    // of "file - project - Qoder"). Suppress the miss so the
+                    // hook session isn't killed while the IDE is still open.
+                    let session_ide =
+                        self.sessions.get(&id).and_then(|s| s.ide.clone());
+                    if session_ide.map_or(false, |ide| detected_ides.contains(&ide))
+                    {
+                        continue;
+                    }
                     // Real hook sessions get a grace period: the IDE window may
                     // be briefly invisible (startup/reload) or its title format
                     // may not match our parser. Only remove after repeated
@@ -948,6 +969,68 @@ mod tests {
         sm.sync_detected_windows(&[]);
         assert_eq!(sm.session_count(), 1);
         assert_eq!(sm.get_snapshot().sessions[0].project_name, "projB");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn same_ide_kind_window_suppresses_miss() {
+        // When the IDE window title changes (e.g., Qoder shows a setup page
+        // "安装 - Qoder" instead of "file - project - Qoder"), the detected
+        // project name won't match the hook session's project name. But a
+        // Qoder window is still detected, so the hook session should NOT be
+        // killed by the miss counter.
+        let (mut sm, _t) = make_manager();
+        // Create a hook session for project "myproject" on Qoder.
+        let mut e = event("s1", "UserPromptSubmit");
+        e.project_name = "myproject".to_string();
+        e.ide = Some(IdeKind::Qoder);
+        sm.handle_hook_event(&e);
+        assert_eq!(sm.session_count(), 1);
+
+        // Window title changed: detected shows a DIFFERENT project name
+        // ("安装") but still on Qoder IDE. The hook session for "myproject"
+        // must survive — a Qoder window is still visible. A placeholder for
+        // "安装" is also created (2 sessions total).
+        sm.sync_detected_windows(&[detected("安装", IdeKind::Qoder)]);
+        sm.sync_detected_windows(&[detected("安装", IdeKind::Qoder)]);
+        sm.sync_detected_windows(&[detected("安装", IdeKind::Qoder)]);
+        sm.sync_detected_windows(&[detected("安装", IdeKind::Qoder)]);
+        let snap = sm.get_snapshot();
+        assert!(snap.sessions.iter().any(|s| s.project_name == "myproject"));
+
+        // Qoder window truly closes — no Qoder window detected. The "安装"
+        // placeholder is removed on the first empty scan; the "myproject"
+        // hook session survives grace, then gets removed after
+        // WINDOW_MISS_GRACE consecutive misses.
+        sm.sync_detected_windows(&[]);
+        sm.sync_detected_windows(&[]);
+        sm.sync_detected_windows(&[]);
+        assert_eq!(sm.session_count(), 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn different_ide_kind_window_does_not_suppress_miss() {
+        // A Trae window being visible must NOT suppress misses for a Qoder
+        // hook session — only the SAME IDE kind counts.
+        let (mut sm, _t) = make_manager();
+        let mut e = event("s1", "UserPromptSubmit");
+        e.project_name = "myproject".to_string();
+        e.ide = Some(IdeKind::Qoder);
+        sm.handle_hook_event(&e);
+        assert_eq!(sm.session_count(), 1);
+
+        // A Trae window is detected, but the Qoder session's project isn't.
+        // Misses should accumulate (no same-IDE suppression). A placeholder
+        // for "other" is also created.
+        sm.sync_detected_windows(&[detected("other", IdeKind::Trae)]);
+        sm.sync_detected_windows(&[detected("other", IdeKind::Trae)]);
+        sm.sync_detected_windows(&[detected("other", IdeKind::Trae)]);
+        // The "myproject" hook session is gone; only the "other" placeholder
+        // remains.
+        let snap = sm.get_snapshot();
+        assert!(!snap.sessions.iter().any(|s| s.project_name == "myproject"));
+        assert!(snap.sessions.iter().any(|s| s.project_name == "other"));
     }
 
     #[test]

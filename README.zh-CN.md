@@ -105,7 +105,7 @@ cargo tauri build    # 打包：产物在 target/release/bundle/
 把模型目录放到 `~/.dutyon/live2d/<名字>/`（含 `<名字>.moc3` + 贴图 + `model3.json` + 动作），
 精灵菜单的"切换形象"里立刻就能看到。用户模型通过本地回环服务器
 （`http://127.0.0.1:17521/live2d/...`）加载——Tauri asset 协议的响应不带 CORS 头，
-cubism4/pixi 的 XHR 加载器会预检失败，详见[方案文档](docs/opensource-guide.md)。
+cubism4/pixi 的 XHR 加载器会预检失败，详见[技术说明](docs/technical-notes.md)。
 
 ## 测试
 

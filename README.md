@@ -32,7 +32,7 @@ Built with **Tauri 2 + Rust** (system WebView, no bundled Chromium):
 
 ## Screenshots
 
-> 📸 Coming soon — see the [screenshot checklist](docs/opensource-guide.md)
+> 📸 Coming soon — see the [screenshot checklist](docs/technical-notes.md)
 > (normal mode · mini mode · context menu · the three states · status-bar jump).
 
 ## Features
@@ -122,7 +122,7 @@ Drop a Cubism 4 model folder into `~/.dutyon/live2d/<name>/`
 (`<name>.moc3` + textures + `model3.json` + motions) — it shows up in the
 pet's **切换形象** menu immediately. User models are served through the local
 loopback server with proper CORS headers (the Tauri asset protocol can't be
-used for XHR-based loaders — see [this note](docs/opensource-guide.md)).
+used for XHR-based loaders — see [this note](docs/technical-notes.md)).
 
 ## Development
 

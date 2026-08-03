@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 ///
 /// Serialized as lowercase `"trae"` / `"qoder"` (see `#[serde(rename_all)]`)
 /// so the frontend contract stays unchanged when swapping from plain strings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IdeKind {
     Trae,

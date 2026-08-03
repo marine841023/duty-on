@@ -108,12 +108,110 @@ fn suspect_ide_titles(titles: &[String]) -> Vec<String> {
 // ============================================================================
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+use windows::core::PWSTR;
+#[cfg(windows)]
+use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, WPARAM};
+#[cfg(windows)]
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowTextW, GetWindowTextLengthW, IsIconic, IsWindowVisible,
-    SetForegroundWindow, ShowWindowAsync, SW_RESTORE,
+    EnumWindows, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SendMessageTimeoutW,
+    SetForegroundWindow, ShowWindowAsync, SMTO_ABORTIFHUNG, SW_RESTORE, WM_GETTEXT,
+    WM_GETTEXTLENGTH,
 };
+
+/// Executable image names of the IDEs we track (case-insensitive, matched
+/// against the last path segment of the owning process image).
+#[cfg(windows)]
+const IDE_PROCESS_EXES: &[&str] = &["Qoder.exe", "Trae CN.exe", "Trae.exe"];
+
+/// Hard cap (ms) for every title request sent to an IDE window.
+#[cfg(windows)]
+const TITLE_QUERY_TIMEOUT_MS: u32 = 250;
+
+/// Whether the window's owning process is a known IDE. `Some(true)` /
+/// `Some(false)` when the process image could be queried; `None` when the
+/// query itself failed — callers then fall back to a timeout-guarded title
+/// read so an unqueryable process can't make its window invisible.
+///
+/// This check is pure process querying (no window messages), so it can
+/// never hang no matter what window it runs against.
+#[cfg(windows)]
+fn window_owned_by_ide(hwnd: HWND) -> Option<bool> {
+    let mut pid = 0u32;
+    unsafe {
+        if GetWindowThreadProcessId(hwnd, Some(&mut pid)) == 0 || pid == 0 {
+            return None;
+        }
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(process);
+        if !ok {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        let exe = path.rsplit(['\\', '/']).next().unwrap_or(&path);
+        Some(
+            IDE_PROCESS_EXES
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(exe)),
+        )
+    }
+}
+
+/// Read a window title via WM_GETTEXTLENGTH/WM_GETTEXT with a hard timeout.
+///
+/// The classic `GetWindowTextW` sends a synchronous `WM_GETTEXT` to the
+/// window's owner thread and blocks indefinitely while that thread is busy
+/// — a console window running a foreground CMD command is the textbook
+/// case. Because the scanner holds the state-manager lock once per cycle,
+/// one such hang stalls the whole hook→state→frontend pipeline (events
+/// visibly arrive in bridge.log but the pet only updates when the blocked
+/// window finally responds/closes). The timeout turns any unresponsive
+/// window into a cheap skip; `None` = no usable title.
+#[cfg(windows)]
+unsafe fn read_title_timeout(hwnd: HWND) -> Option<String> {
+    let mut len: usize = 0;
+    let r = SendMessageTimeoutW(
+        hwnd,
+        WM_GETTEXTLENGTH,
+        WPARAM(0),
+        LPARAM(0),
+        SMTO_ABORTIFHUNG,
+        TITLE_QUERY_TIMEOUT_MS,
+        Some(&mut len),
+    );
+    // 0 covers both "timed out" and "empty title" — either way: skip.
+    if r.0 <= 0 || len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; len + 1];
+    let mut copied: usize = 0;
+    let r = SendMessageTimeoutW(
+        hwnd,
+        WM_GETTEXT,
+        WPARAM(len + 1),
+        LPARAM(buf.as_mut_ptr() as isize),
+        SMTO_ABORTIFHUNG,
+        TITLE_QUERY_TIMEOUT_MS,
+        Some(&mut copied),
+    );
+    if r.0 <= 0 || copied == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buf[..copied]))
+}
 
 #[cfg(windows)]
 struct FocusCtx {
@@ -158,16 +256,9 @@ unsafe extern "system" fn focus_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     if !IsWindowVisible(hwnd).as_bool() {
         return BOOL(1);
     }
-    let len = GetWindowTextLengthW(hwnd);
-    if len <= 0 {
+    let Some(title) = read_title_timeout(hwnd) else {
         return BOOL(1);
-    }
-    let mut buf = vec![0u16; (len as usize) + 1];
-    let n = GetWindowTextW(hwnd, &mut buf);
-    if n <= 0 {
-        return BOOL(1);
-    }
-    let title = String::from_utf16_lossy(&buf[..n as usize]);
+    };
     // parse_title filters non-IDE windows and generic titles; the folder
     // segment drives the exact match, the full title a substring fallback.
     let folder = match parse_title(&title) {
@@ -203,12 +294,14 @@ pub fn scan_ide_projects() -> (Vec<DetectedProject>, Vec<String>) {
 unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let titles = &mut *(lparam.0 as *mut Vec<String>);
     if IsWindowVisible(hwnd).as_bool() {
-        let len = GetWindowTextLengthW(hwnd);
-        if len > 0 {
-            let mut buf = vec![0u16; (len as usize) + 1];
-            let n = GetWindowTextW(hwnd, &mut buf);
-            if n > 0 {
-                let title = String::from_utf16_lossy(&buf[..n as usize]);
+        // Request titles only from IDE-owned windows (decided by process
+        // name — no window messages are sent to anything else). Windows
+        // whose owner can't be queried (None) fall back to a timeout-
+        // guarded read. This guarantees a busy/hung non-IDE window — e.g.
+        // a CMD console running a long command — can never stall the
+        // enumeration, the scan loop, or the state pipeline behind it.
+        if window_owned_by_ide(hwnd) != Some(false) {
+            if let Some(title) = read_title_timeout(hwnd) {
                 titles.push(title);
             }
         }
