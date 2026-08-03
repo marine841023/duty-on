@@ -19,10 +19,24 @@ PET_URL="http://127.0.0.1:17521/hook"
 
 write_log() {
   mkdir -p "$LOG_DIR" 2>/dev/null
+  # --- Log rotation: if the file exceeds ~500 lines, trim it down to the
+  # last 250 lines so the diagnostic log can't grow unbounded across many
+  # hook invocations. `tr -d` strips whitespace because BSD `wc` may pad the
+  # count with leading spaces; everything is best-effort (set +e + 2>/dev/null)
+  # so a rotation failure can never break the AI workflow.
+  if [ -f "$LOG_PATH" ]; then
+    lines=$(wc -l < "$LOG_PATH" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$lines" ] && [ "$lines" -gt 500 ] 2>/dev/null; then
+      tail -n 250 "$LOG_PATH" > "$LOG_PATH.tmp" 2>/dev/null && mv "$LOG_PATH.tmp" "$LOG_PATH" 2>/dev/null
+    fi
+  fi
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >>"$LOG_PATH" 2>/dev/null
 }
 
 write_log "INVOKED pid=$$"
+
+# IDE kind ("trae" / "qoder") passed as $1 by the installed hook command.
+ide="${1:-}"
 
 # Read JSON from stdin.
 stdin_text=$(cat)
@@ -56,6 +70,16 @@ if [ -n "$project_dir" ]; then
   project_name=$(basename "$project_dir")
 fi
 
+# IDE kind: the explicit argument wins; fall back to the runner's env marker
+# (covers legacy hook commands installed without the argument).
+if [ -z "$ide" ]; then
+  if [ -n "$QODER_PROJECT_DIR" ]; then
+    ide="qoder"
+  elif [ -n "$TRAE_PROJECT_DIR" ] || [ -n "$CLAUDE_PROJECT_DIR" ]; then
+    ide="trae"
+  fi
+fi
+
 # Millisecond epoch (portable: BSD date lacks %N; second precision is fine since
 # the server stamps timing from its own clock).
 timestamp=$(($(date '+%s') * 1000))
@@ -66,8 +90,8 @@ timestamp=$(($(date '+%s') * 1000))
 body=""
 if command -v jq >/dev/null 2>&1; then
   body=$(printf '%s' "$stdin_text" | jq -c \
-    --arg pp "$project_dir" --arg pn "$project_name" --argjson ts "$timestamp" \
-    '. + {project_path:$pp, project_name:$pn, timestamp:$ts}' 2>/dev/null)
+    --arg pp "$project_dir" --arg pn "$project_name" --arg ide "$ide" --argjson ts "$timestamp" \
+    '. + {project_path:$pp, project_name:$pn, timestamp:$ts} + (if $ide == "" then {} else {ide:$ide} end)' 2>/dev/null)
 elif command -v python3 >/dev/null 2>&1; then
   body=$(printf '%s' "$stdin_text" | PYTHONIOENCODING=utf-8 python3 -c '
 import sys, json
@@ -75,8 +99,10 @@ e = json.load(sys.stdin)
 e["project_path"] = sys.argv[1]
 e["project_name"] = sys.argv[2]
 e["timestamp"] = int(sys.argv[3])
+if sys.argv[4]:
+    e["ide"] = sys.argv[4]
 print(json.dumps(e, separators=(",", ":")))
-' "$project_dir" "$project_name" "$timestamp" 2>/dev/null)
+' "$project_dir" "$project_name" "$timestamp" "$ide" 2>/dev/null)
 fi
 
 if [ -z "$body" ]; then

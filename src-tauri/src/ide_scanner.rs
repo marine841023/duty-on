@@ -1,32 +1,58 @@
-//! IDE window scanner — detects open Trae IDE windows by title.
-//!
-//! Per platform:
-//!   - Windows: Win32 `EnumWindows` + `GetWindowTextW`
-//!   - macOS:   CoreGraphics `CGWindowListCopyWindowInfo` (raw FFI)
-//!   - Linux:   X11 `XQueryTree` + `_NET_WM_NAME` via `x11rb` (Wayland has no
-//!              global window-list API → connection failure returns empty Vec;
-//!              sessions still work via hook events)
-//!
-//! Window title format: "<active-file> - <project-folder> - Trae CN".
-//! The "* - Trae CN" suffix filters non-IDE windows; the project is the
-//! second-to-last " - " segment. Used to (a) register idle sessions for newly
-//! opened projects and (b) prune sessions whose IDE window closed (Trae fires
-//! no hook on window close).
+//! IDE window scanner for detecting running Trae and Qoder IDE instances.
+//! Scans window titles across Windows, macOS, and Linux (X11) to identify
+//! active project windows and their IDE type.
 
 use crate::config;
+use crate::models::IdeKind;
 
-/// True if the window title belongs to a supported IDE (Trae CN or Qoder).
-/// Shared across platforms.
-fn is_ide_title(title: &str) -> bool {
-    title.ends_with(config::TRAE_TITLE_SUFFIX) || title.ends_with(config::QODER_TITLE_SUFFIX)
+/// A detected IDE window: project folder name + which IDE owns the window.
+/// Carries the IDE kind so the pet can badge each project in the status bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedProject {
+    pub name: String,
+    pub ide: IdeKind,
 }
 
-/// Parse the project folder name from a supported IDE window title. Returns
-/// None for non-IDE windows or generic titles. Shared across platforms.
-fn parse_project_name(title: &str) -> Option<&str> {
-    if !is_ide_title(title) {
-        return None;
+/// Windows appends a privilege suffix to the window title of elevated
+/// (run-as-administrator) processes. The suffix is locale-dependent
+/// ("[Administrator]" on en-US, "[管理员]" on zh-CN, ...), so match the
+/// generic ` - Qoder/Trae CN [<anything>]` shape instead of enumerating
+/// translations. Returns the title with the suffix stripped.
+fn strip_privilege_suffix(title: &str) -> &str {
+    for suffix in [config::QODER_TITLE_SUFFIX, config::TRAE_TITLE_SUFFIX] {
+        // " - Qoder [管理员]".len() == suffix.len() + 1 + bracket contents
+        if let Some(ide_end) = title.rfind(suffix) {
+            let rest = &title[ide_end + suffix.len()..];
+            let trimmed = rest.trim_start();
+            if trimmed.is_empty() {
+                return &title[..ide_end + suffix.len()];
+            }
+            // The remainder must be exactly one bracketed token: "[...]".
+            let bytes = trimmed.as_bytes();
+            if bytes[0] == b'[' && trimmed.ends_with(']') && !trimmed[1..trimmed.len() - 1].contains('[') {
+                return &title[..ide_end + suffix.len()];
+            }
+        }
     }
+    title
+}
+
+/// Parse an IDE window title to extract the project name and IDE type.
+/// Returns None if the title is not a recognized IDE window title or is a
+/// generic title (no project open, e.g. "Trae CN - Trae CN").
+///
+/// Trae IDE: "<file> - <project> - Trae CN"
+/// Qoder:    "<file> - <project> - Qoder"
+/// Elevated windows carry a privilege suffix: "... - Qoder [管理员]".
+fn parse_title(title: &str) -> Option<(&str, IdeKind)> {
+    let title = strip_privilege_suffix(title);
+    let ide = if title.ends_with(config::TRAE_TITLE_SUFFIX) {
+        IdeKind::Trae
+    } else if title.ends_with(config::QODER_TITLE_SUFFIX) {
+        IdeKind::Qoder
+    } else {
+        return None;
+    };
     let parts: Vec<&str> = title.split(" - ").collect();
     if parts.len() < 2 {
         return None;
@@ -39,19 +65,42 @@ fn parse_project_name(title: &str) -> Option<&str> {
     {
         return None;
     }
-    Some(folder)
+    Some((folder, ide))
 }
 
-/// From a list of all on-screen window titles, extract the deduped, sorted
-/// Trae project names. Shared across platforms.
-fn extract_trae_projects(titles: &[String]) -> Vec<String> {
-    let mut names: Vec<String> = titles
+/// From a list of all on-screen window titles, extract the IDE projects
+/// (deduped by project name — the first window seen wins its IDE kind).
+/// Shared across platforms.
+fn extract_ide_projects(titles: &[String]) -> Vec<DetectedProject> {
+    let mut out: Vec<DetectedProject> = Vec::new();
+    for t in titles {
+        if let Some((name, ide)) = parse_title(t) {
+            if !out.iter().any(|p| p.name == name) {
+                out.push(DetectedProject {
+                    name: name.to_string(),
+                    ide,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Titles that mention an IDE but didn't parse into a project. Logged (only
+/// when the detected set changes) so unfamiliar title formats — new IDE
+/// versions, locales, chat-panel titles — show up in frontend.log and can be
+/// added to the parser. Truncated to keep the log small.
+fn suspect_ide_titles(titles: &[String]) -> Vec<String> {
+    titles
         .iter()
-        .filter_map(|t| parse_project_name(t).map(|s| s.to_string()))
-        .collect();
-    names.sort();
-    names.dedup();
-    names
+        .filter(|t| {
+            let low = t.to_lowercase();
+            low.contains("qoder") || low.contains("trae")
+        })
+        .take(8)
+        .map(|t| t.chars().take(200).collect::<String>())
+        .collect()
 }
 
 // ============================================================================
@@ -119,14 +168,11 @@ unsafe extern "system" fn focus_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         return BOOL(1);
     }
     let title = String::from_utf16_lossy(&buf[..n as usize]);
-    if !is_ide_title(&title) {
-        return BOOL(1);
-    }
-    let parts: Vec<&str> = title.split(" - ").collect();
-    let folder = if parts.len() >= 2 {
-        parts[parts.len() - 2].trim()
-    } else {
-        return BOOL(1);
+    // parse_title filters non-IDE windows and generic titles; the folder
+    // segment drives the exact match, the full title a substring fallback.
+    let folder = match parse_title(&title) {
+        Some((folder, _ide)) => folder,
+        None => return BOOL(1),
     };
     if folder.eq_ignore_ascii_case(&ctx.name) {
         ctx.best = Some(hwnd);
@@ -139,16 +185,18 @@ unsafe extern "system" fn focus_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     BOOL(1)
 }
 
-/// Scan all visible top-level windows and return the project names of every
-/// Trae IDE window (deduped, generic titles filtered out).
+/// Scan all visible top-level windows and return the projects of every IDE
+/// window (deduped, generic titles filtered out), each tagged with its IDE,
+/// plus raw IDE-looking titles for diagnostics.
 #[cfg(windows)]
-pub fn scan_trae_projects() -> Vec<String> {
+pub fn scan_ide_projects() -> (Vec<DetectedProject>, Vec<String>) {
     let mut titles: Vec<String> = Vec::new();
     let lparam = LPARAM(&mut titles as *mut Vec<String> as isize);
     unsafe {
         let _ = EnumWindows(Some(enum_proc), lparam);
     }
-    extract_trae_projects(&titles)
+    let suspects = suspect_ide_titles(&titles);
+    (extract_ide_projects(&titles), suspects)
 }
 
 #[cfg(windows)]
@@ -248,12 +296,13 @@ mod cg {
 /// macOS: requires Screen Recording permission for window titles. Without it
 /// (or on failure) returns empty — sessions still work via hook events.
 #[cfg(target_os = "macos")]
-pub fn scan_trae_projects() -> Vec<String> {
+pub fn scan_ide_projects() -> (Vec<DetectedProject>, Vec<String>) {
     let titles = cg::on_screen_window_titles();
     if titles.is_empty() {
         log::debug!("[ide] macOS: no window titles (Screen Recording permission may be required)");
     }
-    extract_trae_projects(&titles)
+    let suspects = suspect_ide_titles(&titles);
+    (extract_ide_projects(&titles), suspects)
 }
 
 /// macOS can't precisely activate a specific window of another app without the
@@ -263,10 +312,10 @@ pub fn scan_trae_projects() -> Vec<String> {
 pub fn focus_project_window(name: &str) -> bool {
     let titles = cg::on_screen_window_titles();
     let is_qoder = titles.iter().any(|t| {
-        t.ends_with(config::QODER_TITLE_SUFFIX)
-            && parse_project_name(t)
-                .map(|p| p.eq_ignore_ascii_case(name))
-                .unwrap_or(false)
+        matches!(
+            parse_title(t),
+            Some((p, IdeKind::Qoder)) if p.eq_ignore_ascii_case(name)
+        )
     });
     let app = if is_qoder { "Qoder" } else { "Trae CN" };
     match std::process::Command::new("open").arg("-a").arg(app).spawn() {
@@ -284,8 +333,7 @@ pub fn focus_project_window(name: &str) -> bool {
 
 #[cfg(target_os = "linux")]
 mod x11 {
-    use crate::config;
-    use crate::ide_scanner::{is_ide_title, parse_project_name};
+    use crate::ide_scanner::parse_title;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     use x11rb::protocol::xproto::{self, ConnectionExt as _, EventMask};
@@ -330,13 +378,17 @@ mod x11 {
         None
     }
 
-    /// Scan X11 top-level windows, return raw Trae window titles, and refresh
-    /// the name→window-id map. Empty on X11 connect failure (Wayland/headless).
+    /// Scan X11 top-level windows, return ALL non-empty window titles, and
+    /// refresh the name→window-id map. Empty on X11 connect failure
+    /// (Wayland/headless).
     pub fn scan() -> Vec<String> {
         let (conn, screen_num) = match x11rb::connect(None) {
             Ok(c) => c,
             Err(_) => {
                 // Wayland or headless — no window enumeration possible.
+                // SAFETY: `unwrap()` on the Mutex is safe — the crate is built
+                // with `panic = "abort"` (Cargo.toml [profile.release]), so a
+                // panic never unwinds and thus never poisons the lock.
                 let mut m = map().lock().unwrap();
                 m.clear();
                 return Vec::new();
@@ -367,12 +419,10 @@ mod x11 {
         let mut new_map: HashMap<String, u32> = HashMap::new();
         for &win in &tree.children {
             if let Some(title) = window_title(&conn, win, net_wm_name, wm_name) {
-                if is_ide_title(&title) {
-                    if let Some(proj) = parse_project_name(&title) {
-                        new_map.insert(proj.to_string(), win);
-                    }
-                    titles.push(title);
+                if let Some((proj, _ide)) = parse_title(&title) {
+                    new_map.insert(proj.to_string(), win);
                 }
+                titles.push(title);
             }
         }
 
@@ -386,6 +436,9 @@ mod x11 {
     /// ClientMessage on the root window. Best-effort: returns false on any X11
     /// error (compositor may ignore the request).
     pub fn focus_window(name: &str) -> bool {
+        // SAFETY: `unwrap()` on the Mutex is safe — the crate is built with
+        // `panic = "abort"` (Cargo.toml [profile.release]), so a panic never
+        // unwinds and thus never poisons the lock.
         let win = match map().lock().unwrap().get(name).copied() {
             Some(w) => w,
             None => return false,
@@ -429,12 +482,13 @@ mod x11 {
 }
 
 #[cfg(target_os = "linux")]
-pub fn scan_trae_projects() -> Vec<String> {
+pub fn scan_ide_projects() -> (Vec<DetectedProject>, Vec<String>) {
     let titles = x11::scan();
     if titles.is_empty() {
-        log::debug!("[ide] Linux: no Trae windows (X11 unavailable or no IDE open)");
+        log::debug!("[ide] Linux: no IDE windows (X11 unavailable or no IDE open)");
     }
-    extract_trae_projects(&titles)
+    let suspects = suspect_ide_titles(&titles);
+    (extract_ide_projects(&titles), suspects)
 }
 
 #[cfg(target_os = "linux")]
@@ -447,11 +501,98 @@ pub fn focus_project_window(name: &str) -> bool {
 // ============================================================================
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-pub fn scan_trae_projects() -> Vec<String> {
-    Vec::new()
+pub fn scan_ide_projects() -> (Vec<DetectedProject>, Vec<String>) {
+    (Vec::new(), Vec::new())
 }
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub fn focus_project_window(_name: &str) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_title_standard_trae() {
+        // Trae IDE window title: "<file> - <project> - Trae CN"
+        let result = parse_title("main.rs - MyProject - Trae CN");
+        assert_eq!(result, Some(("MyProject", IdeKind::Trae)));
+    }
+
+    #[test]
+    fn parse_title_standard_qoder() {
+        // Qoder window title: "<file> - <project> - Qoder"
+        let result = parse_title("app.ts - MyProject - Qoder");
+        assert_eq!(result, Some(("MyProject", IdeKind::Qoder)));
+    }
+
+    #[test]
+    fn parse_title_non_ide_title() {
+        let result = parse_title("Visual Studio Code");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_title_empty() {
+        let result = parse_title("");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_title_elevated_qoder_admin_suffix() {
+        // Elevated processes get "[Administrator]" appended on en-US Windows.
+        let result = parse_title("settings.json - Qoder [Administrator]");
+        assert_eq!(result, Some(("settings.json", IdeKind::Qoder)));
+    }
+
+    #[test]
+    fn parse_title_elevated_qoder_chinese_suffix() {
+        // zh-CN Windows appends "[管理员]" instead.
+        let result = parse_title("settings.json - Qoder [管理员]");
+        assert_eq!(result, Some(("settings.json", IdeKind::Qoder)));
+    }
+
+    #[test]
+    fn parse_title_elevated_trae_suffix() {
+        let result = parse_title("main.rs - MyProject - Trae CN [管理员]");
+        assert_eq!(result, Some(("MyProject", IdeKind::Trae)));
+    }
+
+    #[test]
+    fn parse_title_suffix_not_bracketed_ignored() {
+        // Anything after the IDE name that isn't a single bracketed token is
+        // not a privilege suffix — leave the title unparsed.
+        let result = parse_title("app.ts - MyProject - Qoder preview");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_title_generic_no_project() {
+        // "Trae CN - Trae CN" → folder segment is "Trae CN" → filtered out
+        let result = parse_title("Trae CN - Trae CN");
+        assert_eq!(result, None);
+        // Same for Qoder without a project open
+        let result2 = parse_title("Qoder - Qoder");
+        assert_eq!(result2, None);
+    }
+
+    #[test]
+    fn extract_ide_projects_dedupes_same_name() {
+        // Two windows with the same project name (one Trae, one Qoder)
+        // should produce a single entry — the first one wins.
+        let titles = vec![
+            "main.rs - MyProject - Trae CN".to_string(),
+            "app.ts - MyProject - Qoder".to_string(),
+            "index.js - OtherProject - Trae CN".to_string(),
+        ];
+        let projects = extract_ide_projects(&titles);
+        // MyProject deduped to one entry; OtherProject is separate.
+        assert_eq!(projects.len(), 2);
+        // Sorted alphabetically.
+        assert_eq!(projects[0].name, "MyProject");
+        assert_eq!(projects[0].ide, IdeKind::Trae); // first window wins
+        assert_eq!(projects[1].name, "OtherProject");
+    }
 }

@@ -17,7 +17,6 @@
     "core:window:allow-inner-size",
     "core:window:allow-set-size",
     "core:webview:default",
-    "core:event:default",
-    "opener:allow-open-path"
+    "core:event:default"
   ]
 }

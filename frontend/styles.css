@@ -326,6 +326,21 @@ html, body {
 .project-dot.working { background: #ffc832; animation: pulse-dot 1s infinite; }
 .project-dot.confirmation-needed { background: #ff4444; animation: pulse-dot 0.5s infinite; }
 
+/* IDE badge: small letter chip marking which IDE the session belongs to. */
+.project-ide {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+}
+
+.project-ide.ide-trae { background: rgba(100, 150, 255, 0.22); color: #9db9ff; }
+.project-ide.ide-qoder { background: rgba(186, 140, 255, 0.22); color: #cfaaff; }
+
 .project-name {
   color: rgba(255, 255, 255, 0.85);
   font-size: 12px;
@@ -333,6 +348,13 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Alert: highlight the project name itself instead of replacing it with the
+   (long) alert message. */
+.project-name.alert {
+  color: #ff6666;
+  font-weight: 600;
 }
 
 .project-status-text {
@@ -528,28 +550,40 @@ html, body {
   font-size: 11px;
 }
 
-/* ===== Notification Badge ===== */
-.notification-badge {
-  position: fixed;
-  top: -4px;
-  right: -4px;
-  width: 16px;
-  height: 16px;
-  background: #ff4444;
-  border-radius: 50%;
-  border: 2px solid rgba(30, 30, 40, 0.9);
-  font-size: 10px;
-  color: white;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: bold;
-  z-index: 100;
-  animation: badge-pop 0.3s ease-out;
+/* ===== Mini mode (half-size window: 130×210, canvas 120×130) ===== */
+body.mini #pet-container { width: 130px; height: 210px; }
+body.mini #canvas-wrapper { width: 120px; height: 130px; }
+
+/* Status bar at half width (下方的操作框长度减半). */
+body.mini #status-bar { width: 120px; margin-top: 2px; border-radius: 8px; }
+body.mini #status-header { padding: 4px 8px; }
+body.mini #pet-state-text { font-size: 10px; gap: 4px; }
+body.mini #pet-state-text::before { width: 6px; height: 6px; }
+body.mini #menu-btn { font-size: 11px; padding: 2px 6px; }
+body.mini .project-item { padding: 3px 8px; gap: 5px; }
+body.mini .project-name { font-size: 10px; }
+body.mini .project-status-text { font-size: 9px; }
+body.mini .project-dot { width: 6px; height: 6px; }
+body.mini .project-ide {
+  width: 11px;
+  height: 11px;
+  font-size: 8px;
+  line-height: 11px;
 }
 
-@keyframes badge-pop {
-  0% { transform: scale(0); }
-  60% { transform: scale(1.2); }
-  100% { transform: scale(1); }
-}
+/* Head-top effects scaled down for the smaller canvas. */
+body.mini .alert-effect { font-size: 18px; }
+body.mini .zzz-effect span:nth-child(1) { font-size: 9px; }
+body.mini .zzz-effect span:nth-child(2) { font-size: 11px; }
+body.mini .zzz-effect span:nth-child(3) { font-size: 13px; }
+body.mini .working-effect span { width: 4px; height: 4px; }
+
+/* The context menu must fit the 130px-wide mini window. */
+body.mini #context-menu { min-width: 124px; padding: 3px; }
+body.mini .menu-item { padding: 5px 8px; font-size: 10px; }
+body.mini .menu-label { font-size: 9px; padding: 4px 8px 2px; }
+body.mini #motion-list .menu-item { padding: 4px 2px; font-size: 10px; }
+
+/* Fallback canvas (WebGL-failure path) shrunk to fit the mini wrapper. */
+body.mini #fallback-canvas { width: 120px; height: 130px; }
+

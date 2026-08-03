@@ -10,7 +10,12 @@
 
     Diagnostic log is written to ~/.dutyon/hooks/bridge.log so we can confirm
     whether Trae IDE is actually invoking the hook.
+
+    The -Ide argument ("trae" / "qoder") is passed by the installed hook
+    command so the pet can badge each session with its source IDE.
 #>
+
+param([string]$Ide = '')
 
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -20,6 +25,15 @@ function Write-BridgeLog($msg) {
     $logDir = Join-Path $env:USERPROFILE '.dutyon\hooks'
     $logPath = Join-Path $logDir 'bridge.log'
     if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+    # --- Log rotation: if the file exceeds ~500 lines, trim it down to the
+    # last 250 lines so the diagnostic log can't grow unbounded across
+    # many hook invocations. `@(...)` wraps so an empty file reports Count 0.
+    if (Test-Path $logPath) {
+      $lines = @(Get-Content -Path $logPath -ErrorAction SilentlyContinue)
+      if ($lines.Count -gt 500) {
+        $lines[-250..-1] | Set-Content -Path $logPath -Encoding UTF8 -ErrorAction SilentlyContinue
+      }
+    }
     $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
     Add-Content -Path $logPath -Value "[$ts] $msg" -Encoding UTF8
   } catch { }
@@ -27,8 +41,20 @@ function Write-BridgeLog($msg) {
 
 Write-BridgeLog "INVOKED pid=$PID"
 
-# Read JSON from stdin
-$stdinText = [Console]::In.ReadToEnd()
+# Read JSON from stdin as raw bytes and decode as UTF-8. The IDEs emit UTF-8
+# JSON, but [Console]::In.ReadToEnd() decodes with the console code page (GBK
+# on zh-CN Windows), which mangles any non-ASCII content (Chinese user names,
+# prompts, tool output) and makes ConvertFrom-Json fail on every such event.
+$stdinText = ''
+try {
+  $stdIn = [Console]::OpenStandardInput()
+  $ms = New-Object System.IO.MemoryStream
+  $stdIn.CopyTo($ms)
+  $stdinText = [System.Text.Encoding]::UTF8.GetString($ms.ToArray())
+} catch {
+  Write-BridgeLog "binary stdin read failed: $($_.Exception.Message); falling back to text read"
+  $stdinText = [Console]::In.ReadToEnd()
+}
 Write-BridgeLog "stdin: $stdinText"
 
 if ([string]::IsNullOrWhiteSpace($stdinText)) {
@@ -64,9 +90,22 @@ if (-not [string]::IsNullOrEmpty($projectDir)) {
   $projectName = Split-Path $projectDir -Leaf
 }
 
+# IDE kind: the explicit -Ide argument wins; fall back to the runner's env
+# marker (covers legacy hook commands installed without the argument).
+if ([string]::IsNullOrEmpty($Ide)) {
+  if (-not [string]::IsNullOrEmpty($env:QODER_PROJECT_DIR)) {
+    $Ide = 'qoder'
+  } elseif (-not [string]::IsNullOrEmpty($env:TRAE_PROJECT_DIR) -or -not [string]::IsNullOrEmpty($env:CLAUDE_PROJECT_DIR)) {
+    $Ide = 'trae'
+  }
+}
+
 # Enrich the event with project info
 $event | Add-Member -NotePropertyName "project_path" -NotePropertyValue $projectDir -Force
 $event | Add-Member -NotePropertyName "project_name" -NotePropertyValue $projectName -Force
+if (-not [string]::IsNullOrEmpty($Ide)) {
+  $event | Add-Member -NotePropertyName "ide" -NotePropertyValue $Ide -Force
+}
 
 # Add timestamp
 $event | Add-Member -NotePropertyName "timestamp" -NotePropertyValue ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -Force

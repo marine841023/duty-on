@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Duty On · 开工啦 — 盯着你的 AI 打工仔的桌面精灵</title>
+<meta name="description" content="开工啦 (Duty On)：浮在桌面顶层的 Live2D 精灵，一眼看清所有 Trae/Qoder IDE 里 AI 任务的状态——睡觉、忙碌、还是需要你确认。Tauri 2 + Rust，开源免费。">
+<style>
+  :root {
+    --bg: #0f1123; --bg2: #171a35; --card: #1e2244; --line: #2c3160;
+    --fg: #eef0ff; --dim: #9aa0c7; --accent: #7c6cf8; --teal: #39d0c4; --amber: #ffb347;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--fg); font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; }
+  a { color: var(--teal); text-decoration: none; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  /* hero */
+  header.hero { position: relative; overflow: hidden; background: radial-gradient(1200px 500px at 70% 20%, #2a2f63 0%, var(--bg) 60%); }
+  .hero-inner { display: grid; grid-template-columns: 1.1fr 1fr; gap: 40px; align-items: center; padding: 88px 0 72px; }
+  .badge { display: inline-block; font-size: 13px; color: var(--teal); border: 1px solid var(--line); border-radius: 999px; padding: 4px 14px; background: rgba(57,208,196,.08); margin-bottom: 18px; }
+  h1 { font-size: 52px; line-height: 1.15; letter-spacing: -1px; }
+  h1 .zh { display: block; font-size: 26px; color: var(--dim); font-weight: 500; margin-top: 8px; letter-spacing: 2px; }
+  .tagline { margin: 20px 0 30px; color: var(--dim); font-size: 17px; max-width: 46ch; }
+  .cta { display: flex; gap: 14px; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 13px 26px; border-radius: 12px; font-size: 15px; font-weight: 600; transition: transform .15s ease, box-shadow .15s ease; }
+  .btn:hover { transform: translateY(-2px); }
+  .btn-primary { background: linear-gradient(135deg, var(--accent), #5a8bff); color: #fff; box-shadow: 0 8px 24px rgba(124,108,248,.35); }
+  .btn-ghost { border: 1px solid var(--line); color: var(--fg); background: rgba(255,255,255,.03); }
+  .hero-img { position: relative; }
+  .hero-img img { width: 100%; border-radius: 18px; border: 1px solid var(--line); box-shadow: 0 24px 64px rgba(0,0,0,.5); }
+
+  /* states */
+  .states { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: -6px 0 0; }
+  .state { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 26px 22px; }
+  .state .emoji { font-size: 34px; }
+  .state h3 { margin: 10px 0 6px; font-size: 18px; }
+  .state p { color: var(--dim); font-size: 14px; }
+  .state.alert { border-color: rgba(255,179,71,.5); box-shadow: 0 0 0 1px rgba(255,179,71,.15), 0 12px 32px rgba(255,179,71,.08); }
+
+  section { padding: 72px 0; }
+  .section-title { text-align: center; font-size: 32px; margin-bottom: 8px; }
+  .section-sub { text-align: center; color: var(--dim); margin-bottom: 44px; }
+
+  /* features */
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .feat { background: var(--bg2); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
+  .feat h4 { font-size: 16px; margin-bottom: 6px; }
+  .feat p { color: var(--dim); font-size: 13.5px; }
+  .feat .ico { font-size: 22px; }
+
+  /* how */
+  .how { background: var(--bg2); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  pre.arch { background: #0b0d1e; border: 1px solid var(--line); border-radius: 14px; padding: 24px; overflow-x: auto; font-size: 12.5px; line-height: 1.55; color: #b9c0ee; }
+
+  /* models */
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; }
+  .codeblock { background: #0b0d1e; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; font-family: Consolas, monospace; font-size: 13px; color: #b9c0ee; }
+  .codeblock .c { color: #5c639a; }
+
+  footer { border-top: 1px solid var(--line); padding: 36px 0 48px; color: var(--dim); font-size: 13.5px; text-align: center; }
+
+  @media (max-width: 860px) {
+    .hero-inner, .split { grid-template-columns: 1fr; }
+    .states, .grid { grid-template-columns: 1fr; }
+    h1 { font-size: 38px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap hero-inner">
+    <div>
+      <span class="badge">开源 · Tauri 2 + Rust · 内存仅 ~80MB</span>
+      <h1>Duty On<span class="zh">开工啦 · 你的 AI 打工监督员</span></h1>
+      <p class="tagline">
+        同时开着好几个 IDE 跑 AI 任务？别再 Alt-Tab 挨个检查了。
+        一只 Live2D 小人儿浮在桌面上，替你盯着所有 Trae / Qoder 会话——
+        干活、干完、还是卡在等你确认，看一眼就知道。
+      </p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/marine841023/duty-on/releases">⬇ 下载 Windows 版</a>
+        <a class="btn btn-ghost" href="https://github.com/marine841023/duty-on">★ GitHub 仓库</a>
+      </div>
+    </div>
+    <div class="hero-img"><img src="assets/hero.png" alt="Duty On 桌面精灵宣传图"></div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section>
+    <div class="states">
+      <div class="state"><div class="emoji">💤</div><h3>睡觉</h3><p>所有 IDE 都闲着。她也闭眼打盹，头顶飘 ZZZ——世界安静。</p></div>
+      <div class="state"><div class="emoji">⚡</div><h3>忙碌</h3><p>有 AI 任务正在跑。她睁眼专注踱步——别催，在干了在干了。</p></div>
+      <div class="state alert"><div class="emoji">🔔</div><h3>提醒</h3><p>有 agent 卡在等你确认。她着急地抖动、弹出感叹号——就等你点一下。</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="section-title">一眼，而不是十一眼</h2>
+    <p class="section-sub">多 IDE 状态监控该有的样子</p>
+    <div class="grid">
+      <div class="feat"><div class="ico">🧭</div><h4>聚合状态</h4><p>提醒 &gt; 忙碌 &gt; 睡觉，一个表情读懂所有 IDE 会话的整体状态。</p></div>
+      <div class="feat"><div class="ico">📋</div><h4>项目状态栏</h4><p>每个 IDE 项目独立列出，T/Q 徽章区分 Trae / Qoder，点名字直接跳到对应窗口。</p></div>
+      <div class="feat"><div class="ico">👻</div><h4>真·点击穿透</h4><p>透明无边框悬浮窗，光标只有落在小人儿和菜单上才可点，其余操作直达下层窗口。</p></div>
+      <div class="feat"><div class="ico">🤏</div><h4>迷你模式</h4><p>一键缩成 130×210 的角落小伙伴，随时切回完整尺寸。</p></div>
+      <div class="feat"><div class="ico">🎭</div><h4>换皮自由</h4><p>把任意 Cubism 4 模型丢进 ~/.dutyon/live2d/ 就能换形象，21 个内置动作开箱即用。</p></div>
+      <div class="feat"><div class="ico">🌍</div><h4>8 种语言</h4><p>简中/繁中/英/日/韩/法/德/西，自动跟随系统语言。</p></div>
+    </div>
+  </section>
+
+  <section class="how">
+    <div class="wrap">
+      <h2 class="section-title">工作原理</h2>
+      <p class="section-sub">IDE Hook 事件 → 本地 HTTP → 状态机 → Live2D 动画</p>
+      <pre class="arch">┌─────────────────────────────────────────────┐
+│       DutyOn (Tauri 2 桌面应用)              │
+│   前端 Live2D 精灵   +   Rust 后端状态机      │
+│   HTTP Server: 127.0.0.1:17521              │
+└──────────────────┬──────────────────────────┘
+                   │ HTTP POST /hook (localhost)
+        ┌──────────┼──────────┐
+     ┌──┴───┐   ┌──┴───┐   ┌──┴───┐
+     │ Trae │   │Qoder │   │ Trae │   ← 每个 IDE 的 AI 生命周期事件
+     └──────┘   └──────┘   └──────┘     (提交/工具调用/通知/完成)</pre>
+    </div>
+  </section>
+
+  <section>
+    <div class="split">
+      <div>
+        <h2 class="section-title" style="text-align:left">三分钟上手</h2>
+        <p style="color:var(--dim)">下载安装包 → 右键菜单「安装 Hook 集成」→ 重启 IDE。完事。</p>
+      </div>
+      <div class="codeblock">
+        <span class="c"># 或者从源码构建（无需 npm）</span><br>
+        git clone https://github.com/marine841023/duty-on.git<br>
+        cd duty-on/src-tauri<br>
+        cargo tauri build
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>Duty On · 开工啦</strong> — 代码 <a href="https://github.com/marine841023/duty-on/blob/master/LICENSE">MIT</a> 开源 ·
+    Live2D 运行时与示例模型 © Live2D Inc.（见 <a href="https://github.com/marine841023/duty-on/blob/master/NOTICE">NOTICE</a>）</p>
+    <p style="margin-top:6px">Windows · macOS · Linux &nbsp;|&nbsp; Made with Tauri 2, Rust, PixiJS & pixi-live2d-display</p>
+  </div>
+</footer>
+
+</body>
+</html>

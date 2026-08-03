@@ -1,0 +1,42 @@
+name: Bug Report / 缺陷报告
+description: Something isn't working / 某些功能不正常
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting! 中英文填写都可以。
+  - type: input
+    id: version
+    attributes:
+      label: App version / 应用版本
+      placeholder: e.g. 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS / 操作系统
+      placeholder: e.g. Windows 11 25H2 / macOS 15 / Ubuntu 24.04 (X11)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened? / 发生了什么？
+      description: Steps to reproduce + what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / 日志
+      description: Paste relevant lines from ~/.dutyon/frontend.log (UI issues) — it exists even in release builds.
+      render: text
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues first / 已搜索过现有 Issue
+          required: true

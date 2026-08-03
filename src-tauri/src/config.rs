@@ -1,4 +1,5 @@
-//! Centralized configuration constants — 1:1 port of `src/main/config.js`.
+//! Centralized configuration constants — server port/host, window geometry,
+//! state timeouts, hook bridge events, and IDE scanner tuning.
 //!
 //! Only the backend uses these. Renderer-side constants stay inline in
 //! `renderer.js` (the renderer runs in WebView2 with no Rust access).
@@ -14,9 +15,15 @@ pub const HOST: &str = "127.0.0.1";
 pub const WINDOW_WIDTH: i32 = 260;
 pub const WINDOW_HEIGHT: i32 = 420;
 pub const WINDOW_MARGIN: i32 = 20; // offset from bottom-right corner
+// Mini mode: half-size window (人物宽高 1/2, status bar half width).
+pub const MINI_WINDOW_WIDTH: i32 = 130;
+pub const MINI_WINDOW_HEIGHT: i32 = 210;
 
 // ===== State timeouts (ms) =====
-pub const WORKING_TIMEOUT: u64 = 3 * 60 * 1000; // 3 min: working -> idle if silent
+/// Working sessions drop to idle after this much silence. Must stay generous:
+/// a working session can legitimately go silent for minutes (long tool runs,
+/// or Qoder's ask-user dialog which fires no hook event at all).
+pub const WORKING_TIMEOUT: u64 = 3 * 60 * 1000;
 pub const SESSION_TIMEOUT: u64 = 10 * 60 * 1000; // 10 min: session removed if silent
 pub const ALERT_REMINDER: u64 = 60 * 1000; // 1 min: re-alert interval while in alert
 pub const CLEANUP_INTERVAL_MS: u64 = 30 * 1000; // cleanup timer tick
@@ -33,18 +40,36 @@ pub const HOOK_EVENTS: &[&str] = &[
     "Notification",
 ];
 
-// Events wired into ~/.qoder/settings.json. Qoder supports a subset of Trae's
-// events — it has no SessionStart or Notification (its task-complete signal is
-// Stop), and adds PostToolUseFailure (not wired here; the state manager has no
-// handler for it). Sessions are created lazily on the first UserPromptSubmit /
-// PreToolUse, and go idle on Stop or via WORKING_TIMEOUT.
-pub const QODER_HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"];
+// Events wired into ~/.qoder/settings.json. The Qoder CLI documents a much
+// larger event set than the IDE (SessionStart, Notification, PermissionRequest,
+// ...); the IDE officially supports only the first four below, but since IDE
+// and CLI share the config file and presumably the hook engine, we additionally
+// wire Notification + PermissionRequest: if the IDE's ask-user dialog fires
+// them (undocumented), the pet gets its "waiting for user" signal; if not,
+// the extra entries are simply never invoked. Sessions are created lazily on
+// the first UserPromptSubmit / PreToolUse, and go idle on Stop or via
+// WORKING_TIMEOUT.
+pub const QODER_HOOK_EVENTS: &[&str] = &[
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "Notification",
+    "PermissionRequest",
+];
+
+// Tools whose calls bracket a "waiting for user input" period. Qoder has no
+// Notification event, so AskUserQuestion is the alert signal there:
+// PreToolUse(AskUserQuestion) → confirmation-needed; the matching PostToolUse
+// (after the user answers) → working again. Trae fires real Notification
+// events for the same situation; both paths set ConfirmationNeeded.
+pub const ASK_USER_TOOLS: &[&str] = &["AskUserQuestion"];
 
 // ===== Notification classification =====
 // Used by StateManager::check_confirmation_needed.
-pub const NOTIFICATION_COMPLETE_TYPES: &[&str] = &["task_complete", "idle", "done"];
+pub const NOTIFICATION_COMPLETE_TYPES: &[&str] = &["task_complete", "idle", "done", "idle_prompt"];
 pub const NOTIFICATION_CONFIRM_TYPES: &[&str] =
-    &["permission_request", "confirmation", "input_needed"];
+    &["permission_request", "permission_prompt", "confirmation", "input_needed"];
 
 // Keywords that indicate a Notification is asking for user confirmation.
 // Expanded to cover "run command" / "execute command" phrasing — Trae IDE

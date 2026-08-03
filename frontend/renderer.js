@@ -9,6 +9,10 @@
  * 5. Fallback canvas animation if Live2D fails
  */
 
+// Gate verbose per-frame / periodic diagnostic logging behind a flag so
+// production builds stay quiet. One-shot init logs are kept unconditionally.
+const DEBUG = false;
+
 // ===== State =====
 let pixiApp = null;
 let live2dModel = null;
@@ -22,6 +26,7 @@ let currentModelUrl = null;    // persisted/loaded model URL
 let motionPickerMode = 'play'; // 'play' = tap-to-play, 'assign' = pick for a state
 let motionPickerTarget = null; // target state when motionPickerMode === 'assign'
 let flipHorizontal = false;   // mirror the model horizontally (for left-side placement)
+let miniMode = false;         // half-size window mode (调整大小 menu toggle)
 let headEffectEl = null;        // #head-effect container, positioned at head-top anchor
 let isDragging = false;         // shared with setupDrag so click-through can stay off while dragging
 
@@ -34,6 +39,9 @@ const MODEL_URLS = [
 // ===== Constants =====
 const PIXI_WIDTH = 240;
 const PIXI_HEIGHT = 260;
+// Mini mode canvas: half of the normal size (人物宽高 1/2).
+const MINI_PIXI_WIDTH = 120;
+const MINI_PIXI_HEIGHT = 130;
 const EFFECT_INTERVAL_MS = 2000;
 // Motion priorities (match pixi-live2d-display MotionPriority: 1=IDLE, 2=NORMAL, 3=FORCE).
 const MOTION_PRIORITY_NORMAL = 2;
@@ -175,19 +183,15 @@ async function init() {
   // registers a PixiJS ticker callback).
   buildMotionMenu('play');
 
-  // Fetch available models + persisted choice from the main process, then
-  // build the model-switching menu.
-  await loadModelCatalog();
+  // Fetch available models + persisted choice, per-state motion assignments,
+  // and appearance settings in parallel — they have no inter-dependencies.
+  await Promise.all([
+    loadModelCatalog(),
+    loadStateMotions(),
+    loadAppearance(),
+  ]);
   if (window.__petSendLog) window.__petSendLog('info', '[init] model catalog loaded, currentModelUrl=' + currentModelUrl);
-
-  // Load persisted per-state motion assignments before the first
-  // playStateMotion() runs in initLive2D().
-  await loadStateMotions();
   buildSettingsMenu();
-
-  // Load persisted appearance settings (horizontal flip) before the model is
-  // attached, so attachModel applies the flip on first render.
-  await loadAppearance();
   updateFlipMenuCheck();
 
   // Wait for libraries to load
@@ -212,6 +216,20 @@ async function init() {
   // directly to refresh the text + status bar.
   updateStateUI(currentState);
 
+  // Pull the current state once. The scanner's first state-update fires while
+  // the webview is still loading, so without this pull an IDE opened before
+  // the pet would stay invisible until the next state change.
+  try {
+    const snap = window.petAPI && window.petAPI.getState ? await window.petAPI.getState() : null;
+    if (snap) {
+      updateStatusBar(snap);
+      updateHookStatusHint(hooksInstalled, snap);
+      if (snap.overallState !== currentState) setPetState(snap.overallState);
+    }
+  } catch (err) {
+    console.warn('[init] getState failed:', err && err.message);
+  }
+
   // Start effects loop
   startEffectsLoop();
 
@@ -220,47 +238,76 @@ async function init() {
 
   // Post-init diagnostic: check rendering state after 3s to diagnose
   // "completely transparent / can't click" issues.
+  if (DEBUG) {
+    setTimeout(() => {
+      try {
+        const canvasEl = document.querySelector('#live2d-canvas canvas');
+        const statusBar = document.getElementById('status-bar');
+        const sbStyle = statusBar ? getComputedStyle(statusBar) : null;
+        const bodyStyle = getComputedStyle(document.body);
+        const diag = [
+          'win=' + window.innerWidth + 'x' + window.innerHeight,
+          'styleSheets=' + document.styleSheets.length,
+          'body.bg=' + bodyStyle.backgroundColor,
+          'body.display=' + bodyStyle.display,
+          'sb.display=' + (sbStyle ? sbStyle.display : 'null'),
+          'sb.bg=' + (sbStyle ? sbStyle.backgroundColor : 'null'),
+          'sb.vis=' + (sbStyle ? sbStyle.visibility : 'null'),
+          'sb.opacity=' + (sbStyle ? sbStyle.opacity : 'null'),
+          'canvas=' + (canvasEl ? canvasEl.width + 'x' + canvasEl.height : 'NOT FOUND'),
+          'canvas.parent=' + (canvasEl ? (canvasEl.parentElement ? canvasEl.parentElement.id : 'no parent') : 'N/A'),
+          'stage.children=' + (pixiApp ? pixiApp.stage.children.length : 'no pixiApp'),
+          'model=' + (live2dModel ? 'exists' : 'null'),
+        ];
+        if (live2dModel) {
+          try {
+            const b = live2dModel.getBounds();
+            diag.push('model.bounds=' + b.x + ',' + b.y + ',' + b.width + 'x' + b.height);
+            diag.push('model.scale=' + live2dModel.scale.x + ',' + live2dModel.scale.y);
+            diag.push('model.pos=' + live2dModel.x + ',' + live2dModel.y);
+            diag.push('model.visible=' + live2dModel.visible);
+            diag.push('model.alpha=' + live2dModel.alpha);
+          } catch (e) { diag.push('model.err=' + e.message); }
+        }
+        if (pixiApp) {
+          diag.push('pixi.running=' + pixiApp.ticker.started);
+          diag.push('pixi.FPS=' + Math.round(pixiApp.ticker.FPS));
+        }
+        diag.push('visState=' + document.visibilityState);
+        diag.push('hasFocus=' + document.hasFocus());
+        if (window.__petSendLog) window.__petSendLog('info', '[diag] ' + diag.join(' | '));
+      } catch (e) {
+        if (window.__petSendLog) window.__petSendLog('error', '[diag] error: ' + e.message);
+      }
+    }, 3000);
+  }
+
+  // Health check: detect if backend HTTP server is down (e.g. port 17521
+  // occupied). The app window still shows but the pet stays "sleeping"
+  // forever — this probes /health and surfaces a localized warning after 2
+  // consecutive failures, auto-clearing on recovery.
+  let healthFailCount = 0;
   setTimeout(() => {
-    try {
-      const canvasEl = document.querySelector('#live2d-canvas canvas');
-      const statusBar = document.getElementById('status-bar');
-      const sbStyle = statusBar ? getComputedStyle(statusBar) : null;
-      const bodyStyle = getComputedStyle(document.body);
-      const diag = [
-        'win=' + window.innerWidth + 'x' + window.innerHeight,
-        'styleSheets=' + document.styleSheets.length,
-        'body.bg=' + bodyStyle.backgroundColor,
-        'body.display=' + bodyStyle.display,
-        'sb.display=' + (sbStyle ? sbStyle.display : 'null'),
-        'sb.bg=' + (sbStyle ? sbStyle.backgroundColor : 'null'),
-        'sb.vis=' + (sbStyle ? sbStyle.visibility : 'null'),
-        'sb.opacity=' + (sbStyle ? sbStyle.opacity : 'null'),
-        'canvas=' + (canvasEl ? canvasEl.width + 'x' + canvasEl.height : 'NOT FOUND'),
-        'canvas.parent=' + (canvasEl ? (canvasEl.parentElement ? canvasEl.parentElement.id : 'no parent') : 'N/A'),
-        'stage.children=' + (pixiApp ? pixiApp.stage.children.length : 'no pixiApp'),
-        'model=' + (live2dModel ? 'exists' : 'null'),
-      ];
-      if (live2dModel) {
-        try {
-          const b = live2dModel.getBounds();
-          diag.push('model.bounds=' + b.x + ',' + b.y + ',' + b.width + 'x' + b.height);
-          diag.push('model.scale=' + live2dModel.scale.x + ',' + live2dModel.scale.y);
-          diag.push('model.pos=' + live2dModel.x + ',' + live2dModel.y);
-          diag.push('model.visible=' + live2dModel.visible);
-          diag.push('model.alpha=' + live2dModel.alpha);
-        } catch (e) { diag.push('model.err=' + e.message); }
+    setInterval(async () => {
+      try {
+        const resp = await fetch('http://127.0.0.1:17521/health');
+        if (resp.ok) {
+          if (healthFailCount > 0) {
+            healthFailCount = 0;
+            updateStateUI(currentState);
+          }
+        } else {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+      } catch (e) {
+        healthFailCount++;
+        if (healthFailCount >= 2) {
+          const el = document.getElementById('pet-state-text');
+          if (el) el.textContent = i18n.t('status.serverDown');
+        }
       }
-      if (pixiApp) {
-        diag.push('pixi.running=' + pixiApp.ticker.started);
-        diag.push('pixi.FPS=' + Math.round(pixiApp.ticker.FPS));
-      }
-      diag.push('visState=' + document.visibilityState);
-      diag.push('hasFocus=' + document.hasFocus());
-      if (window.__petSendLog) window.__petSendLog('info', '[diag] ' + diag.join(' | '));
-    } catch (e) {
-      if (window.__petSendLog) window.__petSendLog('error', '[diag] error: ' + e.message);
-    }
-  }, 3000);
+    }, 30000);
+  }, 5000);
 }
 
 /**
@@ -369,10 +416,16 @@ function initPixiApp() {
   if (pixiApp) return;
   const PIXI = window.PIXI;
   pixiApp = new PIXI.Application({
-    width: PIXI_WIDTH,
-    height: PIXI_HEIGHT,
+    width: miniMode ? MINI_PIXI_WIDTH : PIXI_WIDTH,
+    height: miniMode ? MINI_PIXI_HEIGHT : PIXI_HEIGHT,
     backgroundAlpha: 0,
     antialias: true,
+    // Render at >=2x device pixels so edges stay crisp (the CSS display size
+    // is unchanged — autoDensity keeps the canvas element at logical pixels).
+    // NOTE: with resolution>1, pixiApp.view.width is the BACKING STORE size;
+    // layout math must use pixiApp.screen (logical units) instead.
+    resolution: Math.max(2, window.devicePixelRatio || 1),
+    autoDensity: true,
     autoStart: true,
     // Prefer the discrete GPU on dual-GPU systems (common on laptops).
     powerPreference: 'high-performance',
@@ -387,18 +440,20 @@ function initPixiApp() {
 
   // FPS monitor: log average FPS once per second so we can diagnose lag.
   // Output goes to the webview console (devtools is opened in debug builds).
-  let fpsFrames = 0;
-  let fpsLast = performance.now();
-  pixiApp.ticker.add(() => {
-    fpsFrames++;
-    const now = performance.now();
-    if (now - fpsLast >= 1000) {
-      const fps = Math.round((fpsFrames * 1000) / (now - fpsLast));
-      console.log(`[FPS] ${fps} fps | focused=${document.hasFocus()} | maxFPS=${pixiApp.ticker.maxFPS}`);
-      fpsFrames = 0;
-      fpsLast = now;
-    }
-  });
+  if (DEBUG) {
+    let fpsFrames = 0;
+    let fpsLast = performance.now();
+    pixiApp.ticker.add(() => {
+      fpsFrames++;
+      const now = performance.now();
+      if (now - fpsLast >= 1000) {
+        const fps = Math.round((fpsFrames * 1000) / (now - fpsLast));
+        console.log(`[FPS] ${fps} fps | focused=${document.hasFocus()} | maxFPS=${pixiApp.ticker.maxFPS}`);
+        fpsFrames = 0;
+        fpsLast = now;
+      }
+    });
+  }
 
   // Register the click-through region reporter now that pixiApp exists (it
   // registers a PixiJS ticker callback). The _done guard makes re-entry safe.
@@ -448,8 +503,8 @@ async function loadInitialModel() {
  */
 function attachModel(model) {
   const scale = Math.min(
-    pixiApp.view.width / model.width,
-    pixiApp.view.height / model.height
+    pixiApp.screen.width / model.width,
+    pixiApp.screen.height / model.height
   ) * 0.72;
 
   model.scale.set(scale);
@@ -457,8 +512,12 @@ function attachModel(model) {
   // flipping scale.x keeps the model centered (no position jump).
   if (flipHorizontal) model.scale.x = -scale;
   model.anchor.set(0.5, 1);
-  model.x = pixiApp.view.width / 2;
-  model.y = pixiApp.view.height;
+  model.x = pixiApp.screen.width / 2;
+  model.y = pixiApp.screen.height;
+  // Cache the base scale for mini-mode relayout: model.width/height are
+  // scale-APPLIED (and animation-dependent) bounds, so recomputing from them
+  // later would compound the scale on every toggle.
+  model._dutyonBaseScale = scale;
 
   pixiApp.stage.addChild(model);
 
@@ -513,7 +572,7 @@ function updateHeadEffectAnchor() {
   if (updateHeadEffectAnchor._skip !== 0) return;
   const b = live2dModel.getBounds();
   const topX = b.x + b.width / 2;
-  const topY = b.y + 40;
+  const topY = b.y + (miniMode ? 20 : 40);
   updateHeadEffectPosition(topX, topY);
 }
 
@@ -593,6 +652,7 @@ async function switchModel(url) {
   }
 
   try {
+    if (window.__petSendLog) window.__petSendLog('info', '[live2d] switching to: ' + url);
     console.log('[Live2D] Switching to:', url);
     live2dModel = await Live2DModel.from(url);
     currentModelUrl = url;
@@ -607,6 +667,18 @@ async function switchModel(url) {
     }
     console.log('[Live2D] Switched successfully:', url);
   } catch (err) {
+    const errMsg = (err && err.message) ? err.message : String(err);
+    const errFrame = (err && err.stack) ? err.stack.split('\n').slice(0, 3).join(' <- ') : '';
+    if (window.__petSendLog) window.__petSendLog('error', '[live2d] switch FAIL ' + url + ': ' + errMsg + (errFrame ? ' | ' + errFrame : ''));
+    // Probe the same URL with fetch to capture the asset-protocol HTTP status
+    // (403 = scope rejection, 404 = path mapping) plus the response head.
+    try {
+      const probe = await fetch(url);
+      const probeBody = await probe.text();
+      if (window.__petSendLog) window.__petSendLog('error', '[live2d] probe status=' + probe.status + ' len=' + probeBody.length + ' head=' + probeBody.slice(0, 120).replace(/\s+/g, ' '));
+    } catch (probeErr) {
+      if (window.__petSendLog) window.__petSendLog('error', '[live2d] probe threw: ' + ((probeErr && probeErr.message) || probeErr));
+    }
     console.error('[Live2D] Switch failed, falling back:', err.message);
     // Restore the previous model if the new one failed to load
     await loadInitialModel();
@@ -812,8 +884,11 @@ function assignStateMotion(state, group, idx) {
 async function loadAppearance() {
   if (!window.petAPI || !window.petAPI.getAppearance) return;
   try {
-    const { flipHorizontal: f } = await window.petAPI.getAppearance();
+    const { flipHorizontal: f, miniMode: m } = await window.petAPI.getAppearance();
     flipHorizontal = !!f;
+    // No window resize here: the backend already created the window with the
+    // persisted mini-mode size (see position_window in lib.rs).
+    applyMiniMode(!!m, false);
   } catch (err) {
     console.warn('[appearance] Failed to load:', err.message);
   }
@@ -847,6 +922,66 @@ function toggleFlip() {
 function updateFlipMenuCheck() {
   const item = document.getElementById('menu-flip');
   if (item) item.classList.toggle('active', flipHorizontal);
+}
+
+/**
+ * Recompute the model's scale/position after the canvas size changes
+ * (mini-mode toggle). Geometry only — no event re-registration (attachModel).
+ * Uses the base scale cached by attachModel scaled by the canvas ratio
+ * (normal 240×260 ↔ mini 120×130 is exactly ×2/×0.5).
+ */
+function relayoutModel() {
+  if (!live2dModel || !pixiApp) return;
+  const base = live2dModel._dutyonBaseScale;
+  if (!base) return;
+  const ratio = Math.min(
+    pixiApp.screen.width / PIXI_WIDTH,
+    pixiApp.screen.height / PIXI_HEIGHT
+  );
+  const scale = base * ratio;
+  live2dModel.scale.set(scale);
+  if (flipHorizontal) live2dModel.scale.x = -scale;
+  live2dModel.x = pixiApp.screen.width / 2;
+  live2dModel.y = pixiApp.screen.height;
+}
+
+/**
+ * Apply mini mode: body CSS class + PixiJS canvas resize + optional window
+ * resize through the backend. resizeWindow is false at startup because the
+ * window already opens at the persisted size.
+ */
+function applyMiniMode(enabled, resizeWindow = true) {
+  miniMode = enabled;
+  document.body.classList.toggle('mini', enabled);
+  updateMiniMenuCheck();
+  if (resizeWindow && window.petAPI && window.petAPI.setMiniMode) {
+    Promise.resolve(window.petAPI.setMiniMode(enabled)).catch((e) => {
+      console.warn('[mini] Failed to resize window:', e && e.message);
+    });
+  }
+  if (pixiApp) {
+    const w = enabled ? MINI_PIXI_WIDTH : PIXI_WIDTH;
+    const h = enabled ? MINI_PIXI_HEIGHT : PIXI_HEIGHT;
+    if (pixiApp.screen.width !== w || pixiApp.screen.height !== h) {
+      pixiApp.renderer.resize(w, h);
+    }
+    relayoutModel();
+  }
+}
+
+/**
+ * Toggle mini mode and persist it (窗口尺寸由后端调整).
+ */
+function toggleMiniMode() {
+  applyMiniMode(!miniMode, true);
+}
+
+/**
+ * Show/hide the ✓ on the 迷你模式 menu item.
+ */
+function updateMiniMenuCheck() {
+  const item = document.getElementById('menu-mini-mode');
+  if (item) item.classList.toggle('active', miniMode);
 }
 // ===== Fallback Canvas Animation =====
 function initFallbackCanvas() {
@@ -1001,15 +1136,21 @@ function updateStatusBar(snapshot) {
     dot.className = `project-dot ${session.status}`;
 
     const name = document.createElement('div');
-    name.className = 'project-name';
+    // Alert sessions: keep the project name visible (highlighted red)
+    // instead of letting the long alert text squeeze it out.
+    name.className = 'project-name' + (session.status === 'confirmation-needed' ? ' alert' : '');
     name.textContent = session.projectName;
-    name.title = session.projectPath || session.projectName;
+    const ideName = session.ide === 'qoder' ? 'Qoder' : session.ide === 'trae' ? 'Trae CN' : '';
+    name.title = (ideName ? `[${ideName}] ` : '') + (session.projectPath || session.projectName);
 
     const statusText = document.createElement('div');
     statusText.className = 'project-status-text';
     if (session.status === 'confirmation-needed') {
       statusText.classList.add('alert');
-      statusText.textContent = session.alertMessage || i18n.t('status.confirmationNeeded');
+      // Short label only; the full alert message moves to the tooltip so it
+      // never displaces the project name.
+      statusText.textContent = i18n.t('status.confirmationNeeded');
+      if (session.alertMessage) statusText.title = session.alertMessage;
     } else if (session.status === 'working') {
       statusText.textContent = i18n.t('status.busy');
     } else {
@@ -1017,6 +1158,16 @@ function updateStatusBar(snapshot) {
     }
 
     item.appendChild(dot);
+
+    // IDE badge (T = Trae, Q = Qoder) when the source IDE is known.
+    if (session.ide) {
+      const ide = document.createElement('div');
+      ide.className = `project-ide ide-${session.ide}`;
+      ide.textContent = session.ide === 'qoder' ? 'Q' : 'T';
+      ide.title = session.ide === 'qoder' ? 'Qoder' : 'Trae CN';
+      item.appendChild(ide);
+    }
+
     item.appendChild(name);
     item.appendChild(statusText);
 
@@ -1141,6 +1292,26 @@ function setupContextMenu() {
     positionMenu();
   });
 
+  // Right-click on the pet (model or status bar) opens the same menu. The
+  // menu always anchors to the ☰ button (it opens upward), so the position
+  // is stable regardless of where the user right-clicked.
+  document.addEventListener('contextmenu', (e) => {
+    // Always suppress the native webview context menu — this window is a pet,
+    // not a page.
+    e.preventDefault();
+    if (!contextMenu.classList.contains('hidden')) {
+      // Menu already open: right-click toggles it closed (unless the click
+      // landed inside the menu itself — right-clicking items stays a no-op).
+      if (!contextMenu.contains(e.target)) closeMenu();
+      return;
+    }
+    const onModel = e.target.closest('#canvas-wrapper') && isPointOnModel(e.clientX, e.clientY);
+    const onStatusBar = e.target.closest('#status-bar');
+    if (!onModel && !onStatusBar) return; // blank space: no menu
+    showView('menu-main-view');
+    positionMenu();
+  });
+
   // Clicking anywhere outside the menu (blank space) closes it.
   document.addEventListener('click', () => {
     closeMenu();
@@ -1157,7 +1328,20 @@ function setupContextMenu() {
 
   // Secondary menus: 切换形象 / 播放动作 / 动作设定  ->  pop out the list
   document.getElementById('menu-models-trigger').addEventListener('click', () => {
+    // Rescan on every open so freshly uploaded user models appear.
+    loadModelCatalog();
     showView('menu-model-view');
+  });
+
+  // 上传 Live2D -> open the user model folder (creates it + README on
+  // first use), then the user drops model folders into it.
+  document.getElementById('menu-upload-live2d').addEventListener('click', () => {
+    closeMenu();
+    if (window.petAPI && window.petAPI.openLive2DFolder) {
+      Promise.resolve(window.petAPI.openLive2DFolder()).catch((e) =>
+        console.warn('[models] open folder failed:', e)
+      );
+    }
   });
 
   document.getElementById('menu-play-motion').addEventListener('click', () => {
@@ -1219,13 +1403,23 @@ function setupContextMenu() {
     toggleFlip();
   });
 
+  // 迷你模式 toggle (checkbox) — keep the menu open so the ✓ change is visible.
+  document.getElementById('menu-mini-mode').addEventListener('click', () => {
+    toggleMiniMode();
+  });
+
   // Menu actions
   document.getElementById('menu-install-hooks').addEventListener('click', async () => {
     closeMenu();
     if (window.petAPI) {
+      // Always re-run the installer: it is idempotent (dedupes hook entries)
+      // and refreshes the bridge script from the bundled copy. Only the
+      // prompt differs: first install → "enable in IDE"; re-install →
+      // "already active".
+      const before = await window.petAPI.isHooksInstalled();
       const result = await window.petAPI.installHooks();
       if (result.success) {
-        showInstallResult(true, result);
+        showInstallResult(true, result, !!(before && before.installed));
         checkHooksStatus(); // refresh the hint after install
       } else {
         showInstallResult(false, result);
@@ -1245,27 +1439,40 @@ function setupContextMenu() {
       window.petAPI.quit();
     }
   });
-
-  document.getElementById('menu-uninstall').addEventListener('click', () => {
-    if (window.petAPI && window.petAPI.uninstallApp) {
-      window.petAPI.uninstallApp();
-    }
-  });
 }
 
-function showInstallResult(success, result) {
+function showInstallResult(success, result, alreadyInstalled) {
   const stateText = document.getElementById('pet-state-text');
   if (success) {
-    stateText.textContent = i18n.t('hook.installSuccess');
-    stateText.title = [
-      i18n.t('hook.installSuccess'),
-      '',
-      'Trae IDE: Settings -> Hooks -> Local auto-run -> Enable -> New AI session',
-      'Qoder: restart the IDE (hooks load automatically on startup)',
-    ].join('\n');
-    // Don't auto-reset; let the state-update replace it when events arrive.
+    if (alreadyInstalled) {
+      stateText.textContent = i18n.t('hook.alreadyActive');
+      stateText.title = i18n.t('hook.alreadyActive');
+    } else {
+      stateText.textContent = i18n.t('hook.installSuccess');
+      stateText.title = [
+        i18n.t('hook.installSuccess'),
+        '',
+        'Trae IDE: Settings -> Hooks -> Local auto-run -> Enable -> New AI session',
+        'Qoder: restart the IDE (hooks load automatically on startup)',
+      ].join('\n');
+    }
+    // Recovery notices (e.g. a foreign/corrupt config was backed up and
+    // rebuilt) — surface them in the hover tooltip so users aren't surprised.
+    if (result && result.warning) {
+      stateText.title += '\n\n⚠ ' + result.warning;
+      if (window.__petSendLog) window.__petSendLog('warn', '[hooks] install warning: ' + result.warning);
+    }
+    // Restore the state label after a few seconds — without this the text
+    // sticks forever while the state stays unchanged (setPetState early-
+    // returns on same-state, so updateStateUI never re-runs).
+    setTimeout(() => { updateStateUI(currentState); }, 6000);
   } else {
+    // Show the concrete reason (file path + OS error) in the hover tooltip;
+    // the short label alone gave users no way to diagnose the failure.
+    const detail = (result && result.error) ? String(result.error) : '';
     stateText.textContent = i18n.t('hook.installFailed');
+    stateText.title = detail ? (i18n.t('hook.installFailed') + '\n' + detail) : i18n.t('hook.installFailed');
+    if (window.__petSendLog) window.__petSendLog('error', '[hooks] install FAILED: ' + detail);
     setTimeout(() => { updateStateUI(currentState); }, 4000);
   }
 }
@@ -1274,25 +1481,10 @@ async function checkHooksStatus() {
   if (!window.petAPI) return;
   const status = await window.petAPI.isHooksInstalled();
   hooksInstalled = !!status.installed;
+  // Only refresh the menu hint — never override the status-bar text. The
+  // status bar shows the pet state (idle/working/...); install/enable
+  // guidance lives in the ☰ menu's Hook 状态 row and dialog.
   updateHookStatusHint(hooksInstalled, currentSnapshot);
-  const stateText = document.getElementById('pet-state-text');
-  if (!hooksInstalled) {
-    if (currentSnapshot.sessions.length === 0 && currentState === 'sleeping') {
-      stateText.textContent = i18n.t('hook.pleaseInstall');
-      stateText.title = i18n.t('hook.pleaseInstall');
-    }
-  } else if (currentSnapshot.sessions.length === 0 && currentState === 'sleeping') {
-    // Hooks installed but no events ever received → user needs to enable in IDE.
-    stateText.textContent = i18n.t('hook.pleaseEnable');
-    stateText.title = [
-      i18n.t('hook.pleaseEnable'),
-      '',
-      '1. Trae IDE -> Settings -> Hooks',
-      '2. Local auto-run',
-      '3. Enable',
-      '4. New AI session',
-    ].join('\n');
-  }
 }
 
 /**
@@ -1357,6 +1549,7 @@ function setupDrag() {
     lastY = e.screenY;
   });
 
+  let dragPendingX = 0, dragPendingY = 0, dragRafId = null;
   document.addEventListener('mousemove', (e) => {
     if (!isDragging) return;
     const deltaX = e.screenX - lastX;
@@ -1364,11 +1557,22 @@ function setupDrag() {
     if (Math.abs(deltaX) > 1 || Math.abs(deltaY) > 1) {
       hasMoved = true;
     }
-    if (hasMoved && window.petAPI) {
-      window.petAPI.dragWindow(deltaX, deltaY);
-    }
     lastX = e.screenX;
     lastY = e.screenY;
+    if (hasMoved && window.petAPI) {
+      // Coalesce multiple mousemove deltas into a single rAF IPC call so a
+      // 60Hz mouse doesn't fire 30+ drag_window invocations per second.
+      dragPendingX += deltaX;
+      dragPendingY += deltaY;
+      if (dragRafId === null) {
+        dragRafId = requestAnimationFrame(() => {
+          window.petAPI.dragWindow(dragPendingX, dragPendingY);
+          dragPendingX = 0;
+          dragPendingY = 0;
+          dragRafId = null;
+        });
+      }
+    }
   });
 
   document.addEventListener('mouseup', () => {
@@ -1474,17 +1678,27 @@ function setupClickThrough() {
   // Report regions on the PixiJS ticker (rAF — keeps running even while the
   // window is click-through, unlike mousemove). Throttle to every 3rd frame
   // (~8Hz): getBounds() is relatively expensive and the CSS rects barely move.
+  // Dirty check: only send the IPC when the JSON of regions changed since the
+  // last frame, so idle frames don't spam update_click_regions.
   let frameSkip = 0;
+  let lastRegionsJson = '';
   pixiApp.ticker.add(() => {
     frameSkip = (frameSkip + 1) % 3;
     if (frameSkip !== 0) return;
-    window.petAPI.updateClickRegions(collectRegions());
+    const regions = collectRegions();
+    const json = JSON.stringify(regions);
+    if (json !== lastRegionsJson) {
+      lastRegionsJson = json;
+      window.petAPI.updateClickRegions(regions);
+    }
   });
 
   // Seed regions immediately so the Rust polling thread (30ms) has data before
   // the first ticker fire (~125ms) — otherwise transparent areas would block
   // the desktop briefly at startup.
-  window.petAPI.updateClickRegions(collectRegions());
+  const seedRegions = collectRegions();
+  lastRegionsJson = JSON.stringify(seedRegions);
+  window.petAPI.updateClickRegions(seedRegions);
 }
 
 // ===== Start =====

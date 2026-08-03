@@ -9,7 +9,7 @@
       4. Stop           -> idle      (overall: sleeping)
       5. unregister     -> cleanup
 .NOTES
-    Prerequisites: the pet app must already be running (`npm start` in another
+    Prerequisites: the pet app must already be running (`cargo tauri dev` in another
     terminal). Run from the project root:
         .\.userdata\test-flow.ps1
 #>

@@ -3,9 +3,6 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <!-- CSP: allow self + inline scripts (needed for the dynamic script loader) + jsdelivr CDN -->
-  <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http://127.0.0.1:17521 https://cdn.jsdelivr.net https://cubism.live2d.com;">
   <title>Duty On</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -76,6 +73,7 @@
       <div class="menu-item submenu-trigger" id="menu-models-trigger">
         <span data-i18n="menu.switchModel">切换形象</span><span class="submenu-arrow">▶</span>
       </div>
+      <div class="menu-item" id="menu-upload-live2d" data-i18n="menu.uploadLive2D">上传 Live2D 模型</div>
       <div class="menu-item submenu-trigger" id="menu-play-motion">
         <span data-i18n="menu.playMotion">播放动作</span><span class="submenu-arrow">▶</span>
       </div>
@@ -83,6 +81,7 @@
         <span data-i18n="menu.actionSettings">动作设定</span><span class="submenu-arrow">▶</span>
       </div>
       <div class="menu-item" id="menu-flip" data-i18n="menu.flipHorizontal">左右翻转</div>
+      <div class="menu-item" id="menu-mini-mode" data-i18n="menu.miniMode">迷你模式</div>
       <div class="menu-item" id="menu-auto-launch" data-i18n="menu.autoLaunch">开机自启动</div>
       <div class="menu-item submenu-trigger" id="menu-language-trigger">
         <span data-i18n="menu.language">语言</span><span class="submenu-arrow">▶</span>
@@ -91,7 +90,6 @@
       <div class="menu-item" id="menu-install-hooks" data-i18n="menu.installHooks">安装 Hook 集成</div>
       <div class="menu-item" id="menu-hook-status"><span data-i18n="menu.hookStatus">Hook 状态</span><span class="menu-hint" id="hook-status-hint">未检查</span></div>
       <div class="menu-divider"></div>
-      <div class="menu-item" id="menu-uninstall" data-i18n="menu.uninstall">卸载</div>
       <div class="menu-item danger" id="menu-quit" data-i18n="menu.quit">退出</div>
     </div>
     <!-- 切换形象 submenu -->
@@ -176,20 +174,22 @@
     }
 
     async function loadAllLibs() {
-      // 1. PixiJS (local in lib/, CDN fallback for resilience)
-      await loadScript(
-        'lib/pixi.min.js',
-        'https://cdn.jsdelivr.net/npm/pixi.js@7.4.0/dist/pixi.min.js'
-      );
-      // 2. Cubism Core SDK
-      await loadScript(
-        'lib/live2dcubismcore.min.js',
-        'https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js'
-      );
-      // 3. pixi-live2d-display — use the Cubism 4 only build. The combined
-      //    index.min.js throws "Could not find Cubism 2 runtime" if live2d.min.js
-      //    is absent, which aborts registration of PIXI.live2d.Live2DModel.
-      //    Our models are all Cubism 4 (.moc3), so cubism4.min.js is sufficient.
+      // PixiJS and Cubism Core have no interdependency — load in parallel
+      await Promise.all([
+        loadScript(
+          'lib/pixi.min.js',
+          'https://cdn.jsdelivr.net/npm/pixi.js@7.4.0/dist/pixi.min.js'
+        ),
+        loadScript(
+          'lib/live2dcubismcore.min.js',
+          'https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js'
+        )
+      ]);
+      // pixi-live2d-display depends on both PixiJS and Cubism Core.
+      // Use the Cubism 4 only build — the combined index.min.js throws
+      // "Could not find Cubism 2 runtime" if live2d.min.js is absent, which
+      // aborts registration of PIXI.live2d.Live2DModel. Our models are all
+      // Cubism 4 (.moc3), so cubism4.min.js is sufficient.
       await loadScript(
         'lib/cubism4.min.js',
         'https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js'

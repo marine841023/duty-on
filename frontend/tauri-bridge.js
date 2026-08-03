@@ -21,14 +21,42 @@
     // ===== Events (renderer → main, main → renderer) =====
     onStateUpdate: (cb) => on('state-update', cb),
     onAlert: (cb) => on('alert', cb),
+    // Pull-mode fetch: covers the startup gap where the first state-update
+    // fires before this listener is registered (IDE opened before the pet).
+    getState: () => invoke('get_state'),
 
     // ===== Hooks =====
     installHooks: () => invoke('install_hooks'),
     isHooksInstalled: () => invoke('is_hooks_installed'),
 
     // ===== Models =====
-    getModels: () => invoke('get_models'),
+    getModels: async () => {
+      const res = await invoke('get_models');
+      // User-uploaded models are served by the local hook server
+      // (GET /live2d/*) instead of the Tauri asset protocol: asset-protocol
+      // responses carry no CORS headers, so the cubism4/pixi XHR loaders fail
+      // preflight with an opaque "Network error" (plain fetch probes return
+      // 200 because simple requests skip preflight). The URL path is the
+      // model file path relative to ~/.dutyon/live2d/.
+      const LIVE2D_URL_BASE = 'http://127.0.0.1:17521/live2d/';
+      const LIVE2D_ROOT_MARKER = '/.dutyon/live2d/';
+      const toServerUrl = (absPath) => {
+        const normalized = String(absPath).replace(/\\/g, '/');
+        const idx = normalized.indexOf(LIVE2D_ROOT_MARKER);
+        const rel = idx >= 0 ? normalized.slice(idx + LIVE2D_ROOT_MARKER.length) : normalized;
+        return LIVE2D_URL_BASE + rel.split('/').map(encodeURIComponent).join('/');
+      };
+      if (res && Array.isArray(res.models)) {
+        res.models = res.models.map((m) =>
+          m.userUploaded
+            ? { ...m, url: toServerUrl(m.url) }
+            : m
+        );
+      }
+      return res;
+    },
     switchModel: (modelUrl) => invoke('switch_model', { modelUrl }),
+    openLive2DFolder: () => invoke('open_live2d_folder'),
 
     // ===== Per-state motions =====
     getStateMotions: () => invoke('get_state_motions'),
@@ -37,6 +65,7 @@
     // ===== Appearance =====
     getAppearance: () => invoke('get_appearance'),
     setFlipHorizontal: (enabled) => invoke('set_flip_horizontal', { enabled }),
+    setMiniMode: (enabled) => invoke('set_mini_mode', { enabled }),
 
     // ===== Language =====
     getLanguage: () => invoke('get_language'),
@@ -49,7 +78,6 @@
     // ===== Test / window control =====
     testAlert: () => invoke('test_alert'),
     dragWindow: (deltaX, deltaY) => invoke('drag_window', { deltaX, deltaY }),
-    setClickThrough: (ignore) => invoke('set_click_through', { ignore }),
     // Click-through (Tauri has no {forward:true} mode, so the Rust polling
     // thread owns set_ignore_cursor_events; the renderer reports the clickable
     // rectangles and a force-clickable flag for drag / menu-open states).

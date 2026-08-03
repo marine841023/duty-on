@@ -127,6 +127,31 @@ fn apply_ignore(window: &WebviewWindow, state: &ClickThroughState, target_ignore
     }
 }
 
+/// Core polling logic shared across all platforms.
+/// Gets the window position/size, computes the ignore target, and applies it.
+/// Only the cursor-source differs per platform; this handles the rest.
+fn poll_once(
+    window: &WebviewWindow,
+    state: &ClickThroughState,
+    cursor_x: i32,
+    cursor_y: i32,
+) {
+    if let Ok(pos) = window.outer_position() {
+        if let Ok(size) = window.outer_size() {
+            let target = compute_target_ignore(
+                state,
+                cursor_x,
+                cursor_y,
+                pos.x,
+                pos.y,
+                size.width as i32,
+                size.height as i32,
+            );
+            apply_ignore(window, state, target);
+        }
+    }
+}
+
 /// Polling loop — owns all `set_ignore_cursor_events` calls at runtime.
 /// Runs for the lifetime of the app. Started from `setup()` in `lib.rs` on a
 /// dedicated `std::thread`. Exits silently if window-handle queries error.
@@ -143,20 +168,7 @@ pub fn run_polling_loop(window: WebviewWindow, state: ClickThroughState) {
         }
         let (cx, cy) = (point.x, point.y);
 
-        // Window outer rect in physical screen pixels. The window is undecorated
-        // so outer == inner; cursor-local coords map directly to the
-        // window-local physical-pixel rects the frontend reports.
-        let (wx, wy) = match window.outer_position() {
-            Ok(p) => (p.x, p.y),
-            Err(_) => continue,
-        };
-        let (ww, wh) = match window.outer_size() {
-            Ok(s) => (s.width as i32, s.height as i32),
-            Err(_) => continue,
-        };
-
-        let target_ignore = compute_target_ignore(&state, cx, cy, wx, wy, ww, wh);
-        apply_ignore(&window, &state, target_ignore);
+        poll_once(&window, &state, cx, cy);
     }
 }
 
@@ -179,17 +191,7 @@ pub fn run_polling_loop(window: WebviewWindow, state: ClickThroughState) {
             None => continue,
         };
 
-        let (wx, wy) = match window.outer_position() {
-            Ok(p) => (p.x, p.y),
-            Err(_) => continue,
-        };
-        let (ww, wh) = match window.outer_size() {
-            Ok(s) => (s.width as i32, s.height as i32),
-            Err(_) => continue,
-        };
-
-        let target_ignore = compute_target_ignore(&state, cx, cy, wx, wy, ww, wh);
-        apply_ignore(&window, &state, target_ignore);
+        poll_once(&window, &state, cx, cy);
     }
 }
 
@@ -232,20 +234,134 @@ pub fn run_polling_loop(window: WebviewWindow, state: ClickThroughState) {
         };
         let (cx, cy) = (reply.root_x as i32, reply.root_y as i32);
 
-        let (wx, wy) = match window.outer_position() {
-            Ok(p) => (p.x, p.y),
-            Err(_) => continue,
-        };
-        let (ww, wh) = match window.outer_size() {
-            Ok(s) => (s.width as i32, s.height as i32),
-            Err(_) => continue,
-        };
-
-        let target_ignore = compute_target_ignore(&state, cx, cy, wx, wy, ww, wh);
-        apply_ignore(&window, &state, target_ignore);
+        poll_once(&window, &state, cx, cy);
     }
 }
 
 /// Fallback for any other platform: no click-through (window always clickable).
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub fn run_polling_loop(_window: WebviewWindow, _state: ClickThroughState) {}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for `compute_target_ignore`.
+    //!
+    //! Semantics recap (matches the module-level doc: "cursor inside any
+    //! reported rect → clickable; otherwise → pass through"):
+    //!   - returns `false` (NOT ignored / window stays clickable) when the
+    //!     cursor is outside the window, when `force_clickable` is set, or when
+    //!     the cursor is inside a reported `ClickRegion`;
+    //!   - returns `true` (ignored / clicks pass THROUGH the window) when the
+    //!     cursor is inside the window but not inside any reported region
+    //!     (including the zero-region case — the whole window area passes
+    //!     through until the frontend reports model/menu rects).
+    //!
+    //! The helper below builds an isolated `ClickThroughState` per case so the
+    //! `Arc<Mutex<…>>` / `Arc<AtomicBool>` fields are never shared between tests.
+
+    use super::*;
+
+    /// Build a state with the given regions (in local/window coordinates) and
+    /// `force_clickable` flag. Each call yields an independent state.
+    fn make_state(regions: &[ClickRegion], force: bool) -> ClickThroughState {
+        let state = ClickThroughState::new();
+        {
+            let mut g = state.regions.lock().unwrap();
+            g.extend_from_slice(regions);
+        }
+        state.force_clickable.store(force, Ordering::SeqCst);
+        state
+    }
+
+    // Window rect used across tests: origin (100, 100), size 200x200, so it
+    // covers screen x∈[100,300) and y∈[100,300).
+    const WX: i32 = 100;
+    const WY: i32 = 100;
+    const WW: i32 = 200;
+    const WH: i32 = 200;
+
+    #[test]
+    fn cursor_outside_window_stays_clickable() {
+        let state = make_state(&[], false);
+        // above the window
+        assert!(!compute_target_ignore(&state, 150, 50, WX, WY, WW, WH));
+        // left of the window
+        assert!(!compute_target_ignore(&state, 50, 150, WX, WY, WW, WH));
+        // bottom-right outer edge is exclusive → counts as outside
+        assert!(!compute_target_ignore(&state, 300, 300, WX, WY, WW, WH));
+        // far outside
+        assert!(!compute_target_ignore(&state, 0, 0, WX, WY, WW, WH));
+    }
+
+    #[test]
+    fn inside_window_no_regions_passes_through() {
+        // Zero reported regions → nothing is clickable, so the whole window
+        // area passes clicks through (ignore == true).
+        let state = make_state(&[], false);
+        assert!(compute_target_ignore(&state, 150, 150, WX, WY, WW, WH));
+        // top-left corner of the window (inclusive lower bound) is inside
+        assert!(compute_target_ignore(&state, 100, 100, WX, WY, WW, WH));
+    }
+
+    #[test]
+    fn inside_window_hitting_region_stays_clickable() {
+        // Region in local coords: x∈[10,60), y∈[10,60) → screen [110,160).
+        let region = ClickRegion { x: 10, y: 10, width: 50, height: 50 };
+        let state = make_state(&[region], false);
+        // center of the region (local 35,35 → screen 135,135)
+        assert!(!compute_target_ignore(&state, 135, 135, WX, WY, WW, WH));
+        // top-left corner of the region (local 10,10 → screen 110,110, inclusive)
+        assert!(!compute_target_ignore(&state, 110, 110, WX, WY, WW, WH));
+    }
+
+    #[test]
+    fn inside_window_missing_region_passes_through() {
+        let region = ClickRegion { x: 10, y: 10, width: 50, height: 50 };
+        let state = make_state(&[region], false);
+        // local (80,80) → screen (180,180): clearly outside the region
+        assert!(compute_target_ignore(&state, 180, 180, WX, WY, WW, WH));
+        // just past the right edge (local 60,35 → screen 160,135): exclusive
+        assert!(compute_target_ignore(&state, 160, 135, WX, WY, WW, WH));
+        // just past the bottom edge (local 35,60 → screen 135,160): exclusive
+        assert!(compute_target_ignore(&state, 135, 160, WX, WY, WW, WH));
+    }
+
+    #[test]
+    fn force_clickable_keeps_window_clickable() {
+        // No regions → would normally pass through, but force wins → clickable.
+        let state = make_state(&[], true);
+        assert!(!compute_target_ignore(&state, 150, 150, WX, WY, WW, WH));
+
+        // Force also overrides the "inside window but missing a region" case.
+        let region = ClickRegion { x: 10, y: 10, width: 50, height: 50 };
+        let state2 = make_state(&[region], true);
+        assert!(!compute_target_ignore(&state2, 180, 180, WX, WY, WW, WH));
+    }
+
+    #[test]
+    fn multiple_regions_each_can_be_hit() {
+        let regions = vec![
+            ClickRegion { x: 0, y: 0, width: 40, height: 40 },     // top-left
+            ClickRegion { x: 160, y: 160, width: 40, height: 40 }, // bottom-right
+        ];
+        let state = make_state(&regions, false);
+        // hit first region (local 20,20 → screen 120,120)
+        assert!(!compute_target_ignore(&state, 120, 120, WX, WY, WW, WH));
+        // hit second region (local 180,180 → screen 280,280)
+        assert!(!compute_target_ignore(&state, 280, 280, WX, WY, WW, WH));
+        // hit neither (local 100,100 → screen 200,200)
+        assert!(compute_target_ignore(&state, 200, 200, WX, WY, WW, WH));
+    }
+
+    #[test]
+    fn current_ignore_field_is_not_read_by_compute() {
+        // `compute_target_ignore` must depend only on cursor/regions/force, NOT
+        // on the dedupe `current_ignore` latch — flipping it must not change the
+        // result for an otherwise pass-through position.
+        let state = make_state(&[], false);
+        state.current_ignore.store(true, Ordering::SeqCst);
+        assert!(compute_target_ignore(&state, 150, 150, WX, WY, WW, WH));
+        state.current_ignore.store(false, Ordering::SeqCst);
+        assert!(compute_target_ignore(&state, 150, 150, WX, WY, WW, WH));
+    }
+}

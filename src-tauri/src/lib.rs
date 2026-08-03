@@ -28,7 +28,6 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
@@ -46,17 +45,19 @@ pub fn run() {
             commands::is_hooks_installed,
             commands::get_models,
             commands::switch_model,
+            commands::open_live2d_folder,
             commands::get_state_motions,
             commands::set_state_motions,
             commands::get_appearance,
             commands::set_flip_horizontal,
+            commands::set_mini_mode,
             commands::get_language,
             commands::set_language,
             commands::get_auto_launch,
             commands::set_auto_launch,
+            commands::get_state,
             commands::test_alert,
             commands::drag_window,
-            commands::set_click_through,
             commands::update_click_regions,
             commands::set_force_clickable,
             commands::bring_to_front,
@@ -147,15 +148,30 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 fn position_window(app: &tauri::App, window: &tauri::WebviewWindow) -> Result<(), Box<dyn std::error::Error>> {
     let cfg = user_config::load();
 
+    // Restore the mini-mode window size before positioning so the default
+    // bottom-right placement and the on-screen check use the real geometry.
+    let mini = cfg.mini_mode.unwrap_or(false);
+    let (win_w, win_h) = if mini {
+        (config::MINI_WINDOW_WIDTH, config::MINI_WINDOW_HEIGHT)
+    } else {
+        (config::WINDOW_WIDTH, config::WINDOW_HEIGHT)
+    };
+    if mini {
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+            win_w as f64,
+            win_h as f64,
+        )));
+    }
+
     let (screen_w, screen_h) = app
         .primary_monitor()?
         .map(|m| (m.size().width as i32, m.size().height as i32))
         .unwrap_or((1920, 1080));
 
-    let mut x = screen_w - config::WINDOW_WIDTH - config::WINDOW_MARGIN;
-    let mut y = screen_h - config::WINDOW_HEIGHT - config::WINDOW_MARGIN;
+    let mut x = screen_w - win_w - config::WINDOW_MARGIN;
+    let mut y = screen_h - win_h - config::WINDOW_MARGIN;
     if let Some(pos) = &cfg.window_position {
-        if is_position_on_screen(app, pos.x, pos.y, config::WINDOW_WIDTH, config::WINDOW_HEIGHT) {
+        if is_position_on_screen(app, pos.x, pos.y, win_w, win_h) {
             x = pos.x;
             y = pos.y;
         }
@@ -249,11 +265,31 @@ fn spawn_timers(sm: SharedStateManager) {
 
 /// Spawn the IDE window scanner. Adaptive: 4s when sessions exist (fast close
 /// detection), 15s when idle (no IDE open, save CPU). Uses setTimeout-style
-/// recursion so a slow scan can't overlap the next tick.
+/// recursion so a slow scan can't overlap the next tick. Whenever the
+/// detected set changes, the new set plus any IDE-looking-but-unparsed window
+/// titles are written to frontend.log — the key diagnostic for "IDE visible
+/// but the pet lost it" reports.
 fn spawn_ide_scanner(sm: SharedStateManager) {
     tauri::async_runtime::spawn(async move {
+        let mut last_names: Vec<String> = Vec::new();
         loop {
-            let names = ide_scanner::scan_trae_projects();
+            let (names, suspects) = tokio::task::spawn_blocking(ide_scanner::scan_ide_projects)
+                .await
+                .unwrap_or_default();
+            let name_list: Vec<String> = names
+                .iter()
+                .map(|d| format!("{}({})", d.name, d.ide.as_str()))
+                .collect();
+            if name_list != last_names {
+                crate::server::append_log_file(
+                    "info",
+                    &format!(
+                        "[scanner] detected={:?} suspects={:?}",
+                        name_list, suspects
+                    ),
+                );
+                last_names = name_list;
+            }
             let next_delay = {
                 let mut s = sm.lock().await;
                 s.sync_detected_windows(&names);
