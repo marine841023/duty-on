@@ -63,10 +63,12 @@ html, body {
 }
 
 /* ===== Head-Top Effects (ZZZ / working dots / !) =====
-   #head-effect is a 0×0 point positioned via transform: translate(x, y) by
-   JS, where (x, y) is the model's bounds top-center shifted 40px down (see
-   updateHeadEffectAnchor in renderer.js). Effect children anchor at bottom:0
-   (the point itself) and extend upward, capped at 40px tall. */
+   #head-effect is a 0×0 point positioned via transform: translate(x, y)
+   scale(k) by JS, where (x, y) is the model's bounds top-center shifted
+   down proportionally to the model's height, and k scales the effect to
+   the model's on-screen size (see updateHeadEffectAnchor in renderer.js).
+   Effect children anchor at bottom:0 (the point itself) and extend upward,
+   capped at 40px tall at k=1. */
 .head-effect {
   position: absolute;
   left: 0;
@@ -582,12 +584,9 @@ body.mini .project-ide {
   line-height: 11px;
 }
 
-/* Head-top effects scaled down for the smaller canvas. */
-body.mini .alert-effect { font-size: 18px; }
-body.mini .zzz-effect span:nth-child(1) { font-size: 9px; }
-body.mini .zzz-effect span:nth-child(2) { font-size: 11px; }
-body.mini .zzz-effect span:nth-child(3) { font-size: 13px; }
-body.mini .working-effect span { width: 4px; height: 4px; }
+/* Head-top effect sizes are scaled dynamically by JS to match the model's
+   on-screen bounds (updateHeadEffectAnchor), so no mini-mode overrides are
+   needed here. */
 
 /* The context menu must fit the 130px-wide mini window. */
 body.mini #context-menu { min-width: 124px; padding: 3px; }

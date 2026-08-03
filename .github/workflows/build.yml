@@ -48,13 +48,14 @@ jobs:
           body: |
             ## What's new
 
-            ### Bug Fixes
-            - Fixed window scanning hanging when a busy CMD/console window is open: title reads now filter by IDE process name first (pure kernel query, never hangs) and fall back to a 250 ms timed read (`SendMessageTimeoutW`), so IDE status keeps updating in real time even while a long-running command executes
-            - Fixed Qoder sessions being dropped when the IDE window title temporarily changes to a non-standard format (e.g. installer dialogs): windows of the same IDE kind now suppress the miss grace countdown
+            ### Features
+            - Head effects (halo, speech bubble, prompt icon) now adapt their anchor and size to any character model
+            - Motion dropdown is populated dynamically by scanning each character's model file; newly downloaded characters work without restarting the app
+            - Per-character default motion settings: idle/busy/alert picks are stored per model and loaded automatically when switching characters (old config is auto-migrated)
 
-            ### Housekeeping
-            - Removed internal open-source ops guide; technical notes moved to `docs/technical-notes.md`
-            - Synced version numbers (Cargo.toml / tauri.conf.json) to 1.1.1
+            ### Bug Fixes
+            - Fixed custom models with unusual canvas sizes (e.g. shizuku) rendering off-screen or at a wrong scale: models are now fitted to their content bounding box, refined after the first rendered frame
+            - Fixed models using clipping masks (e.g. shizuku) collapsing to a single mouth piece when horizontal flipping was on: flipping is now done via CSS on the canvas instead of a negative scale
 
             ### Tested
             - 64 unit tests passing

@@ -29,6 +29,7 @@ let flipHorizontal = false;   // mirror the model horizontally (for left-side pl
 let miniMode = false;         // half-size window mode (调整大小 menu toggle)
 let headEffectEl = null;        // #head-effect container, positioned at head-top anchor
 let isDragging = false;         // shared with setupDrag so click-through can stay off while dragging
+let currentMotionGroups = [];   // [name, count] pairs scanned from the loaded model's motion defs
 
 // Model URLs to try (in order)
 const MODEL_URLS = [
@@ -432,6 +433,8 @@ function initPixiApp() {
   });
   const canvasContainer = document.getElementById('live2d-canvas');
   canvasContainer.appendChild(pixiApp.view);
+  // Restore the persisted horizontal mirror on the freshly created canvas.
+  applyFlipCSS();
 
   // Fixed 24fps cap — smooth enough for Live2D idle animations while keeping
   // CPU/GPU usage low (important over Remote Desktop where every frame adds
@@ -499,25 +502,103 @@ async function loadInitialModel() {
 }
 
 /**
+ * Measure the model's actual content bounds at UNIT SCALE (pixels) by
+ * scanning every drawable's vertex positions. model.width/height come from
+ * the moc3 CANVAS info, which can be far larger than the character itself
+ * (e.g. shizuku ships a very wide canvas), so canvas-based fitting shrinks
+ * such models to a tiny blob. Vertex bounds reflect what's actually visible.
+ *
+ * IMPORTANT: getDrawableVertexPositions returns CANVAS-UNIT coordinates
+ * (canvas width = 1 unit), NOT pixels — multiply by internalModel
+ * .pixelsPerUnit. Skipping that conversion yields a ~1x1 "bounds" and a
+ * scale factor in the hundreds, blowing the model out of the window.
+ *
+ * Also only valid AFTER the core has updated at least once — right after
+ * load the vertex buffers are uninitialized, which is why callers must
+ * defer measurement to the first rendered frames.
+ */
+function measureContentBounds(model) {
+  try {
+    const im = model.internalModel;
+    const core = im.coreModel;
+    // Unit→pixel factor. pixelsPerUnit is provided by pixi-live2d-display;
+    // fall back to deriving it from the canvas info.
+    let ppu = im.pixelsPerUnit;
+    if (!ppu || ppu <= 0) {
+      const cw = core.getCanvasWidth ? core.getCanvasWidth() : 0;
+      ppu = cw > 0 ? model.width / cw : 1;
+    }
+    const count = core.getDrawableCount();
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (let d = 0; d < count; d++) {
+      // Vertex positions are already in MODEL coordinates (drawable-local
+      // transforms were applied by the core during update), so no extra
+      // matrix is needed here.
+      const verts = core.getDrawableVertexPositions(d);
+      if (!verts || verts.length === 0) continue;
+      for (let i = 0; i < verts.length; i += 2) {
+        const x = verts[i] * ppu, y = verts[i + 1] * ppu;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+    if (!isFinite(minX)) return null;
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
  * Scale, position, and wire up interaction/parameter hooks for a model.
  */
 function attachModel(model) {
-  const scale = Math.min(
+  // Initial fit by the moc3 CANVAS size — always valid right after load.
+  // The tighter content-bounds fit is refined in refineContentFit() once the
+  // core has rendered its first frame (vertex data is uninitialized before
+  // then, so measuring earlier yields a bogus 1x1 box).
+  let scale = Math.min(
     pixiApp.screen.width / model.width,
     pixiApp.screen.height / model.height
   ) * 0.72;
 
+  // Display height at unit scale (≈ canvas height) — captured before we
+  // apply our own scale below.
+  const unscaledH = model.height;
   model.scale.set(scale);
-  // Mirror horizontally if the user enabled 左右翻转. anchor is (0.5, 1) so
-  // flipping scale.x keeps the model centered (no position jump).
-  if (flipHorizontal) model.scale.x = -scale;
+  // NOTE: horizontal mirroring (左右翻转) is done via CSS on the canvas
+  // element (applyFlipCSS) — a negative scale.x breaks pixi-live2d-display's
+  // clipping masks and hides most of models that use them (e.g. shizuku).
   model.anchor.set(0.5, 1);
   model.x = pixiApp.screen.width / 2;
   model.y = pixiApp.screen.height;
+  model._dutyonContent = null;      // filled in by refineContentFit
+  model._dutyonUnscaledH = unscaledH;
   // Cache the base scale for mini-mode relayout: model.width/height are
   // scale-APPLIED (and animation-dependent) bounds, so recomputing from them
   // later would compound the scale on every toggle.
   model._dutyonBaseScale = scale;
+
+  // One-shot content-bounds refinement after the first core update. The
+  // core may need a couple of frames before vertex data is valid, so retry
+  // briefly instead of giving up on the very first tick.
+  let refineTries = 0;
+  const refine = () => {
+    if (live2dModel !== model || model.destroyed || ++refineTries > 60) {
+      pixiApp.ticker.remove(refine);
+      return;
+    }
+    const content = measureContentBounds(model);
+    // Sanity: converted bounds are in pixels and should be comparable to the
+    // canvas size — anything tiny means the conversion/measurement went
+    // wrong, so keep the safe canvas fit instead.
+    if (!content || content.width < 16 || content.height < 16) return;
+    pixiApp.ticker.remove(refine);
+    refineContentFit(model, content);
+  };
+  pixiApp.ticker.add(refine);
 
   pixiApp.stage.addChild(model);
 
@@ -555,13 +636,58 @@ function attachModel(model) {
 
   // Set up the head-top effect (ZZZ / working dots / !) for the current state.
   setupHeadEffect();
+
+  // Swap in this character's own saved state-motion settings (or the global
+  // defaults on first use), then rebuild the motion catalog from its own
+  // motion definitions — every character ships its own motion set, so the
+  // menu and state-motion resolution must be refreshed on every load/switch.
+  applyStateMotionsForModel(currentModelUrl);
+  refreshMotionGroups();
+  buildSettingsMenu();
+}
+
+/**
+ * Re-fit the model to its actual content bounds (called once, after the
+ * first core update). Canvases often carry large empty regions (e.g.
+ * shizuku), so canvas fitting leaves such characters tiny or misaligned.
+ *
+ * Model coords are Y-up with the origin at canvas center; the display flips
+ * Y, so the content bottom's display-local offset below the anchor point
+ * (canvas bottom-center) is -(unscaledH/2 + content.y).
+ */
+function refineContentFit(model, content) {
+  const unscaledH = model._dutyonUnscaledH || model.height;
+  let scale = Math.min(
+    pixiApp.screen.width / content.width,
+    pixiApp.screen.height / content.height
+  ) * 0.72;
+  // Never let the content overflow the canvas horizontally (very wide
+  // characters height-fitted would otherwise get clipped by the window).
+  const maxScale = (pixiApp.screen.width * 1.05) / content.width;
+  if (scale > maxScale) scale = maxScale;
+
+  model._dutyonBaseScale = scale;
+  model._dutyonContent = content;
+  // Bottom-align on the CONTENT bottom instead of the canvas bottom.
+  const bottomOffset = unscaledH / 2 + content.y; // display-local, >= 0
+  model.scale.set(scale);
+  model.x = pixiApp.screen.width / 2;
+  model.y = pixiApp.screen.height + bottomOffset * scale;
+  if (window.__petSendLog) {
+    window.__petSendLog('info', `[live2d] content fit ${Math.round(content.width)}x${Math.round(content.height)} canvas ${Math.round(model.width)}x${Math.round(model.height)} scale=${scale.toFixed(4)}`);
+  }
 }
 
 /**
  * Per-frame: track the model's bounds and move #head-effect to the head-top
- * anchor (bounds top-center shifted 40px down). Registered on the PixiJS
- * ticker in setupHeadEffect. getBounds() accounts for scale/anchor/animation,
- * so the effect stays glued to the head as the model breathes/moves.
+ * anchor. Registered on the PixiJS ticker in setupHeadEffect. getBounds()
+ * accounts for scale/anchor/animation, so the effect stays glued to the head
+ * as the model breathes/moves.
+ *
+ * Both the downward inset and the effect size are derived from the model's
+ * bounds height, so characters of very different proportions (small bundled
+ * models vs large user-supplied ones) get the effect placed over the head
+ * instead of buried in the body or floating in mid-air.
  */
 function updateHeadEffectAnchor() {
   if (!live2dModel || !headEffectEl) return;
@@ -571,9 +697,36 @@ function updateHeadEffectAnchor() {
   updateHeadEffectAnchor._skip = ((updateHeadEffectAnchor._skip || 0) + 1) % 3;
   if (updateHeadEffectAnchor._skip !== 0) return;
   const b = live2dModel.getBounds();
+  if (b.height <= 0) return;
   const topX = b.x + b.width / 2;
-  const topY = b.y + (miniMode ? 20 : 40);
-  updateHeadEffectPosition(topX, topY);
+  // Pick the anchor by body archetype, detected via the bounds aspect ratio:
+  //  - Q-version chibi characters (aspect >= 0.8, head fills the top half of
+  //    the bounds): keep the classic anchor ~20% below the bounds top
+  //    (equivalent to the original fixed 40px on the reference 190px height).
+  //  - Tall full-body characters (aspect < 0.8, e.g. Miku: head only occupies
+  //    the top ~15% and hair/accessories push the bounds top up): anchor close
+  //    to the bounds top and let the effect extend upward from the crown.
+  const aspect = b.width / b.height;
+  let inset;
+  if (aspect < 0.8) {
+    inset = Math.min(Math.max(b.height * 0.04, 4), 20);
+  } else {
+    inset = Math.min(Math.max(b.height * 0.2, 16), 48);
+  }
+  const topY = b.y + inset;
+  if (updateHeadEffectAnchor._logAt === undefined || performance.now() - updateHeadEffectAnchor._logAt > 5000) {
+    updateHeadEffectAnchor._logAt = performance.now();
+    if (window.__petSendLog) window.__petSendLog('info',
+      `[headfx] bounds=${Math.round(b.width)}x${Math.round(b.height)} aspect=${aspect.toFixed(2)} inset=${inset.toFixed(1)} scale=${(updateHeadEffectAnchor._k || 1).toFixed(2)}`);
+  }
+  // Effect scale: 1.0 at the reference height a typical bundled model renders
+  // at (240×260 canvas × 0.72 fit ≈ 190px bounds). Smoothed to avoid jitter
+  // as the bounds breathe with animation.
+  const targetK = Math.min(Math.max(b.height / 190, 0.55), 1.8);
+  const prevK = updateHeadEffectAnchor._k || targetK;
+  const k = prevK + (targetK - prevK) * 0.15;
+  updateHeadEffectAnchor._k = k;
+  updateHeadEffectPosition(topX, topY, k);
 }
 
 /**
@@ -584,6 +737,9 @@ function setupHeadEffect() {
   headEffectEl = document.getElementById('head-effect');
   if (!headEffectEl) return;
   updateHeadEffectContent(currentState);
+  // Reset the smoothed scale so a freshly loaded model snaps to its own size
+  // instead of lerping from the previous model's scale.
+  updateHeadEffectAnchor._k = 0;
   // Register per-frame anchor tracking so the effect follows the model.
   // Re-register on model switch to avoid stacking listeners.
   const PIXI = window.PIXI;
@@ -611,12 +767,12 @@ function updateHeadEffectContent(state) {
 }
 
 /**
- * Move the #head-effect anchor to (x, y) in canvas-wrapper pixel coords.
- * Called from updateHeadEffectAnchor so the effect tracks the model.
+ * Move the #head-effect anchor to (x, y) in canvas-wrapper pixel coords and
+ * scale it to match the model's on-screen size (see updateHeadEffectAnchor).
  */
-function updateHeadEffectPosition(x, y) {
+function updateHeadEffectPosition(x, y, scale = 1) {
   if (!headEffectEl) return;
-  headEffectEl.style.transform = `translate(${x}px, ${y}px)`;
+  headEffectEl.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
 }
 
 /**
@@ -694,16 +850,28 @@ async function switchModel(url) {
  *   sleeping -> Flick3[1]      哈欠
  *   working  -> FlickLeft[1]   走路
  *   alert    -> FlickLeft[0]   yeah
+ *
+ * Per-state motion assignments are stored PER CHARACTER — see
+ * applyStateMotionsForModel / saveCurrentStateMotions. DEFAULT_STATE_MOTIONS
+ * only seeds characters that have no saved settings yet; STATE_MOTIONS is
+ * the LIVE map for the currently loaded character.
  */
-const STATE_MOTIONS = {
+const DEFAULT_STATE_MOTIONS = {
   sleeping: ['Flick3', 1],       // 哈欠
   working:  ['FlickLeft', 1],    // 走路
   alert:    ['FlickLeft', 0],    // yeah
 };
+let STATE_MOTIONS = { ...DEFAULT_STATE_MOTIONS };
+
+// Persisted per-model motion store: { [modelUrl]: { sleeping/working/alert:
+// [group, idx] }, _default?: {...} }. null = not loaded yet.
+let stateMotionsStore = null;
 
 /**
- * All available motions for the menu list (group, index, i18nKey).
- * The third element is an i18n key resolved via i18n.t() at display time.
+ * Catalog of bundled-model motions with display names (group, index, i18nKey).
+ * Used ONLY for display-name lookup and as a preferred playback order. The
+ * actually playable motions always come from the loaded model itself (see
+ * refreshMotionGroups), because every Live2D model ships its own motion set.
  */
 const ALL_MOTIONS = [
   ['Idle', 0, 'motion.Idle.0'],
@@ -730,16 +898,105 @@ const ALL_MOTIONS = [
 ];
 
 /**
- * Play the current state's motion so it loops. `motionFinish` (registered in
- * attachModel) re-triggers this on each finish for seamless looping; this is
- * also called directly on state changes and as a periodic safety net.
+ * Scan the loaded model's motion definitions and rebuild the available
+ * motion list ([name, count] pairs, empty arrays dropped). Called from
+ * attachModel so every model load/switch refreshes the catalog.
+ */
+function refreshMotionGroups() {
+  currentMotionGroups = [];
+  if (!live2dModel || !live2dModel.internalModel) return;
+  const defs = live2dModel.internalModel.motionManager.definitions || {};
+  for (const name of Object.keys(defs)) {
+    const arr = defs[name];
+    if (Array.isArray(arr) && arr.length > 0) {
+      currentMotionGroups.push([name, arr.length]);
+    }
+  }
+  if (window.__petSendLog) {
+    window.__petSendLog('info', '[motions] model groups: ' +
+      (currentMotionGroups.map(([n, c]) => `${n}(${c})`).join(', ') || '(none)'));
+  }
+}
+
+/** Count of playable motions in a group of the loaded model (0 if absent). */
+function motionGroupCount(group) {
+  const found = currentMotionGroups.find(([n]) => n === group);
+  return found ? found[1] : 0;
+}
+
+/** Display name for a motion: i18n label when it's a known bundled motion,
+ *  otherwise the raw `Group[idx]` form. */
+function motionDisplayName(group, idx) {
+  const found = ALL_MOTIONS.find(([mg, mi]) => mg === group && mi === idx);
+  return found ? i18n.t(found[2]) : `${group}[${idx}]`;
+}
+
+/**
+ * Resolve a desired motion to one the loaded model can actually play:
+ *   1. exact (group, idx) when the model has it — same-name priority;
+ *   2. same group, index 0 (the group exists but the index doesn't);
+ *   3. any group that contains the desired one as a substring (Tap vs Tap2);
+ *   4. the first available motion of the model.
+ * Returns [group, idx] or null when the model has no motions at all.
+ */
+function resolveAvailableMotion(group, idx) {
+  if (!currentMotionGroups.length) return null;
+  const count = motionGroupCount(group);
+  if (count > 0) {
+    return [group, idx < count ? idx : 0];
+  }
+  const partial = currentMotionGroups.find(([n]) => n.includes(group) || group.includes(n));
+  if (partial) return [partial[0], 0];
+  return [currentMotionGroups[0][0], 0];
+}
+
+/**
+ * Fallback chain for state motions when the resolved motion unexpectedly
+ * fails to start: same group other indices -> bundled-catalog order -> any.
+ */
+function* fallbackMotionCandidates(group) {
+  const count = motionGroupCount(group);
+  for (let i = 0; i < count; i++) {
+    if (i !== 0) yield [group, i];
+  }
+  for (const [g, i] of ALL_MOTIONS) {
+    if (g !== group && motionGroupCount(g) > i) yield [g, i];
+  }
+  for (const [n, c] of currentMotionGroups) {
+    if (n !== group) yield [n, 0];
+  }
+}
+
+/**
+ * Play the current state's motion so it loops. The desired motion comes from
+ * STATE_MOTIONS (user-assignable) but is resolved against the loaded model's
+ * own motion set; missing motions degrade to similar available ones.
+ * `motionFinish` (registered in attachModel) re-triggers this on each finish
+ * for seamless looping; it's also called directly on state changes and as a
+ * periodic safety net.
  */
 function playStateMotion(priority = MOTION_PRIORITY_NORMAL) {
   if (!live2dModel) return;
-  const [group, idx] = STATE_MOTIONS[currentState] || STATE_MOTIONS.sleeping;
+  const desired = STATE_MOTIONS[currentState] || STATE_MOTIONS.sleeping;
+  const target = resolveAvailableMotion(desired[0], desired[1]);
+  if (!target) return;
   try {
-    live2dModel.motion(group, idx, priority);
-  } catch (e) { /* ignore */ }
+    const result = live2dModel.motion(target[0], target[1], priority);
+    // pixi-live2d-display returns false/undefined when the motion is missing
+    // or can't be reserved; any other value (incl. slot 0) means accepted.
+    if (result !== false && result !== undefined) return;
+  } catch (e) { /* fall through to candidates */ }
+  // Playback failed (e.g. empty motion file) — try fallbacks.
+  for (const [g, i] of fallbackMotionCandidates(target[0])) {
+    try {
+      const result = live2dModel.motion(g, i, priority);
+      if (result !== false && result !== undefined) {
+        if (window.__petSendLog) window.__petSendLog('warn',
+          `[motions] ${desired[0]}[${desired[1]}] failed, fell back to ${g}[${i}]`);
+        return;
+      }
+    } catch (e) { /* try next */ }
+  }
 }
 
 /**
@@ -756,16 +1013,19 @@ function triggerPeriodicMotion() {
 
 /**
  * Play a specific motion as a one-shot at FORCE priority (overrides the
- * looping state motion). When it finishes, the motionFinish handler resumes
- * the state motion.
+ * looping state motion). Resolved against the loaded model's motion set
+ * first so menu/assignment entries never point at motions the current
+ * character lacks. When it finishes, the motionFinish handler resumes the
+ * state motion.
  */
 function playMotionOnce(group, idx) {
   if (!live2dModel) return;
+  const target = resolveAvailableMotion(group, idx) || [group, idx];
   oneShotPlaying = true;
   // Hide the head-top effect while the one-shot plays; motionFinish restores it.
   setHeadEffectVisible(false);
   try {
-    live2dModel.motion(group, idx, MOTION_PRIORITY_FORCE);
+    live2dModel.motion(target[0], target[1], MOTION_PRIORITY_FORCE);
   } catch (e) {
     oneShotPlaying = false;
     setHeadEffectVisible(true); // playback failed -> restore immediately
@@ -774,18 +1034,27 @@ function playMotionOnce(group, idx) {
 
 /**
  * Play a random motion different from the current state's (used on tap).
+ * Picks from the loaded model's own motion set, not a global list.
  */
 function playRandomOneShot() {
   if (!live2dModel) return;
-  const stateMotion = STATE_MOTIONS[currentState] || STATE_MOTIONS.sleeping;
-  const choices = ALL_MOTIONS.filter(([g, i]) => !(g === stateMotion[0] && i === stateMotion[1]));
+  const desired = STATE_MOTIONS[currentState] || STATE_MOTIONS.sleeping;
+  const stateMotion = resolveAvailableMotion(desired[0], desired[1]);
+  const choices = [];
+  for (const [name, count] of currentMotionGroups) {
+    for (let i = 0; i < count; i++) {
+      if (stateMotion && name === stateMotion[0] && i === stateMotion[1]) continue;
+      choices.push([name, i]);
+    }
+  }
   if (!choices.length) return;
   const [group, idx] = choices[Math.floor(Math.random() * choices.length)];
   playMotionOnce(group, idx);
 }
 
 /**
- * Build the motion list in the menu from ALL_MOTIONS.
+ * Build the motion list in the menu from the LOADED MODEL's motions
+ * (currentMotionGroups), so each character only shows what it can play.
  * - mode 'play'   : clicking a motion plays it once (one-shot).
  * - mode 'assign' : clicking a motion assigns it to `targetState` and returns
  *                   to the 动作设定 view; the current choice is checkmarked.
@@ -794,26 +1063,31 @@ function buildMotionMenu(mode = 'play', targetState = null) {
   const container = document.getElementById('motion-list');
   if (!container) return;
   container.innerHTML = '';
-  const current = (mode === 'assign' && targetState) ? STATE_MOTIONS[targetState] : null;
-  for (const [group, idx, name] of ALL_MOTIONS) {
-    const item = document.createElement('div');
-    item.className = 'menu-item';
-    item.textContent = i18n.t(name);
-    if (current && current[0] === group && current[1] === idx) {
-      item.classList.add('active');
+  const desiredCurrent = (mode === 'assign' && targetState) ? STATE_MOTIONS[targetState] : null;
+  const resolvedCurrent = desiredCurrent
+    ? resolveAvailableMotion(desiredCurrent[0], desiredCurrent[1])
+    : null;
+  for (const [group, count] of currentMotionGroups) {
+    for (let idx = 0; idx < count; idx++) {
+      const item = document.createElement('div');
+      item.className = 'menu-item';
+      item.textContent = motionDisplayName(group, idx);
+      if (resolvedCurrent && resolvedCurrent[0] === group && resolvedCurrent[1] === idx) {
+        item.classList.add('active');
+      }
+      if (mode === 'assign' && targetState) {
+        item.addEventListener('click', () => {
+          assignStateMotion(targetState, group, idx);
+          showView('menu-settings-view');
+        });
+      } else {
+        item.addEventListener('click', () => {
+          playMotionOnce(group, idx);
+          closeMenu();
+        });
+      }
+      container.appendChild(item);
     }
-    if (mode === 'assign' && targetState) {
-      item.addEventListener('click', () => {
-        assignStateMotion(targetState, group, idx);
-        showView('menu-settings-view');
-      });
-    } else {
-      item.addEventListener('click', () => {
-        playMotionOnce(group, idx);
-        closeMenu();
-      });
-    }
-    container.appendChild(item);
   }
 }
 
@@ -830,33 +1104,104 @@ function openMotionView(mode, targetState = null) {
 }
 
 /**
- * Load persisted per-state motion assignments from the main process.
+ * True when the value looks like a valid [group, index] motion entry.
+ */
+function isValidMotionEntry(m) {
+  return Array.isArray(m) && m.length === 2 && typeof m[0] === 'string' && Number.isInteger(m[1]);
+}
+
+/**
+ * Shallow-clone a state→motion map, keeping only valid entries.
+ */
+function cloneStateMotions(src) {
+  const out = {};
+  for (const state of ['sleeping', 'working', 'alert']) {
+    if (src && isValidMotionEntry(src[state])) out[state] = [src[state][0], src[state][1]];
+  }
+  return out;
+}
+
+/**
+ * Load persisted per-character motion assignments from the main process.
+ *
+ * Storage layout: { [modelUrl]: {sleeping/working/alert}, _default?: {...} }
+ * The legacy FLAT format ({sleeping/working/alert} directly, shared by all
+ * characters) is auto-migrated into `_default` and rewritten on first save.
  */
 async function loadStateMotions() {
   if (!window.petAPI || !window.petAPI.getStateMotions) return;
   try {
     const saved = await window.petAPI.getStateMotions();
+    const store = {};
     if (saved && typeof saved === 'object') {
-      for (const state of ['sleeping', 'working', 'alert']) {
-        const m = saved[state];
-        if (Array.isArray(m) && m.length === 2 && typeof m[0] === 'string' && Number.isInteger(m[1])) {
-          STATE_MOTIONS[state] = [m[0], m[1]];
+      const states = ['sleeping', 'working', 'alert'];
+      const isLegacy = states.some((s) => Array.isArray(saved[s]));
+      if (isLegacy) {
+        // Pre-per-model config — treat it as the shared default so every
+        // character starts from what the user had before.
+        store._default = cloneStateMotions(saved);
+      } else {
+        for (const [key, entry] of Object.entries(saved)) {
+          if (!entry || typeof entry !== 'object') continue;
+          const cleaned = cloneStateMotions(entry);
+          if (Object.keys(cleaned).length > 0) store[key] = cleaned;
         }
       }
     }
+    stateMotionsStore = store;
+    // Persist the migrated layout so the legacy blob is not re-parsed on
+    // every launch (harmless no-op when nothing changed).
+    if (window.petAPI.setStateMotions) window.petAPI.setStateMotions(store);
   } catch (err) {
     console.warn('[motions] Failed to load state motions:', err.message);
   }
 }
 
 /**
- * Populate the 动作设定 view with each state's current motion name.
+ * Swap the live STATE_MOTIONS map to the saved settings of the given
+ * character (called on every model load/switch). Resolution order:
+ * character-specific → saved global default (legacy) → built-in defaults.
+ */
+function applyStateMotionsForModel(modelUrl) {
+  const store = stateMotionsStore || {};
+  const saved = (modelUrl && store[modelUrl]) || store._default || null;
+  const next = cloneStateMotions(DEFAULT_STATE_MOTIONS);
+  if (saved) {
+    for (const state of ['sleeping', 'working', 'alert']) {
+      if (saved[state]) next[state] = [saved[state][0], saved[state][1]];
+    }
+  }
+  STATE_MOTIONS = next;
+  if (window.__petSendLog) {
+    window.__petSendLog('info', `[motions] applied per-model settings for ${modelUrl} (${saved ? 'saved' : 'defaults'})`);
+  }
+}
+
+/**
+ * Persist the live STATE_MOTIONS under the CURRENT character's key only —
+ * other characters' saved settings are left untouched.
+ */
+function saveCurrentStateMotions() {
+  if (!currentModelUrl) return;
+  if (!stateMotionsStore) stateMotionsStore = {};
+  stateMotionsStore[currentModelUrl] = cloneStateMotions(STATE_MOTIONS);
+  if (window.petAPI && window.petAPI.setStateMotions) {
+    window.petAPI.setStateMotions(stateMotionsStore);
+  }
+}
+
+/**
+ * Populate the 动作设定 view with each state's current motion name, resolved
+ * to what the loaded model can play (shows the fallback target when the
+ * desired motion doesn't exist on the current character).
  */
 function buildSettingsMenu() {
   for (const state of ['sleeping', 'working', 'alert']) {
-    const [g, i] = STATE_MOTIONS[state] || STATE_MOTIONS.sleeping;
-    const found = ALL_MOTIONS.find(([mg, mi]) => mg === g && mi === i);
-    const name = found ? i18n.t(found[2]) : `${g}[${i}]`;
+    const desired = STATE_MOTIONS[state] || STATE_MOTIONS.sleeping;
+    const resolved = resolveAvailableMotion(desired[0], desired[1]);
+    const name = resolved
+      ? motionDisplayName(resolved[0], resolved[1])
+      : `${desired[0]}[${desired[1]}]`;
     const el = document.getElementById(`settings-${state}-name`);
     if (el) el.textContent = name;
   }
@@ -869,9 +1214,7 @@ function buildSettingsMenu() {
 function assignStateMotion(state, group, idx) {
   STATE_MOTIONS[state] = [group, idx];
   buildSettingsMenu();
-  if (window.petAPI && window.petAPI.setStateMotions) {
-    window.petAPI.setStateMotions(STATE_MOTIONS);
-  }
+  saveCurrentStateMotions();
   if (state === currentState) {
     oneShotPlaying = false;
     playStateMotion(MOTION_PRIORITY_FORCE);
@@ -895,13 +1238,16 @@ async function loadAppearance() {
 }
 
 /**
- * Apply the current flipHorizontal setting to the loaded model. scale.y holds
- * the positive base scale set in attachModel; flipping scale.x mirrors it.
+ * Mirror the rendered canvas via CSS instead of a negative model scale.
+ * A negative scale.x flips the winding of clipping-mask geometry inside
+ * pixi-live2d-display and makes masked drawables invisible (models like
+ * shizuku collapse to just their unmasked mouth). CSS mirroring happens
+ * after WebGL compositing, so masks keep working. The canvas is centered
+ * in its wrapper, so scaleX(-1) mirrors in place with no position jump.
  */
-function applyFlip() {
-  if (!live2dModel) return;
-  const baseScale = live2dModel.scale.y;
-  live2dModel.scale.x = flipHorizontal ? -baseScale : baseScale;
+function applyFlipCSS() {
+  if (!pixiApp || !pixiApp.view) return;
+  pixiApp.view.style.transform = flipHorizontal ? 'scaleX(-1)' : '';
 }
 
 /**
@@ -909,7 +1255,7 @@ function applyFlip() {
  */
 function toggleFlip() {
   flipHorizontal = !flipHorizontal;
-  applyFlip();
+  applyFlipCSS();
   updateFlipMenuCheck();
   if (window.petAPI && window.petAPI.setFlipHorizontal) {
     window.petAPI.setFlipHorizontal(flipHorizontal);
@@ -940,9 +1286,13 @@ function relayoutModel() {
   );
   const scale = base * ratio;
   live2dModel.scale.set(scale);
-  if (flipHorizontal) live2dModel.scale.x = -scale;
   live2dModel.x = pixiApp.screen.width / 2;
-  live2dModel.y = pixiApp.screen.height;
+  // Keep the content-bottom alignment from refineContentFit when present.
+  const content = live2dModel._dutyonContent;
+  const unscaledH = live2dModel._dutyonUnscaledH || live2dModel.height;
+  live2dModel.y = content
+    ? pixiApp.screen.height + (unscaledH / 2 + content.y) * scale
+    : pixiApp.screen.height;
 }
 
 /**
