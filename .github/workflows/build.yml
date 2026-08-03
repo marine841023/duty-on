@@ -35,6 +35,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2.0" --locked
       - name: Build NSIS installer
         run: cargo tauri build
         working-directory: src-tauri
@@ -43,6 +45,24 @@ jobs:
         with:
           files: src-tauri/target/release/bundle/nsis/*-setup.exe
           generate_release_notes: true
+          body: |
+            ## What's new
+
+            ### Features
+            - Right-click the pet to open the settings menu
+            - Status bar: working projects in amber, idle projects' label in green
+            - Projects sorted alphabetically (stable order — no more reshuffling on state change)
+            - Alert state persists until you answer (no more auto-dismissal after 3 minutes)
+
+            ### Bug Fixes
+            - Hook command uses `-ExecutionPolicy Bypass` to survive restricted PowerShell policies on managed/corporate machines
+            - Window title parsing handles elevated-process suffixes (`[管理员]` / `[Administrator]`)
+            - Hook resources bundled correctly (no more `_up_` path issue in packaged builds)
+            - Hook installer tolerates BOM / corrupt JSON / non-array event values (backs up and rebuilds)
+            - Scanner diagnostic logging to `~/.dutyon/frontend.log` for troubleshooting
+
+            ### Tested
+            - 62 unit tests passing
 
   # macOS / Linux matrix — uncomment to enable:
   # release-unix:

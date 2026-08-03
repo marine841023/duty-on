@@ -49,17 +49,6 @@ pub enum SessionStatus {
     ConfirmationNeeded,
 }
 
-impl SessionStatus {
-    /// Sort priority for snapshots: confirmation-needed < working < idle.
-    fn priority(self) -> u8 {
-        match self {
-            SessionStatus::ConfirmationNeeded => 0,
-            SessionStatus::Working => 1,
-            SessionStatus::Idle => 2,
-        }
-    }
-}
-
 /// Internal session record (carries timing fields not exposed in snapshots).
 #[derive(Debug, Clone)]
 struct SessionInfo {
@@ -482,8 +471,14 @@ impl StateManager {
         // internal per-session_id tracking, stale cleanup, and window sync
         // remain unchanged.
         sessions = deduplicate_sessions(sessions);
-        // Sort: alert first, then working, then idle.
-        sessions.sort_by_key(|s| s.status.priority());
+        // Stable alphabetical order by project name (case-insensitive).
+        // Sorting by status priority used to reshuffle the list every time
+        // a session changed state; users expect the projects to stay put.
+        sessions.sort_by(|a, b| {
+            a.project_name
+                .to_lowercase()
+                .cmp(&b.project_name.to_lowercase())
+        });
 
         Snapshot {
             overall_state: self.overall_state,

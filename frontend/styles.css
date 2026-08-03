@@ -293,6 +293,17 @@ html, body {
   background: rgba(255, 200, 50, 0.05);
 }
 
+/* Working: both the project title and the “忙碌” label turn yellow
+   (matches the amber border). Idle: title stays white but the “空闲”
+   label turns green. */
+.project-item.status-working .project-name,
+.project-item.status-working .project-status-text {
+  color: #ffc832;
+}
+.project-item.status-idle .project-status-text {
+  color: #57d97a;
+}
+
 .project-item.status-confirmation-needed {
   border-left-color: rgba(255, 68, 68, 0.8);
   background: rgba(255, 68, 68, 0.08);

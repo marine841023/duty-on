@@ -52,14 +52,23 @@ fn bridge_filename() -> &'static str {
 }
 
 /// The hook command string written into the IDE's hooks config, executed by
-/// its hook runner. `$env:USERPROFILE` (PowerShell) on Windows; `bash
-/// "$HOME/..."` (sh-compatible) on macOS/Linux — explicit `bash` avoids
-/// depending on the executable bit and the `~` expansion quirks of some shells.
+/// its hook runner. On Windows we launch an explicit `powershell -File` child
+/// with `-ExecutionPolicy Bypass`: corporate/managed machines often set the
+/// script execution policy to Restricted, which would silently refuse the
+/// .ps1 bridge (the hook fires but nothing happens, and bridge.log never gets
+/// its first line). `-NoProfile` keeps startup fast. `$env:USERPROFILE` is
+/// expanded by the runner's own PowerShell before the child starts.
+/// On macOS/Linux: `bash "$HOME/..."` (sh-compatible) — explicit `bash`
+/// avoids depending on the executable bit and the `~` expansion quirks of
+/// some shells.
 /// The `ide` argument ("trae" / "qoder") is forwarded by the bridge so the
 /// pet can badge each session with its source IDE.
 fn hook_command(ide: &str) -> String {
     if cfg!(windows) {
-        format!(r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1" -Ide {}"#, ide)
+        format!(
+            r#"powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1" -Ide {}"#,
+            ide
+        )
     } else {
         format!(r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh" {}"#, ide)
     }
