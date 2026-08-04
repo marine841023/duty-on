@@ -18,6 +18,14 @@ pub const WINDOW_MARGIN: i32 = 20; // offset from bottom-right corner
 // Mini mode: half-size window (人物宽高 1/2, status bar half width).
 pub const MINI_WINDOW_WIDTH: i32 = 130;
 pub const MINI_WINDOW_HEIGHT: i32 = 210;
+// Edge dock: compact "traffic-light" bar snapped to the left/right screen
+// edge (拖到屏幕边缘自动吸附). THICKNESS is the bar's narrow dimension
+// (logical px); the bar height follows its content (see enter_edge_dock).
+pub const EDGE_DOCK_THICKNESS: i32 = 40;
+// Undock offset (logical px): when leaving edge-dock mode the window is
+// pulled this far away from the edge. Snap detection itself is purely
+// "crossed the edge by >20% of the window width" (see detect_edge_dock).
+pub const EDGE_SNAP_THRESHOLD: i32 = 60;
 
 // ===== State timeouts (ms) =====
 /// Working sessions drop to idle after this much silence. Must stay generous:

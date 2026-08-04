@@ -21,12 +21,16 @@ let currentSnapshot = { overallState: 'sleeping', sessions: [] };
 let effectsTimer = null;
 let hooksInstalled = false;    // cached hook install status (for hint refresh)
 let oneShotPlaying = false;    // a tap-triggered motion is playing; state motion resumes when it ends
+let motionPreview = null;      // [group, idx] looped while hovering the 播放动作 menu
 let availableModels = [];      // catalog from main process
 let currentModelUrl = null;    // persisted/loaded model URL
 let motionPickerMode = 'play'; // 'play' = tap-to-play, 'assign' = pick for a state
 let motionPickerTarget = null; // target state when motionPickerMode === 'assign'
 let flipHorizontal = false;   // mirror the model horizontally (for left-side placement)
 let miniMode = false;         // half-size window mode (调整大小 menu toggle)
+let edgeDocked = false;       // window docked as a thin bar at a screen edge
+let edgeDockEl = null;        // #edge-dock-bar element (lazily created)
+let edgeDockDragEndAt = 0;    // last dock-bar drag end (suppresses stray clicks)
 let headEffectEl = null;        // #head-effect container, positioned at head-top anchor
 let isDragging = false;         // shared with setupDrag so click-through can stay off while dragging
 let currentMotionGroups = [];   // [name, count] pairs scanned from the loaded model's motion defs
@@ -618,6 +622,29 @@ function attachModel(model) {
   // will resume the state motion). Deferred via setTimeout so we run after the
   // library's same-tick complete()/idle bookkeeping.
   mm.on('motionFinish', () => {
+    if (motionPreview) {
+      // Hover preview: loop the motion until the preview is stopped. Deferred
+      // via setTimeout (like the state-motion loop below) because the library
+      // clears its motion slot after the emit — a synchronous replay here gets
+      // rejected and the loop dies after one play.
+      const [g, i] = motionPreview;
+      if (!mm.destroyed) {
+        setTimeout(() => {
+          if (!motionPreview || mm.destroyed) return;
+          const restart = () => {
+            try { return live2dModel.motion(g, i, MOTION_PRIORITY_FORCE); }
+            catch (e) { return false; }
+          };
+          // Returns false when the slot is still busy — retry once after a beat.
+          if (restart() === false) {
+            setTimeout(() => {
+              if (motionPreview && !mm.destroyed) restart();
+            }, 100);
+          }
+        }, 0);
+      }
+      return;
+    }
     if (oneShotPlaying) {
       oneShotPlaying = false;
       // One-shot finished -> restore the head-top effect (ZZZ / dots / !).
@@ -1033,6 +1060,37 @@ function playMotionOnce(group, idx) {
 }
 
 /**
+ * Start looping a motion as the hover preview of the 播放动作 menu. It plays
+ * at FORCE priority and replays itself on every finish (motionFinish) until
+ * stopMotionPreview() is called (menu closed / list left).
+ */
+function startMotionPreview(group, idx) {
+  if (!live2dModel) return;
+  const target = resolveAvailableMotion(group, idx) || [group, idx];
+  motionPreview = target;
+  oneShotPlaying = true; // blocks the state-motion safety net while previewing
+  setHeadEffectVisible(false);
+  try {
+    live2dModel.motion(target[0], target[1], MOTION_PRIORITY_FORCE);
+  } catch (e) {
+    motionPreview = null;
+    oneShotPlaying = false;
+    setHeadEffectVisible(true);
+  }
+}
+
+/**
+ * End the hover preview and resume the current state's motion.
+ */
+function stopMotionPreview() {
+  if (!motionPreview) return;
+  motionPreview = null;
+  oneShotPlaying = false;
+  setHeadEffectVisible(true);
+  playStateMotion(MOTION_PRIORITY_FORCE);
+}
+
+/**
  * Play a random motion different from the current state's (used on tap).
  * Picks from the loaded model's own motion set, not a global list.
  */
@@ -1055,7 +1113,9 @@ function playRandomOneShot() {
 /**
  * Build the motion list in the menu from the LOADED MODEL's motions
  * (currentMotionGroups), so each character only shows what it can play.
- * - mode 'play'   : clicking a motion plays it once (one-shot).
+ * - mode 'play'   : hovering (or clicking) an item loops that motion as a
+ *                   live preview; the menu stays open — only the back button
+ *                   or clicking outside closes it.
  * - mode 'assign' : clicking a motion assigns it to `targetState` and returns
  *                   to the 动作设定 view; the current choice is checkmarked.
  */
@@ -1081,10 +1141,10 @@ function buildMotionMenu(mode = 'play', targetState = null) {
           showView('menu-settings-view');
         });
       } else {
-        item.addEventListener('click', () => {
-          playMotionOnce(group, idx);
-          closeMenu();
-        });
+        // Hover = instant looping preview; clicking does the same and does
+        // NOT close the menu — only the back button or clicking outside does.
+        item.addEventListener('mouseenter', () => startMotionPreview(group, idx));
+        item.addEventListener('click', () => startMotionPreview(group, idx));
       }
       container.appendChild(item);
     }
@@ -1308,6 +1368,12 @@ function applyMiniMode(enabled, resizeWindow = true) {
     Promise.resolve(window.petAPI.setMiniMode(enabled)).catch((e) => {
       console.warn('[mini] Failed to resize window:', e && e.message);
     });
+    // If the menu is open, the mini-mode resize invalidated the grown space —
+    // re-grow it on the new base width for the new pet size.
+    if (menuSpaceInfo !== null) {
+      menuSpaceInfo = null;
+      positionMenu();
+    }
   }
   if (pixiApp) {
     const w = enabled ? MINI_PIXI_WIDTH : PIXI_WIDTH;
@@ -1474,6 +1540,8 @@ function updateStatusBar(snapshot) {
 
   if (!snapshot.sessions || snapshot.sessions.length === 0) {
     projectList.innerHTML = `<div class="project-item empty">${i18n.t('status.waiting')}</div>`;
+    renderEdgeDockBadges();
+    repositionMenu(); // status bar height may have changed while the menu is open
     return;
   }
 
@@ -1532,6 +1600,8 @@ function updateStatusBar(snapshot) {
 
     projectList.appendChild(item);
   }
+  renderEdgeDockBadges();
+  repositionMenu(); // status bar height may have changed while the menu is open
 }
 
 // ===== IPC Setup =====
@@ -1567,45 +1637,81 @@ function flashWindowAttention() {
 }
 
 // ===== Context Menu =====
+// Result of openMenuSpace ({ side, delta }) while the menu is open; null =
+// the window is at its normal width.
+let menuSpaceInfo = null;
+// Menu width (210 CSS) plus a small gap — the horizontal space to grow.
+const MENU_SIDE_WIDTH = 218;
+
+/** Bottom edge (logical CSS px) of the status bar — the menu's lower bound. */
+function statusBarBottom() {
+  const sb = document.getElementById('status-bar');
+  return sb ? sb.getBoundingClientRect().bottom : 300;
+}
+
 /**
- * Position the menu above the ☰ button, clamped to the window. The max-height
- * is capped to the space above the button so the tall motion submenu scrolls
- * internally instead of being clipped at the window bottom.
+ * Fallback menu side when the backend grow fails: pet on the left half of
+ * the screen -> open rightward, and vice versa. Normally the backend picks
+ * the side itself (open_menu_space) using exact monitor geometry.
  */
-function positionMenu() {
-  const menuBtn = document.getElementById('menu-btn');
+function fallbackMenuSide() {
+  const winCenterX = (window.screenX ?? 0) + window.innerWidth / 2;
+  const screenCenterX = (window.screen.availLeft || 0) + (window.screen.availWidth || window.screen.width) / 2;
+  return winCenterX <= screenCenterX ? 'right' : 'left';
+}
+
+/**
+ * Position the menu BESIDE the character — on the side chosen by the pet's
+ * position on its monitor (backend decision) — spanning the full content
+ * height (from the top of the character down to the bottom of the IDE
+ * project list). The window grows horizontally first (restored in
+ * closeMenu); when growing leftward the content is shifted right by the same
+ * amount so the pet never moves on screen.
+ */
+async function positionMenu() {
   const contextMenu = document.getElementById('context-menu');
-  const rect = menuBtn.getBoundingClientRect();
-  // Space available above the button (menu opens upward). Floor at 140 so a
-  // tiny window still shows a usable menu.
-  const maxH = Math.max(140, rect.top - 6);
-  contextMenu.style.maxHeight = maxH + 'px';
+  const petContainer = document.getElementById('pet-container');
   contextMenu.classList.remove('hidden');
   // Menu open: keep the whole window clickable so menu items stay interactive
   // and click-outside can close (the ticker also reports the menu rect, but
   // force-clickable covers the gap before the next ticker fire / on submenu
   // resize). Cleared in closeMenu().
   if (window.petAPI && window.petAPI.setForceClickable) window.petAPI.setForceClickable(true);
-  // Measure after unhiding, then clamp upward so the bottom stays visible.
-  const menuHeight = contextMenu.offsetHeight || 200;
+  // Grow the window on the side the backend picks from the pet's screen
+  // position (skipped when already grown).
+  if (!menuSpaceInfo && window.petAPI && window.petAPI.openMenuSpace) {
+    try {
+      menuSpaceInfo = await window.petAPI.openMenuSpace(MENU_SIDE_WIDTH);
+    } catch (e) {
+      console.warn('[menu] Failed to grow window:', e && e.message);
+      menuSpaceInfo = null;
+    }
+  }
+  // Let the webview lay out the new window size before measuring.
+  await new Promise((r) => requestAnimationFrame(r));
+  const side = menuSpaceInfo ? menuSpaceInfo.side : fallbackMenuSide();
+  const delta = menuSpaceInfo ? menuSpaceInfo.delta : 0;
+  // Growing leftward shifted the window left; slide the content right by the
+  // same amount so the pet stays exactly where it was on screen.
+  petContainer.style.marginLeft = side === 'left' ? delta + 'px' : '';
+  // Full content height: character top (window top) down to the IDE list bottom.
+  contextMenu.style.top = '2px';
+  contextMenu.style.height = Math.max(120, statusBarBottom() - 6) + 'px';
+  contextMenu.style.maxHeight = '';
   const menuWidth = contextMenu.offsetWidth || 210;
-  const top = Math.max(2, rect.top - menuHeight - 4);
-  const left = Math.max(0, rect.right - menuWidth);
-  contextMenu.style.left = left + 'px';
-  contextMenu.style.top = top + 'px';
+  contextMenu.style.left = side === 'right'
+    ? petContainer.offsetWidth + 4 + 'px'
+    : Math.max(2, delta - menuWidth - 4) + 'px';
 }
 
 /**
- * Re-clamp the menu's vertical position after switching views — the content
- * height differs between the main view and the motion submenu.
+ * Re-clamp the menu after the content changed (project list update while the
+ * menu is open): only the height follows the status bar's bottom edge.
  */
 function repositionMenu() {
-  const menuBtn = document.getElementById('menu-btn');
   const contextMenu = document.getElementById('context-menu');
   if (contextMenu.classList.contains('hidden')) return;
-  const rect = menuBtn.getBoundingClientRect();
-  const menuHeight = contextMenu.offsetHeight || 200;
-  contextMenu.style.top = Math.max(2, rect.top - menuHeight - 4) + 'px';
+  contextMenu.style.height = Math.max(120, statusBarBottom() - 6) + 'px';
 }
 
 /**
@@ -1615,6 +1721,8 @@ function showView(viewId) {
   for (const id of ['menu-main-view', 'menu-model-view', 'menu-motion-view', 'menu-settings-view', 'menu-language-view']) {
     document.getElementById(id).classList.toggle('hidden', id !== viewId);
   }
+  // Leaving the motion list ends the hover preview loop.
+  if (viewId !== 'menu-motion-view') stopMotionPreview();
   repositionMenu();
 }
 
@@ -1623,6 +1731,17 @@ function closeMenu() {
   if (window.petAPI && window.petAPI.setForceClickable) window.petAPI.setForceClickable(false);
   document.getElementById('context-menu').classList.add('hidden');
   showView('menu-main-view');
+  // Shrink the window back to its normal width (and drop the content offset).
+  if (menuSpaceInfo) {
+    menuSpaceInfo = null;
+    const petContainer = document.getElementById('pet-container');
+    if (petContainer) petContainer.style.marginLeft = '';
+    if (window.petAPI && window.petAPI.closeMenuSpace) {
+      window.petAPI.closeMenuSpace().catch((e) =>
+        console.warn('[menu] Failed to restore window:', e && e.message)
+      );
+    }
+  }
 }
 
 function setupContextMenu() {
@@ -1876,6 +1995,172 @@ function showHookStatusDialog(status) {
   }, 4000);
 }
 
+// ===== Edge Dock (screen-edge snap) =====
+// Dragging the window within the snap threshold of the monitor's LEFT or
+// RIGHT edge docks it as a compact "traffic-light" bar (content-sized height,
+// not full screen edge): Live2D + status bar are hidden, each project is
+// shown as a two-letter badge colored by its session status, and dragging the
+// bar away from the edge restores the full window.
+
+/**
+ * Lazily create the dock bar overlay (hidden until body.edge-dock is set).
+ */
+function ensureEdgeDockBar() {
+  if (edgeDockEl) return edgeDockEl;
+  const bar = document.createElement('div');
+  bar.id = 'edge-dock-bar';
+  // Round status lamp at the top; its color tracks the most urgent session
+  // status (see updateEdgeDockIndicator).
+  const indicator = document.createElement('div');
+  indicator.id = 'edge-dock-indicator';
+  indicator.className = 'level-idle';
+  const badges = document.createElement('div');
+  badges.id = 'edge-dock-badges';
+  bar.appendChild(indicator);
+  bar.appendChild(badges);
+  document.body.appendChild(bar);
+  // Click a badge to bring its IDE window to front (same as the project list
+  // rows); suppressed right after a drag so undocking never triggers it.
+  bar.addEventListener('click', (e) => {
+    if (Date.now() - edgeDockDragEndAt < 250) return;
+    const badge = e.target.closest('.edge-dock-badge');
+    if (!badge || !badge.dataset.target || !window.petAPI) return;
+    window.petAPI.bringToFront(badge.dataset.target);
+  });
+  // Double-click empty bar space also restores the full window.
+  bar.addEventListener('dblclick', (e) => {
+    if (e.target.closest('.edge-dock-badge')) return;
+    leaveEdgeDock();
+  });
+  edgeDockEl = bar;
+  return bar;
+}
+
+/**
+ * Two-uppercase-letter abbreviation for a project name: initials of the first
+ * two words when available ("my app" -> "MA"), else the first two characters
+ * ("myapp" -> "MY").
+ */
+function projectInitials(name) {
+  const trimmed = String(name || '').trim();
+  const chars = [...trimmed];
+  if (chars.length === 0) return '--';
+  const words = trimmed.split(/[\s\-_./\\]+/).filter(Boolean);
+  if (words.length >= 2) return ([...words[0]][0] + [...words[1]][0]).toUpperCase();
+  return chars.slice(0, 2).join('').toUpperCase();
+}
+
+function dockStatusText(status) {
+  if (status === 'confirmation-needed') return i18n.t('status.confirmationNeeded');
+  if (status === 'working') return i18n.t('status.busy');
+  return i18n.t('status.idle');
+}
+
+/**
+ * Rebuild the two-letter project badges from the latest snapshot. Called
+ * alongside updateStatusBar so badge colors track session status live.
+ */
+function renderEdgeDockBadges() {
+  if (!edgeDockEl) return;
+  const holder = edgeDockEl.querySelector('#edge-dock-badges');
+  if (!holder) return;
+  updateEdgeDockIndicator();
+  holder.innerHTML = '';
+  const sessions = (currentSnapshot && currentSnapshot.sessions) || [];
+  if (sessions.length === 0) {
+    const badge = document.createElement('div');
+    badge.className = 'edge-dock-badge empty';
+    badge.textContent = '··';
+    holder.appendChild(badge);
+    return;
+  }
+  for (const session of sessions) {
+    const badge = document.createElement('div');
+    badge.className = `edge-dock-badge status-${session.status}`;
+    badge.textContent = projectInitials(session.projectName);
+    badge.title = `${session.projectName} — ${dockStatusText(session.status)}`;
+    // Window-detected sessions have no projectPath; fall back to projectName
+    // (bring-to-front matches by folder name in the window title).
+    badge.dataset.target = session.projectPath || session.projectName || '';
+    holder.appendChild(badge);
+  }
+}
+
+/**
+ * Top-of-bar round status lamp: reflects the most urgent session status —
+ * red (confirmation-needed) > yellow (working) > blue (idle), matching the
+ * project-dot palette in styles.css.
+ */
+function updateEdgeDockIndicator() {
+  if (!edgeDockEl) return;
+  const indicator = edgeDockEl.querySelector('#edge-dock-indicator');
+  if (!indicator) return;
+  const sessions = (currentSnapshot && currentSnapshot.sessions) || [];
+  let level = 'idle';
+  for (const s of sessions) {
+    if (s.status === 'confirmation-needed') {
+      level = 'alert';
+      break;
+    }
+    if (s.status === 'working') level = 'working';
+  }
+  indicator.className = `level-${level}`;
+  indicator.title = level === 'alert'
+    ? i18n.t('status.confirmationNeeded')
+    : level === 'working' ? i18n.t('status.busy') : i18n.t('status.idle');
+}
+
+/**
+ * Desired dock bar height (logical CSS px) based on the badge count — the
+ * bar hugs its content (indicator + badges) instead of spanning the whole
+ * screen edge. Must match the CSS metrics in styles.css.
+ */
+function computeDockBarHeight() {
+  const n = Math.max(1, ((currentSnapshot && currentSnapshot.sessions) || []).length);
+  const PAD = 8, INDICATOR = 22, GAP = 8, BADGE = 22, BADGE_GAP = 6;
+  return PAD * 2 + INDICATOR + GAP + n * BADGE + (n - 1) * BADGE_GAP;
+}
+
+/**
+ * After a drag ends, ask the backend whether the window landed near the
+ * left/right screen edge; if so snap into dock mode (window geometry handled
+ * by Rust, UI here).
+ */
+async function maybeEnterEdgeDock() {
+  if (!window.petAPI || !window.petAPI.detectEdgeDock) return;
+  // Never dock with the menu still open (it would be hidden by the dock bar
+  // and leave the window grown).
+  closeMenu();
+  try {
+    const edge = await window.petAPI.detectEdgeDock();
+    if (!edge || edgeDocked || isDragging) return;
+    await window.petAPI.enterEdgeDock(edge, computeDockBarHeight());
+    edgeDocked = true;
+    document.body.classList.add('edge-dock', `edge-dock-${edge}`);
+    ensureEdgeDockBar();
+    renderEdgeDockBadges();
+  } catch (err) {
+    console.warn('[edgeDock] enter failed:', err && err.message);
+  }
+}
+
+/**
+ * Restore the full window (size + layout). Called mid-drag when the docked
+ * bar is pulled away from the edge, and on double-click. The backend restores
+ * the pre-dock size and pulls the window off the edge so the drag continues
+ * seamlessly and an immediate re-snap is avoided.
+ */
+function leaveEdgeDock() {
+  if (!edgeDocked) return;
+  edgeDocked = false;
+  document.body.classList.remove('edge-dock', 'edge-dock-left', 'edge-dock-right');
+  if (window.petAPI && window.petAPI.exitEdgeDock) {
+    Promise.resolve(window.petAPI.exitEdgeDock()).catch((e) => {
+      console.warn('[edgeDock] exit failed:', e && e.message);
+    });
+  }
+}
+
 // ===== Drag Setup =====
 function setupDrag() {
   const wrapper = document.getElementById('canvas-wrapper');
@@ -1883,12 +2168,9 @@ function setupDrag() {
   let lastY = 0;
   let hasMoved = false;
 
-  wrapper.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return; // Only left click
-    // Only start dragging when the pointer is actually over the model's bounds,
-    // not on the empty canvas padding — matches the click-through hit area so
-    // the model interior is both the tap target and the drag target.
-    if (!isPointOnModel(e.clientX, e.clientY)) return;
+  // Shared drag start used by the model canvas, the status bar, and the
+  // edge-dock bar.
+  function beginDrag(e) {
     isDragging = true;
     // Keep the window clickable for the whole drag — the cursor may leave the
     // model bounds mid-drag, which would otherwise flip the window to
@@ -1897,6 +2179,24 @@ function setupDrag() {
     hasMoved = false;
     lastX = e.screenX;
     lastY = e.screenY;
+  }
+
+  wrapper.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return; // Only left click
+    if (edgeDocked) return;
+    // Only start dragging when the pointer is actually over the model's bounds,
+    // not on the empty canvas padding — matches the click-through hit area so
+    // the model interior is both the tap target and the drag target.
+    if (!isPointOnModel(e.clientX, e.clientY)) return;
+    beginDrag(e);
+  });
+
+  // Edge-dock bar: the whole bar is the drag handle. Dragging it away from
+  // the edge restores the full window mid-drag (see mousemove below).
+  const dockBar = ensureEdgeDockBar();
+  dockBar.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || !edgeDocked) return;
+    beginDrag(e);
   });
 
   let dragPendingX = 0, dragPendingY = 0, dragRafId = null;
@@ -1907,6 +2207,9 @@ function setupDrag() {
     if (Math.abs(deltaX) > 1 || Math.abs(deltaY) > 1) {
       hasMoved = true;
     }
+    // Dragging the docked bar restores the full window and continues the drag
+    // seamlessly.
+    if (hasMoved && edgeDocked) leaveEdgeDock();
     lastX = e.screenX;
     lastY = e.screenY;
     if (hasMoved && window.petAPI) {
@@ -1925,21 +2228,38 @@ function setupDrag() {
     }
   });
 
-  document.addEventListener('mouseup', () => {
+  document.addEventListener('mouseup', async () => {
+    const dragged = isDragging && hasMoved;
     isDragging = false;
     if (window.petAPI && window.petAPI.setForceClickable) window.petAPI.setForceClickable(false);
+    if (!dragged) return;
+    edgeDockDragEndAt = Date.now();
+    // Flush any drag delta still queued in rAF and wait for it to apply, so
+    // snap detection sees the window's FINAL position. Skipping this made the
+    // edge threshold misfire: the last frame of movement (up to ~30px on a
+    // fast drag) was still pending when detect_edge_dock measured the window.
+    if (dragRafId !== null) {
+      cancelAnimationFrame(dragRafId);
+      dragRafId = null;
+    }
+    if ((dragPendingX !== 0 || dragPendingY !== 0) && window.petAPI && window.petAPI.dragWindow) {
+      const fx = dragPendingX, fy = dragPendingY;
+      dragPendingX = 0;
+      dragPendingY = 0;
+      try { await window.petAPI.dragWindow(fx, fy); } catch (e) { /* keep going */ }
+    }
+    // After a real drag ends, snap to the nearest left/right screen edge when
+    // we landed within the threshold.
+    if (!edgeDocked) maybeEnterEdgeDock();
   });
 
   // Also support drag on the status bar
   const statusBar = document.getElementById('status-bar');
   statusBar.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
+    if (edgeDocked) return;
     if (e.target.closest('.project-item') || e.target.closest('#menu-btn')) return;
-    isDragging = true;
-    if (window.petAPI && window.petAPI.setForceClickable) window.petAPI.setForceClickable(true);
-    hasMoved = false;
-    lastX = e.screenX;
-    lastY = e.screenY;
+    beginDrag(e);
   });
 }
 
@@ -2003,6 +2323,11 @@ function setupClickThrough() {
   // Collect clickable rectangles: model bounds + status bar + (visible) menu.
   function collectRegions() {
     const rects = [];
+    if (edgeDocked) {
+      // The docked bar fills the entire thin window — keep it all clickable.
+      rects.push(toPhys({ left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }));
+      return rects;
+    }
     // Model bounds are canvas-local px; offset by the canvas's window-local
     // position to get window-local coords, then scale to physical px.
     if (live2dModel && pixiApp) {

@@ -49,16 +49,13 @@ jobs:
             ## What's new
 
             ### Features
-            - Head effects (halo, speech bubble, prompt icon) now adapt their anchor and size to any character model
-            - Motion dropdown is populated dynamically by scanning each character's model file; newly downloaded characters work without restarting the app
-            - Per-character default motion settings: idle/busy/alert picks are stored per model and loaded automatically when switching characters (old config is auto-migrated)
+            - Screen edge docking: drag the pet past a monitor's left/right edge by more than 20% of the window width and it snaps into a compact status bar with a round status light (blue = idle, yellow = working, red = confirmation needed)
+            - Multi-monitor aware docking: every monitor boundary is a valid snap target, including the boundary between two screens — when the window straddles two monitors, the one holding most of the pet wins
+            - Context menu now opens beside the character (side chosen by which half of the screen the pet is on) and spans the full height from the character down to the IDE project list, never covering the pet
+            - Motion menu live preview: hovering a motion plays it in a seamless loop on the character while the menu stays open; the menu only closes via the close button or clicking outside
 
             ### Bug Fixes
-            - Fixed custom models with unusual canvas sizes (e.g. shizuku) rendering off-screen or at a wrong scale: models are now fitted to their content bounding box, refined after the first rendered frame
-            - Fixed models using clipping masks (e.g. shizuku) collapsing to a single mouth piece when horizontal flipping was on: flipping is now done via CSS on the canvas instead of a negative scale
-
-            ### Tested
-            - 64 unit tests passing
+            - Fixed motion preview stopping after one play — replays are now deferred past the library's motion-slot cleanup so the loop keeps running
 
   # macOS / Linux matrix — uncomment to enable:
   # release-unix:

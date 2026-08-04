@@ -11,7 +11,8 @@ use crate::state_manager::{HookEvent, SharedStateManager};
 use crate::user_config;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_autostart::ManagerExt;
 
@@ -201,6 +202,211 @@ pub fn set_mini_mode(window: tauri::Window, enabled: bool) -> Result<(), String>
     Ok(())
 }
 
+// ===== Edge dock (screen-edge snap) =====
+
+/// While docked: the pre-snap window rect (physical px) plus the docked
+/// edge, so `exit_edge_dock` can restore the size and pull the window away
+/// from the right edge. None when not docked. `active` is a cheap flag read
+/// by the window-position persistence handler (docked positions are not
+/// persisted). Cloneable via Arc so lib.rs can hold a copy.
+#[derive(Default, Clone)]
+pub struct EdgeDockState {
+    pub docked: Arc<Mutex<Option<((i32, i32, u32, u32), String)>>>,
+    pub active: Arc<AtomicBool>,
+}
+
+/// Pick the monitor that contains the LARGEST AREA of the given rect — the
+/// "most content wins" rule for a window straddling two screens. Fallback:
+/// the monitor containing the rect center, then the first monitor.
+fn best_monitor<'a>(
+    monitors: &'a [tauri::Monitor],
+    pos: tauri::PhysicalPosition<i32>,
+    size: tauri::PhysicalSize<u32>,
+) -> Option<&'a tauri::Monitor> {
+    let wl = pos.x;
+    let wt = pos.y;
+    let wr = pos.x + size.width as i32;
+    let wb = pos.y + size.height as i32;
+    let mut best: Option<(&'a tauri::Monitor, i64)> = None;
+    for m in monitors {
+        let p = m.position();
+        let s = m.size();
+        let ox = (wr.min(p.x + s.width as i32) - wl.max(p.x)).max(0) as i64;
+        let oy = (wb.min(p.y + s.height as i32) - wt.max(p.y)).max(0) as i64;
+        let area = ox * oy;
+        if area > 0 && best.map_or(true, |(_, a)| area > a) {
+            best = Some((m, area));
+        }
+    }
+    if let Some((m, _)) = best {
+        return Some(m);
+    }
+    let cx = pos.x + size.width as i32 / 2;
+    let cy = pos.y + size.height as i32 / 2;
+    monitors
+        .iter()
+        .find(|m| {
+            let p = m.position();
+            let s = m.size();
+            cx >= p.x && cx < p.x + s.width as i32 && cy >= p.y && cy < p.y + s.height as i32
+        })
+        .or_else(|| monitors.first())
+}
+
+/// Check whether the window has crossed the left/right edge of its monitor
+/// by more than 20% of its width — the ONLY condition that triggers docking;
+/// every other position (including resting right at the edge) does not snap.
+/// On multi-monitor setups EVERY monitor boundary is a valid snap target,
+/// including internal boundaries shared with a neighbouring monitor; when the
+/// window straddles two screens, the monitor holding most of the window wins
+/// and its crossed edge is the snap target.
+/// Returns the nearest crossed edge ("left" | "right"). Top/bottom edges are
+/// intentionally not supported. Called by the renderer on drag-end (after
+/// flushing the last drag delta).
+#[tauri::command]
+pub fn detect_edge_dock(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, EdgeDockState>,
+) -> Result<Option<String>, String> {
+    if state.active.load(Ordering::SeqCst) {
+        return Ok(None); // already docked
+    }
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+
+    // Monitor holding most of the window — when straddling two screens this
+    // is the one whose edge gets the snap.
+    let monitors = app.available_monitors().map_err(|e| e.to_string())?;
+    let mon = best_monitor(&monitors, pos, size)
+        .ok_or_else(|| "no monitors found".to_string())?;
+    let mp = mon.position();
+    let ms = mon.size();
+
+    // How far the window has crossed PAST each edge of that monitor
+    // (physical px): >0 means part of the window is beyond the edge — either
+    // off-screen (outer edges) or on a neighbouring monitor (internal
+    // boundaries count too). Docking fires only when the crossed amount
+    // exceeds 20% of the window width.
+    let cross_left = mp.x - pos.x;
+    let cross_right = (pos.x + size.width as i32) - (mp.x + ms.width as i32);
+    let min_cross = (size.width as f64 * 0.2).round() as i32;
+    let edge = match (cross_left > min_cross, cross_right > min_cross) {
+        (true, true) => {
+            if cross_left >= cross_right {
+                "left"
+            } else {
+                "right"
+            }
+        }
+        (true, false) => "left",
+        (false, true) => "right",
+        (false, false) => return Ok(None),
+    };
+    Ok(Some(edge.to_string()))
+}
+
+/// Snap the window into a compact bar at the given left/right edge. The bar
+/// is EDGE_DOCK_THICKNESS wide and as tall as its content (the renderer
+/// passes `content_height` in logical px, clamped to sane bounds), vertically
+/// centered on where the window was dropped. Remembers the previous rect and
+/// edge for `exit_edge_dock`.
+#[tauri::command]
+pub fn enter_edge_dock(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, EdgeDockState>,
+    edge: String,
+    content_height: u32,
+) -> Result<(), String> {
+    if edge != "left" && edge != "right" {
+        return Err("only left/right edge docking is supported".to_string());
+    }
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let factor = window.scale_factor().unwrap_or(1.0);
+
+    let monitors = app.available_monitors().map_err(|e| e.to_string())?;
+    let cy = pos.y + size.height as i32 / 2;
+    // Same "most content wins" selection as detect_edge_dock so the bar is
+    // placed on the edge that actually triggered the snap.
+    let mon = best_monitor(&monitors, pos, size)
+        .ok_or_else(|| "no monitors found".to_string())?;
+    let mp = mon.position();
+    let ms = mon.size();
+
+    let w = (config::EDGE_DOCK_THICKNESS as f64 * factor).round() as u32;
+    let min_h = (80.0 * factor).round() as u32;
+    let max_h = ms.height.saturating_sub((16.0 * factor) as u32).max(min_h);
+    let h = ((content_height as f64 * factor).round() as u32).clamp(min_h, max_h);
+    let x = if edge == "left" {
+        mp.x
+    } else {
+        mp.x + ms.width as i32 - w as i32
+    };
+    // Vertically center on the drop position, clamped inside the monitor.
+    let margin = (8.0 * factor).round() as i32;
+    let y_min = mp.y + margin;
+    let y_max = (mp.y + ms.height as i32 - h as i32 - margin).max(y_min);
+    let y = (cy - h as i32 / 2).clamp(y_min, y_max);
+
+    *state.docked.lock().unwrap() =
+        Some(((pos.x, pos.y, size.width, size.height), edge.clone()));
+    window
+        .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(w, h)))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
+        .map_err(|e| e.to_string())?;
+    state.active.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Leave edge-dock mode: restore the pre-snap size at the current (docked)
+/// position, pulled one threshold away from the edge so the drag can continue
+/// seamlessly and `detect_edge_dock` won't immediately re-snap on release.
+#[tauri::command]
+pub fn exit_edge_dock(
+    window: WebviewWindow,
+    state: State<'_, EdgeDockState>,
+) -> Result<(), String> {
+    let docked = state.docked.lock().unwrap().take();
+    state.active.store(false, Ordering::SeqCst);
+    let prev_size = docked.as_ref().map(|(r, _)| (r.2, r.3));
+    let edge = docked.map(|(_, e)| e);
+    let factor = window.scale_factor().unwrap_or(1.0);
+
+    // Restore the pre-dock size; fall back to the configured normal/mini size
+    // (scaled to the current monitor) if nothing was saved.
+    let (w, h) = match prev_size {
+        Some(s) => s,
+        None => {
+            let mini = user_config::load().mini_mode.unwrap_or(false);
+            let (lw, lh) = if mini {
+                (config::MINI_WINDOW_WIDTH, config::MINI_WINDOW_HEIGHT)
+            } else {
+                (config::WINDOW_WIDTH, config::WINDOW_HEIGHT)
+            };
+            ((lw as f64 * factor) as u32, (lh as f64 * factor) as u32)
+        }
+    };
+    window
+        .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(w, h)))
+        .map_err(|e| e.to_string())?;
+
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let offset = (config::EDGE_SNAP_THRESHOLD as f64 * factor).round() as i32;
+    let (mut x, y) = (pos.x, pos.y);
+    match edge.as_deref() {
+        Some("left") => x += offset,
+        Some("right") => x -= offset,
+        _ => x += offset,
+    }
+    window
+        .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
+        .map_err(|e| e.to_string())
+}
+
 // ===== Language =====
 
 #[tauri::command]
@@ -270,6 +476,141 @@ pub fn drag_window(window: WebviewWindow, delta_x: i32, delta_y: i32) -> Result<
     let pos = window.outer_position().map_err(|e| e.to_string())?;
     window
         .set_position(tauri::PhysicalPosition::new(pos.x + delta_x, pos.y + delta_y))
+        .map_err(|e| e.to_string())
+}
+
+/// Tracks the temporary horizontal growth of the window that makes room for
+/// the context menu beside the character. `active` lets the position-persist
+/// handler skip the shifted geometry; `grow` remembers (side, physical delta)
+/// so `close_menu_space` restores exactly what was applied.
+#[derive(Default, Clone)]
+pub struct MenuSpaceState {
+    pub active: Arc<AtomicBool>,
+    pub grow: Arc<Mutex<Option<(String, i32)>>>,
+}
+
+#[derive(serde::Serialize)]
+pub struct MenuSpaceInfo {
+    pub side: String,
+    pub delta: u32, // logical px actually gained
+}
+
+/// Grow the window horizontally to make room for the context menu. The side
+/// is chosen by the pet's position on its monitor — pet on the left half
+/// grows rightward, pet on the right half grows leftward (menu opens toward
+/// the free space). The top-left corner is kept fixed unless growing
+/// leftward (then the window shifts left by the same amount, so the renderer
+/// offsets its content to keep the pet in place). If the chosen side lacks
+/// room on the monitor, the other side is used instead. Returns the side and
+/// width actually gained (clamped to the monitor bounds).
+#[tauri::command]
+pub fn open_menu_space(
+    window: WebviewWindow,
+    app: AppHandle,
+    state: State<'_, MenuSpaceState>,
+    width: u32,
+) -> Result<MenuSpaceInfo, String> {
+    let factor = window.scale_factor().unwrap_or(1.0);
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let dw = (width as f64 * factor).round() as i32;
+
+    // Monitor containing the window center (fallback: first).
+    let monitors = app.available_monitors().map_err(|e| e.to_string())?;
+    let cx = pos.x + size.width as i32 / 2;
+    let cy = pos.y + size.height as i32 / 2;
+    let mon = monitors
+        .iter()
+        .find(|m| {
+            let p = m.position();
+            let s = m.size();
+            cx >= p.x && cx < p.x + s.width as i32 && cy >= p.y && cy < p.y + s.height as i32
+        })
+        .or_else(|| monitors.first())
+        .ok_or_else(|| "no monitors found".to_string())?;
+    let mp = mon.position();
+    let ms = mon.size();
+    let margin = (8.0 * factor).round() as i32;
+
+    // Pick the side by the pet's position: on the left half of its monitor
+    // the menu opens to the right (toward the free space) and vice versa;
+    // flip when the chosen side is cramped and the opposite side has more room.
+    let room_left = pos.x - mp.x;
+    let room_right = (mp.x + ms.width as i32 - margin) - (pos.x + size.width as i32);
+    let pet_center_x = pos.x + size.width as i32 / 2;
+    let mon_center_x = mp.x + ms.width as i32 / 2;
+    let mut side = if pet_center_x <= mon_center_x {
+        "right"
+    } else {
+        "left"
+    };
+    let (room_pref, room_alt) = if side == "left" {
+        (room_left, room_right)
+    } else {
+        (room_right, room_left)
+    };
+    if room_pref < dw && room_alt > room_pref {
+        side = if side == "left" { "right" } else { "left" };
+    }
+    let room = if side == "left" { room_left } else { room_right };
+    let delta = dw.clamp(0, room.max(0));
+
+    let mut x = pos.x;
+    let mut w = size.width as i32;
+    if delta > 0 {
+        if side == "left" {
+            x -= delta;
+        }
+        w += delta;
+        window
+            .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+                w.max(80) as u32,
+                size.height,
+            )))
+            .map_err(|e| e.to_string())?;
+        window
+            .set_position(tauri::PhysicalPosition::new(x, pos.y))
+            .map_err(|e| e.to_string())?;
+    }
+
+    *state.grow.lock().unwrap() = Some((side.to_string(), delta));
+    state.active.store(true, Ordering::SeqCst);
+    Ok(MenuSpaceInfo {
+        side: side.to_string(),
+        delta: (delta as f64 / factor).round() as u32,
+    })
+}
+
+/// Undo the growth applied by `open_menu_space` (restore width, and shift
+/// back rightward when the growth was on the left).
+#[tauri::command]
+pub fn close_menu_space(
+    window: WebviewWindow,
+    state: State<'_, MenuSpaceState>,
+) -> Result<(), String> {
+    let taken = state.grow.lock().unwrap().take();
+    state.active.store(false, Ordering::SeqCst);
+    let Some((side, delta)) = taken else {
+        return Ok(());
+    };
+    if delta <= 0 {
+        return Ok(());
+    }
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let mut x = pos.x;
+    let w = (size.width as i32 - delta).max(80);
+    if side == "left" {
+        x += delta;
+    }
+    window
+        .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+            w as u32,
+            size.height,
+        )))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_position(tauri::PhysicalPosition::new(x, pos.y))
         .map_err(|e| e.to_string())
 }
 

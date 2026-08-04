@@ -51,6 +51,9 @@ pub fn run() {
             commands::get_appearance,
             commands::set_flip_horizontal,
             commands::set_mini_mode,
+            commands::detect_edge_dock,
+            commands::enter_edge_dock,
+            commands::exit_edge_dock,
             commands::get_language,
             commands::set_language,
             commands::get_auto_launch,
@@ -58,6 +61,8 @@ pub fn run() {
             commands::get_state,
             commands::test_alert,
             commands::drag_window,
+            commands::open_menu_space,
+            commands::close_menu_space,
             commands::update_click_regions,
             commands::set_force_clickable,
             commands::bring_to_front,
@@ -73,6 +78,15 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // ----- State manager -----
     let sm: SharedStateManager = Arc::new(tokio::sync::Mutex::new(StateManager::new()));
     app.manage(sm.clone());
+
+    // Pre-snap geometry for edge-dock restore. Kept as a clone so the
+    // WindowEvent::Moved handler below can skip persisting docked positions.
+    let edge_dock = commands::EdgeDockState::default();
+    app.manage(edge_dock.clone());
+
+    // Temporary horizontal window growth while the context menu is open.
+    let menu_space = commands::MenuSpaceState::default();
+    app.manage(menu_space.clone());
 
     // ----- Window: position + show -----
     let window = app
@@ -99,11 +113,19 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(debug_assertions)]
     window.open_devtools();
 
-    // Persist window position on move (throttled to every 500ms).
+    // Persist window position on move (throttled to every 500ms). Docked
+    // (edge-snapped) positions are skipped so a restart doesn't open the
+    // full-size window glued to the screen edge; the shifted geometry while
+    // the context menu has grown the window is skipped for the same reason.
     let last_save = Arc::new(AtomicU64::new(0));
     let last_save_clone = last_save.clone();
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::Moved(pos) = event {
+            if edge_dock.active.load(Ordering::SeqCst)
+                || menu_space.active.load(Ordering::SeqCst)
+            {
+                return;
+            }
             let now = current_millis();
             if now.saturating_sub(last_save_clone.load(Ordering::SeqCst)) >= 500 {
                 last_save_clone.store(now, Ordering::SeqCst);

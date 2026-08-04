@@ -67,6 +67,14 @@
     setFlipHorizontal: (enabled) => invoke('set_flip_horizontal', { enabled }),
     setMiniMode: (enabled) => invoke('set_mini_mode', { enabled }),
 
+    // ===== Edge dock (screen-edge snap, left/right only) =====
+    // detectEdgeDock: returns null or "left"/"right" when the window sits
+    // within the snap threshold of the monitor's left/right edge.
+    detectEdgeDock: () => invoke('detect_edge_dock'),
+    // contentHeight (logical px) sizes the compact bar to its badges.
+    enterEdgeDock: (edge, contentHeight) => invoke('enter_edge_dock', { edge, contentHeight }),
+    exitEdgeDock: () => invoke('exit_edge_dock'),
+
     // ===== Language =====
     getLanguage: () => invoke('get_language'),
     setLanguage: (lang) => invoke('set_language', { lang }),
@@ -78,6 +86,11 @@
     // ===== Test / window control =====
     testAlert: () => invoke('test_alert'),
     dragWindow: (deltaX, deltaY) => invoke('drag_window', { deltaX, deltaY }),
+    // Grow the window horizontally for the context menu. The backend picks
+    // the side by the pet's position on its monitor (left half -> right,
+    // right half -> left). Returns { side, delta }.
+    openMenuSpace: (width) => invoke('open_menu_space', { width }),
+    closeMenuSpace: () => invoke('close_menu_space'),
     // Click-through (Tauri has no {forward:true} mode, so the Rust polling
     // thread owns set_ignore_cursor_events; the renderer reports the clickable
     // rectangles and a force-clickable flag for drag / menu-open states).
