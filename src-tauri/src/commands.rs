@@ -253,6 +253,65 @@ fn best_monitor<'a>(
         .or_else(|| monitors.first())
 }
 
+/// Shared snap detection used by `detect_edge_dock` and the drag-time ghost
+/// preview: returns the monitor holding most of the window plus the crossed
+/// edge that would trigger docking. The window must be PAST the edge — either
+/// off-screen (outer edges) or on a neighbouring monitor (internal boundaries
+/// count too) — by more than 20% of its width; nothing else snaps.
+fn snap_target<'a>(
+    monitors: &'a [tauri::Monitor],
+    pos: tauri::PhysicalPosition<i32>,
+    size: tauri::PhysicalSize<u32>,
+) -> Option<(&'a tauri::Monitor, &'static str)> {
+    let mon = best_monitor(monitors, pos, size)?;
+    let mp = mon.position();
+    let ms = mon.size();
+    let cross_left = mp.x - pos.x;
+    let cross_right = (pos.x + size.width as i32) - (mp.x + ms.width as i32);
+    let min_cross = (size.width as f64 * 0.2).round() as i32;
+    let edge = match (cross_left > min_cross, cross_right > min_cross) {
+        (true, true) => {
+            if cross_left >= cross_right {
+                "left"
+            } else {
+                "right"
+            }
+        }
+        (true, false) => "left",
+        (false, true) => "right",
+        (false, false) => return None,
+    };
+    Some((mon, edge))
+}
+
+/// The exact rect (physical px) `enter_edge_dock` would place the dock bar
+/// at: EDGE_DOCK_THICKNESS wide, `content_height` tall (clamped), vertically
+/// centered on `cy` and clamped inside the monitor. Shared with the drag-time
+/// ghost preview so the snap lands exactly where the ghost promised.
+fn dock_bar_rect(
+    mp: &tauri::PhysicalPosition<i32>,
+    ms: &tauri::PhysicalSize<u32>,
+    edge: &str,
+    factor: f64,
+    cy: i32,
+    content_height: u32,
+) -> (i32, i32, u32, u32) {
+    let w = (config::EDGE_DOCK_THICKNESS as f64 * factor).round() as u32;
+    let min_h = (80.0 * factor).round() as u32;
+    let max_h = ms.height.saturating_sub((16.0 * factor) as u32).max(min_h);
+    let h = ((content_height as f64 * factor).round() as u32).clamp(min_h, max_h);
+    let x = if edge == "left" {
+        mp.x
+    } else {
+        mp.x + ms.width as i32 - w as i32
+    };
+    let margin = (8.0 * factor).round() as i32;
+    let y_min = mp.y + margin;
+    let y_max = (mp.y + ms.height as i32 - h as i32 - margin).max(y_min);
+    let y = (cy - h as i32 / 2).clamp(y_min, y_max);
+    (x, y, w, h)
+}
+
 /// Check whether the window has crossed the left/right edge of its monitor
 /// by more than 20% of its width — the ONLY condition that triggers docking;
 /// every other position (including resting right at the edge) does not snap.
@@ -274,36 +333,8 @@ pub fn detect_edge_dock(
     }
     let pos = window.outer_position().map_err(|e| e.to_string())?;
     let size = window.outer_size().map_err(|e| e.to_string())?;
-
-    // Monitor holding most of the window — when straddling two screens this
-    // is the one whose edge gets the snap.
     let monitors = app.available_monitors().map_err(|e| e.to_string())?;
-    let mon = best_monitor(&monitors, pos, size)
-        .ok_or_else(|| "no monitors found".to_string())?;
-    let mp = mon.position();
-    let ms = mon.size();
-
-    // How far the window has crossed PAST each edge of that monitor
-    // (physical px): >0 means part of the window is beyond the edge — either
-    // off-screen (outer edges) or on a neighbouring monitor (internal
-    // boundaries count too). Docking fires only when the crossed amount
-    // exceeds 20% of the window width.
-    let cross_left = mp.x - pos.x;
-    let cross_right = (pos.x + size.width as i32) - (mp.x + ms.width as i32);
-    let min_cross = (size.width as f64 * 0.2).round() as i32;
-    let edge = match (cross_left > min_cross, cross_right > min_cross) {
-        (true, true) => {
-            if cross_left >= cross_right {
-                "left"
-            } else {
-                "right"
-            }
-        }
-        (true, false) => "left",
-        (false, true) => "right",
-        (false, false) => return Ok(None),
-    };
-    Ok(Some(edge.to_string()))
+    Ok(snap_target(&monitors, pos, size).map(|(_, edge)| edge.to_string()))
 }
 
 /// Snap the window into a compact bar at the given left/right edge. The bar
@@ -335,20 +366,8 @@ pub fn enter_edge_dock(
     let mp = mon.position();
     let ms = mon.size();
 
-    let w = (config::EDGE_DOCK_THICKNESS as f64 * factor).round() as u32;
-    let min_h = (80.0 * factor).round() as u32;
-    let max_h = ms.height.saturating_sub((16.0 * factor) as u32).max(min_h);
-    let h = ((content_height as f64 * factor).round() as u32).clamp(min_h, max_h);
-    let x = if edge == "left" {
-        mp.x
-    } else {
-        mp.x + ms.width as i32 - w as i32
-    };
-    // Vertically center on the drop position, clamped inside the monitor.
-    let margin = (8.0 * factor).round() as i32;
-    let y_min = mp.y + margin;
-    let y_max = (mp.y + ms.height as i32 - h as i32 - margin).max(y_min);
-    let y = (cy - h as i32 / 2).clamp(y_min, y_max);
+    // Vertically centered on the drop position, clamped inside the monitor.
+    let (x, y, w, h) = dock_bar_rect(mp, ms, &edge, factor, cy, content_height);
 
     *state.docked.lock().unwrap() =
         Some(((pos.x, pos.y, size.width, size.height), edge.clone()));
@@ -362,9 +381,10 @@ pub fn enter_edge_dock(
     Ok(())
 }
 
-/// Leave edge-dock mode: restore the pre-snap size at the current (docked)
-/// position, pulled one threshold away from the edge so the drag can continue
-/// seamlessly and `detect_edge_dock` won't immediately re-snap on release.
+/// Leave edge-dock mode: restore the pre-snap size and place the character's
+/// center right under the cursor — the user grabbed the dock bar, so the pet
+/// appears where they're pointing and the drag continues seamlessly. Falls
+/// back to the old pull-away offset when the cursor position is unavailable.
 #[tauri::command]
 pub fn exit_edge_dock(
     window: WebviewWindow,
@@ -375,13 +395,13 @@ pub fn exit_edge_dock(
     let prev_size = docked.as_ref().map(|(r, _)| (r.2, r.3));
     let edge = docked.map(|(_, e)| e);
     let factor = window.scale_factor().unwrap_or(1.0);
+    let mini = user_config::load().mini_mode.unwrap_or(false);
 
     // Restore the pre-dock size; fall back to the configured normal/mini size
     // (scaled to the current monitor) if nothing was saved.
     let (w, h) = match prev_size {
         Some(s) => s,
         None => {
-            let mini = user_config::load().mini_mode.unwrap_or(false);
             let (lw, lh) = if mini {
                 (config::MINI_WINDOW_WIDTH, config::MINI_WINDOW_HEIGHT)
             } else {
@@ -394,13 +414,42 @@ pub fn exit_edge_dock(
         .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(w, h)))
         .map_err(|e| e.to_string())?;
 
-    let pos = window.outer_position().map_err(|e| e.to_string())?;
-    let offset = (config::EDGE_SNAP_THRESHOLD as f64 * factor).round() as i32;
-    let (mut x, y) = (pos.x, pos.y);
-    match edge.as_deref() {
-        Some("left") => x += offset,
-        Some("right") => x -= offset,
-        _ => x += offset,
+    // Character center inside the window (logical px): the canvas is flush
+    // top and centered horizontally.
+    let (center_lx, center_ly) = if mini {
+        (config::MINI_WINDOW_WIDTH as f64 / 2.0, config::MINI_PET_CANVAS_HEIGHT as f64 / 2.0)
+    } else {
+        (config::WINDOW_WIDTH as f64 / 2.0, config::PET_CANVAS_HEIGHT as f64 / 2.0)
+    };
+    let (mut x, mut y) = if let Some((cx, cy)) = crate::click_through::global_cursor_pos() {
+        (
+            cx - (center_lx * factor).round() as i32,
+            cy - (center_ly * factor).round() as i32,
+        )
+    } else {
+        // No global cursor API: keep the docked spot, pulled one threshold
+        // inward so detect_edge_dock doesn't immediately re-snap.
+        let pos = window.outer_position().map_err(|e| e.to_string())?;
+        let offset = (config::EDGE_SNAP_THRESHOLD as f64 * factor).round() as i32;
+        let x = match edge.as_deref() {
+            Some("left") => pos.x + offset,
+            Some("right") => pos.x - offset,
+            _ => pos.x + offset,
+        };
+        (x, pos.y)
+    };
+
+    // Keep the restored window fully visible on its monitor.
+    if let Ok(monitors) = window.available_monitors() {
+        let size = tauri::PhysicalSize::new(w, h);
+        if let Some(mon) =
+            best_monitor(&monitors, tauri::PhysicalPosition::new(x, y), size)
+        {
+            let mp = mon.position();
+            let ms = mon.size();
+            x = x.clamp(mp.x, (mp.x + ms.width as i32 - w as i32).max(mp.x));
+            y = y.clamp(mp.y, (mp.y + ms.height as i32 - h as i32).max(mp.y));
+        }
     }
     window
         .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
@@ -493,6 +542,55 @@ pub struct MenuSpaceState {
 pub struct MenuSpaceInfo {
     pub side: String,
     pub delta: u32, // logical px actually gained
+}
+
+/// Live preview of the upcoming edge snap while dragging: mirrors the
+/// detect/enter geometry exactly and parks the hidden "dock-preview" ghost
+/// window at the spot the dock bar would occupy. Hides the ghost when the
+/// window is dragged back inside the snap threshold. The ghost window is
+/// click-through, so the drag continues uninterrupted.
+#[tauri::command]
+pub fn update_dock_preview(
+    window: WebviewWindow,
+    app: AppHandle,
+    content_height: u32,
+) -> Result<(), String> {
+    let preview = app
+        .get_webview_window("dock-preview")
+        .ok_or_else(|| "dock-preview window not found".to_string())?;
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let factor = window.scale_factor().unwrap_or(1.0);
+    let monitors = app.available_monitors().map_err(|e| e.to_string())?;
+
+    let Some((mon, edge)) = snap_target(&monitors, pos, size) else {
+        // Back inside the threshold — no snap would happen, drop the ghost.
+        let _ = preview.hide();
+        return Ok(());
+    };
+    let cy = pos.y + size.height as i32 / 2;
+    let (x, y, w, h) = dock_bar_rect(mon.position(), mon.size(), edge, factor, cy, content_height);
+    preview
+        .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(w, h)))
+        .map_err(|e| e.to_string())?;
+    preview
+        .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+            x, y,
+        )))
+        .map_err(|e| e.to_string())?;
+    if !preview.is_visible().unwrap_or(false) {
+        let _ = preview.show();
+    }
+    Ok(())
+}
+
+/// Hide the snap-preview ghost (drag ended or cancelled).
+#[tauri::command]
+pub fn hide_dock_preview(app: AppHandle) -> Result<(), String> {
+    if let Some(preview) = app.get_webview_window("dock-preview") {
+        let _ = preview.hide();
+    }
+    Ok(())
 }
 
 /// Grow the window horizontally to make room for the context menu. The side

@@ -4,7 +4,7 @@
 
 # 开工啦 (Duty On) - Live2D 桌面精灵监控
 
-**一个浮在桌面顶层的 Live2D 精灵，实时监控多个 Trae / Qoder IDE 实例的 AI 任务状态。**
+**让喜欢的角色替你盯梢——AI 在忙什么，一眼就知道。**
 
 [English](README.md) · **简体中文**
 

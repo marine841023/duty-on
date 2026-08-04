@@ -1,11 +1,11 @@
-# Duty On v1.1.3 release: create GitHub Release + upload local installer.
+# Duty On v1.1.4 release: create GitHub Release + upload local installer.
 # Token comes from Windows credential store (git credential fill).
 $ErrorActionPreference = 'Stop'
 
 $owner = 'marine841023'
 $repo  = 'duty-on'
-$tag   = 'v1.1.3'
-$exe   = 'd:\src\traeSprite\src-tauri\target\release\bundle\nsis\DutyOn_1.1.3_x64-setup.exe'
+$tag   = 'v1.1.4'
+$exe   = 'd:\src\traeSprite\src-tauri\target\release\bundle\nsis\DutyOn_1.1.4_x64-setup.exe'
 
 if (-not (Test-Path $exe)) { throw "installer not found: $exe" }
 
@@ -24,18 +24,19 @@ try {
 } catch {
     $body = @{
         tag_name = $tag
-        name     = 'v1.1.3'
+        name     = 'v1.1.4'
         body     = @(
             '## What''s new',
             '',
             '### Features',
-            '- Screen edge docking: drag the pet past a monitor''s left/right edge by more than 20% of the window width and it snaps into a compact status bar with a round status light (blue = idle, yellow = working, red = confirmation needed)',
-            '- Multi-monitor aware docking: every monitor boundary is a valid snap target, including the boundary between two screens — when the window straddles two monitors, the one holding most of the pet wins',
-            '- Context menu now opens beside the character (side chosen by which half of the screen the pet is on) and spans the full height from the character down to the IDE project list, never covering the pet',
-            '- Motion menu live preview: hovering a motion plays it in a seamless loop on the character while the menu stays open; the menu only closes via the close button or clicking outside',
+            '- Edge-snap ghost preview: while dragging close to a screen edge, a semi-transparent dashed silhouette shows exactly where the dock bar will land — keep dragging to adjust, release to confirm',
+            '- Undocking now places the character''s center right under the mouse pointer, so dragging away from the edge feels seamless',
             '',
             '### Bug Fixes',
-            '- Fixed motion preview stopping after one play — replays are now deferred past the library''s motion-slot cleanup so the loop keeps running'
+            '- Fixed the window breaking after a DPI/scale change (remote-desktop connect/disconnect, switching monitors or display scaling): the window is now re-pinned to its intended size and kept visible on screen',
+            '',
+            '### Docs',
+            '- New slogan across the promo page and READMEs: "Your favorite character watches your AI IDE, so you don''t have to."'
         ) -join "`n"
     } | ConvertTo-Json -Depth 5
     $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$owner/$repo/releases" -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body ([System.Text.Encoding]::UTF8.GetBytes($body))

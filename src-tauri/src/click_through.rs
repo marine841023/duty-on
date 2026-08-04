@@ -34,6 +34,24 @@ use windows::Win32::Foundation::POINT;
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
+/// One-shot read of the global cursor position in physical screen pixels
+/// (used by exit_edge_dock to put the pet under the pointer). None when the
+/// platform has no global cursor API.
+#[cfg(windows)]
+pub fn global_cursor_pos() -> Option<(i32, i32)> {
+    let mut point = POINT::default();
+    // windows 0.58: GetCursorPos is unsafe and returns Result<(), Error>.
+    if unsafe { GetCursorPos(&mut point) }.is_err() {
+        return None;
+    }
+    Some((point.x, point.y))
+}
+
+#[cfg(not(windows))]
+pub fn global_cursor_pos() -> Option<(i32, i32)> {
+    None
+}
+
 /// A clickable rectangle in physical pixels, relative to the window's
 /// top-left. The window is undecorated so outer == inner; these map directly
 /// to the cursor-local coords computed in the polling loop. Deserialized from

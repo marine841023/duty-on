@@ -16,7 +16,7 @@ use crate::user_config::WindowPosition;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{Emitter, Manager, PhysicalPosition};
+use tauri::{Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::MacosLauncher;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -54,6 +54,8 @@ pub fn run() {
             commands::detect_edge_dock,
             commands::enter_edge_dock,
             commands::exit_edge_dock,
+            commands::update_dock_preview,
+            commands::hide_dock_preview,
             commands::get_language,
             commands::set_language,
             commands::get_auto_launch,
@@ -96,6 +98,21 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let _ = window.set_always_on_top(true);
     let _ = window.show();
 
+    // Ghost preview window for the upcoming edge snap, shown while dragging
+    // close to a screen edge (update_dock_preview). Transparent, click-through
+    // and hidden by default — it must never intercept the drag.
+    let preview = WebviewWindowBuilder::new(app, "dock-preview", WebviewUrl::App("preview.html".into()))
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .inner_size(config::EDGE_DOCK_THICKNESS as f64, 200.0)
+        .build()?;
+    let _ = preview.set_ignore_cursor_events(true);
+
     // Log window state for debugging "completely transparent / can't click"
     let vis = window.is_visible().unwrap_or(false);
     let pos = window.outer_position().map(|p| (p.x, p.y)).unwrap_or((-1, -1));
@@ -119,8 +136,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // the context menu has grown the window is skipped for the same reason.
     let last_save = Arc::new(AtomicU64::new(0));
     let last_save_clone = last_save.clone();
-    window.on_window_event(move |event| {
-        if let tauri::WindowEvent::Moved(pos) = event {
+    let win_scale = window.clone();
+    window.on_window_event(move |event| match event {
+        tauri::WindowEvent::Moved(pos) => {
             if edge_dock.active.load(Ordering::SeqCst)
                 || menu_space.active.load(Ordering::SeqCst)
             {
@@ -134,6 +152,61 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
         }
+        // The DPI scale changes at runtime — remote-desktop connect/disconnect,
+        // moving between monitors with different DPI, or a display-settings
+        // change. The OS keeps the window's PHYSICAL size, so its logical size
+        // (the unit the CSS layout works in) drifts and content gets clipped.
+        // Re-pin the window to its intended logical size, drop the temporary
+        // menu growth (recorded in stale physical px), and tell the renderer
+        // to reset its menu state too.
+        tauri::WindowEvent::ScaleFactorChanged {
+            scale_factor,
+            new_inner_size,
+            ..
+        } => {
+            *menu_space.grow.lock().unwrap() = None;
+            menu_space.active.store(false, Ordering::SeqCst);
+
+            let mini = user_config::load().mini_mode.unwrap_or(false);
+            let (lw, lh) = if mini {
+                (config::MINI_WINDOW_WIDTH, config::MINI_WINDOW_HEIGHT)
+            } else {
+                (config::WINDOW_WIDTH, config::WINDOW_HEIGHT)
+            };
+            let (phys_w, phys_h) = if edge_dock.active.load(Ordering::SeqCst) {
+                // Stay docked: re-pin the bar thickness, keep its height.
+                let t = (config::EDGE_DOCK_THICKNESS as f64 * scale_factor).round() as u32;
+                (t, new_inner_size.height)
+            } else {
+                (
+                    (lw as f64 * scale_factor).round() as u32,
+                    (lh as f64 * scale_factor).round() as u32,
+                )
+            };
+            let _ = win_scale.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+                phys_w, phys_h,
+            )));
+
+            // Keep the window visible: clamp into its current monitor.
+            if let (Ok(pos), Ok(Some(m))) =
+                (win_scale.outer_position(), win_scale.current_monitor())
+            {
+                let mp = m.position();
+                let ms = m.size();
+                let x = pos
+                    .x
+                    .clamp(mp.x, (mp.x + ms.width as i32 - phys_w as i32).max(mp.x));
+                let y = pos
+                    .y
+                    .clamp(mp.y, (mp.y + ms.height as i32 - phys_h as i32).max(mp.y));
+                if x != pos.x || y != pos.y {
+                    let _ = win_scale.set_position(PhysicalPosition::new(x, y));
+                }
+            }
+
+            let _ = win_scale.emit("display-changed", ());
+        }
+        _ => {}
     });
 
     // ----- Click-through polling thread -----

@@ -1620,6 +1620,19 @@ function setupIPC() {
     }
   });
 
+  // DPI scale changed at runtime (remote-desktop connect/disconnect, monitor
+  // or display-settings switch). The backend already re-pinned the window to
+  // its base logical size and dropped its menu-growth record — mirror that
+  // locally: forget the grown space and close the menu if it was open.
+  if (window.petAPI && window.petAPI.onDisplayChanged) {
+    window.petAPI.onDisplayChanged(() => {
+      menuSpaceInfo = null;
+      const petContainer = document.getElementById('pet-container');
+      if (petContainer) petContainer.style.marginLeft = '';
+      closeMenu();
+    });
+  }
+
   window.petAPI.onAlert((snapshot) => {
     updateStatusBar(snapshot);
     setPetState('alert');
@@ -2176,6 +2189,8 @@ function setupDrag() {
     // model bounds mid-drag, which would otherwise flip the window to
     // click-through (via the Rust polling loop) and break dragging.
     if (window.petAPI && window.petAPI.setForceClickable) window.petAPI.setForceClickable(true);
+    // Drop any stale snap-preview ghost from an interrupted previous drag.
+    if (window.petAPI && window.petAPI.hideDockPreview) window.petAPI.hideDockPreview();
     hasMoved = false;
     lastX = e.screenX;
     lastY = e.screenY;
@@ -2200,6 +2215,7 @@ function setupDrag() {
   });
 
   let dragPendingX = 0, dragPendingY = 0, dragRafId = null;
+  let lastPreviewAt = 0;
   document.addEventListener('mousemove', (e) => {
     if (!isDragging) return;
     const deltaX = e.screenX - lastX;
@@ -2219,10 +2235,22 @@ function setupDrag() {
       dragPendingY += deltaY;
       if (dragRafId === null) {
         dragRafId = requestAnimationFrame(() => {
-          window.petAPI.dragWindow(dragPendingX, dragPendingY);
+          const moved = window.petAPI.dragWindow(dragPendingX, dragPendingY);
           dragPendingX = 0;
           dragPendingY = 0;
           dragRafId = null;
+          // Ghost preview of the upcoming edge snap. Updated AFTER the window
+          // actually moved (so the geometry matches), and throttled to ~20Hz
+          // so a fast drag doesn't flood the preview window with moves.
+          if (!edgeDocked && window.petAPI.updateDockPreview) {
+            const now = performance.now();
+            if (now - lastPreviewAt >= 50) {
+              lastPreviewAt = now;
+              Promise.resolve(moved)
+                .then(() => window.petAPI.updateDockPreview(computeDockBarHeight()))
+                .catch(() => { /* preview is cosmetic — never block the drag */ });
+            }
+          }
         });
       }
     }
@@ -2247,6 +2275,11 @@ function setupDrag() {
       dragPendingX = 0;
       dragPendingY = 0;
       try { await window.petAPI.dragWindow(fx, fy); } catch (e) { /* keep going */ }
+    }
+    // Drag over — the ghost has served its purpose. Either the snap below
+    // replaces it with the real dock bar, or no snap happens and it must go.
+    if (window.petAPI && window.petAPI.hideDockPreview) {
+      try { await window.petAPI.hideDockPreview(); } catch (e) { /* cosmetic */ }
     }
     // After a real drag ends, snap to the nearest left/right screen edge when
     // we landed within the threshold.

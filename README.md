@@ -4,7 +4,7 @@
 
 # Duty On · 开工啦
 
-**A Live2D desk pet that watches your AI coding agents, so you don't have to.**
+**Your favorite character watches your AI IDE, so you don't have to.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)]()

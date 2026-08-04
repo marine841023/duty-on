@@ -18,6 +18,12 @@ pub const WINDOW_MARGIN: i32 = 20; // offset from bottom-right corner
 // Mini mode: half-size window (人物宽高 1/2, status bar half width).
 pub const MINI_WINDOW_WIDTH: i32 = 130;
 pub const MINI_WINDOW_HEIGHT: i32 = 210;
+// Character canvas sits flush at the top of the window (centered
+// horizontally), so the pet's visible center is at (window_width/2,
+// canvas_height/2) — used to place the character under the cursor when
+// leaving edge-dock. Must match PIXI_HEIGHT / MINI_PIXI_HEIGHT in renderer.js.
+pub const PET_CANVAS_HEIGHT: i32 = 260;
+pub const MINI_PET_CANVAS_HEIGHT: i32 = 130;
 // Edge dock: compact "traffic-light" bar snapped to the left/right screen
 // edge (拖到屏幕边缘自动吸附). THICKNESS is the bar's narrow dimension
 // (logical px); the bar height follows its content (see enter_edge_dock).

@@ -21,6 +21,10 @@
     // ===== Events (renderer → main, main → renderer) =====
     onStateUpdate: (cb) => on('state-update', cb),
     onAlert: (cb) => on('alert', cb),
+    // Fired when the DPI scale changes at runtime (remote-desktop
+    // connect/disconnect, monitor/DPI switch); the backend resets the window
+    // geometry to its base logical size in the same handler.
+    onDisplayChanged: (cb) => on('display-changed', cb),
     // Pull-mode fetch: covers the startup gap where the first state-update
     // fires before this listener is registered (IDE opened before the pet).
     getState: () => invoke('get_state'),
@@ -74,6 +78,12 @@
     // contentHeight (logical px) sizes the compact bar to its badges.
     enterEdgeDock: (edge, contentHeight) => invoke('enter_edge_dock', { edge, contentHeight }),
     exitEdgeDock: () => invoke('exit_edge_dock'),
+    // Drag-time ghost preview of the upcoming edge snap: shows a dashed
+    // silhouette exactly where the dock bar would land; auto-hides when the
+    // window is dragged back inside the snap threshold.
+    updateDockPreview: (contentHeight) =>
+      invoke('update_dock_preview', { contentHeight }),
+    hideDockPreview: () => invoke('hide_dock_preview'),
 
     // ===== Language =====
     getLanguage: () => invoke('get_language'),
