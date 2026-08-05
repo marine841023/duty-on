@@ -28,6 +28,28 @@ pub async fn get_state(state: State<'_, SharedStateManager>) -> Result<Value, St
     serde_json::to_value(s.get_snapshot()).map_err(|e| e.to_string())
 }
 
+/// Manually reset all sessions to Idle. Used as a fallback when Trae IDE
+/// doesn't fire a Stop hook event (e.g., user aborts during the AI's
+/// "thinking" phase — no tool use, so no Stop event). Without this the pet
+/// stays stuck in Working until the 3-minute WORKING_TIMEOUT elapses.
+#[tauri::command]
+pub async fn reset_to_idle(state: State<'_, SharedStateManager>) -> Result<(), String> {
+    let mut s = state.lock().await;
+    s.reset_all_to_idle();
+    Ok(())
+}
+
+/// Frontend diagnostic log (via invoke, unlike /log fetch which can be flaky
+/// in dev). Writes to the cargo stdout + ~/.dutyon/frontend.log so we can
+/// trace menu-timing values (left, screenX, side, delta) that fetch-based
+/// __petSendLog drops in some sessions.
+#[tauri::command]
+pub fn debug_log(msg: String) -> Result<(), String> {
+    log::info!("[fe] {}", msg);
+    crate::server::append_log_file("info", &msg);
+    Ok(())
+}
+
 // ===== Hooks =====
 
 #[tauri::command]
@@ -544,6 +566,63 @@ pub struct MenuSpaceInfo {
     pub delta: u32, // logical px actually gained
 }
 
+/// Set the window's outer position AND size in one call. On Windows this uses
+/// Win32 `SetWindowPos` (no SWP_NOMOVE / SWP_NOSIZE) so x/y/cx/cy apply
+/// atomically. The two-step `set_size` then `set_position` otherwise flashes
+/// when the menu opens leftward: `set_size` first grows the window rightward
+/// (right edge jumps +delta), then `set_position` shifts it left — WebView2
+/// paints that intermediate state as a visible flicker. With a single
+/// `SetWindowPos` the right edge never moves, only the left edge extends.
+/// Other platforms fall back to the two-step Tauri API.
+#[cfg(windows)]
+fn set_window_geometry(
+    window: &WebviewWindow,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
+    // Tauri's `hwnd()` returns the windows-0.61 HWND (Tauri's own dep), but our
+    // direct dep is windows-0.58 — the two HWND types are distinct and not
+    // interchangeable, so SetWindowPos (0.58) won't accept the 0.61 handle.
+    // Both are `HWND(*mut c_void)`, so unwrap the raw pointer and re-wrap it in
+    // the 0.58 type the linker expects.
+    let hwnd_061 = window.hwnd().map_err(|e| e.to_string())?;
+    let hwnd = HWND(hwnd_061.0 as *mut core::ffi::c_void);
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND::default(),
+            x,
+            y,
+            w as i32,
+            h as i32,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn set_window_geometry(
+    window: &WebviewWindow,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+) -> Result<(), String> {
+    window
+        .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(w, h)))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_position(tauri::PhysicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Live preview of the upcoming edge snap while dragging: mirrors the
 /// detect/enter geometry exactly and parks the hidden "dock-preview" ghost
 /// window at the spot the dock bar would occupy. Hides the ghost when the
@@ -593,19 +672,23 @@ pub fn hide_dock_preview(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Grow the window horizontally to make room for the context menu. The side
-/// is chosen by the pet's position on its monitor — pet on the left half
-/// grows rightward, pet on the right half grows leftward (menu opens toward
-/// the free space). The top-left corner is kept fixed unless growing
-/// leftward (then the window shifts left by the same amount, so the renderer
-/// offsets its content to keep the pet in place). If the chosen side lacks
-/// room on the monitor, the other side is used instead. Returns the side and
-/// width actually gained (clamped to the monitor bounds).
+/// Pick the side and width for the context-menu growth, based on the pet's
+/// position on its monitor (pet on the left half -> grow rightward, right
+/// half -> grow leftward; flip when the chosen side is cramped). This is a
+/// PURE calculation — it does NOT move the window or touch state — so the
+/// renderer can stage its content transform (`translateX`) BEFORE the window
+/// actually moves. That ordering matters: WebView2 composites synchronously
+/// on the WM_SIZE triggered by the resize, so if the transform is already
+/// staged when the window moves, the first frame after the move shows the
+/// pet at its correct on-screen position. Staging the transform AFTER the
+/// move (the old single-command design) instead painted one frame with the
+/// pet shifted left, which read as a visible flicker on left-side menus.
+/// Returns the chosen side and the width actually gained (clamped to the
+/// monitor bounds), in logical CSS px.
 #[tauri::command]
-pub fn open_menu_space(
+pub fn calculate_menu_space(
     window: WebviewWindow,
     app: AppHandle,
-    state: State<'_, MenuSpaceState>,
     width: u32,
 ) -> Result<MenuSpaceInfo, String> {
     let factor = window.scale_factor().unwrap_or(1.0);
@@ -630,9 +713,9 @@ pub fn open_menu_space(
     let ms = mon.size();
     let margin = (8.0 * factor).round() as i32;
 
-    // Pick the side by the pet's position: on the left half of its monitor
-    // the menu opens to the right (toward the free space) and vice versa;
-    // flip when the chosen side is cramped and the opposite side has more room.
+    // Pet on the left half of its monitor -> menu opens rightward (toward the
+    // free space) and vice versa; flip when the chosen side is cramped and the
+    // opposite side has more room.
     let room_left = pos.x - mp.x;
     let room_right = (mp.x + ms.width as i32 - margin) - (pos.x + size.width as i32);
     let pet_center_x = pos.x + size.width as i32 / 2;
@@ -653,33 +736,45 @@ pub fn open_menu_space(
     let room = if side == "left" { room_left } else { room_right };
     let delta = dw.clamp(0, room.max(0));
 
-    let mut x = pos.x;
-    let mut w = size.width as i32;
-    if delta > 0 {
-        if side == "left" {
-            x -= delta;
-        }
-        w += delta;
-        window
-            .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
-                w.max(80) as u32,
-                size.height,
-            )))
-            .map_err(|e| e.to_string())?;
-        window
-            .set_position(tauri::PhysicalPosition::new(x, pos.y))
-            .map_err(|e| e.to_string())?;
-    }
-
-    *state.grow.lock().unwrap() = Some((side.to_string(), delta));
-    state.active.store(true, Ordering::SeqCst);
     Ok(MenuSpaceInfo {
         side: side.to_string(),
         delta: (delta as f64 / factor).round() as u32,
     })
 }
 
-/// Undo the growth applied by `open_menu_space` (restore width, and shift
+/// Apply a growth calculated by `calculate_menu_space`: resize/shift the
+/// window and record the growth so `close_menu_space` can undo it. The
+/// renderer MUST stage its content transform (`translateX(delta)` for
+/// left-side growth) BEFORE calling this, so the synchronous WM_SIZE
+/// composite shows the pet at its correct position. Re-reads the live window
+/// rect so a drag between calculate and apply can't corrupt the geometry.
+#[tauri::command]
+pub fn apply_menu_space(
+    window: WebviewWindow,
+    state: State<'_, MenuSpaceState>,
+    side: String,
+    delta: u32, // logical CSS px, as returned by calculate_menu_space
+) -> Result<(), String> {
+    let factor = window.scale_factor().unwrap_or(1.0);
+    let delta_phys = (delta as f64 * factor).round() as i32;
+    if delta_phys > 0 {
+        let pos = window.outer_position().map_err(|e| e.to_string())?;
+        let size = window.outer_size().map_err(|e| e.to_string())?;
+        let mut x = pos.x;
+        let w = (size.width as i32 + delta_phys).max(80);
+        if side == "left" {
+            x -= delta_phys;
+        }
+        set_window_geometry(&window, x, pos.y, w as u32, size.height)?;
+    }
+    // Record even when delta_phys == 0 so close_menu_space clears `active`
+    // (suppresses position persistence while the menu is open) consistently.
+    *state.grow.lock().unwrap() = Some((side, delta_phys));
+    state.active.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Undo the growth applied by `apply_menu_space` (restore width, and shift
 /// back rightward when the growth was on the left).
 #[tauri::command]
 pub fn close_menu_space(
@@ -701,15 +796,50 @@ pub fn close_menu_space(
     if side == "left" {
         x += delta;
     }
-    window
-        .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
-            w as u32,
-            size.height,
-        )))
+    set_window_geometry(&window, x, pos.y, w as u32, size.height)
+}
+
+// ===== Separate menu window (zero-flicker approach) =====
+//
+// The pet window NEVER resizes when the menu opens. Instead, a second
+// borderless transparent window ("menu") is shown beside the pet. Because
+// the pet window doesn't resize, there's no WebView2 layout lag → zero
+// flicker on both left and right sides.
+
+/// Show the menu window at the given logical position and size, then focus it.
+/// Called by the main window's renderer after calculating which side of the
+/// pet to place the menu on.
+#[tauri::command]
+pub fn show_menu_window(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    let Some(menu_win) = app.get_webview_window("menu") else {
+        return Err("menu window not found".into());
+    };
+    menu_win
+        .set_size(tauri::Size::Logical(tauri::LogicalSize::new(w, h)))
         .map_err(|e| e.to_string())?;
-    window
-        .set_position(tauri::PhysicalPosition::new(x, pos.y))
-        .map_err(|e| e.to_string())
+    menu_win
+        .set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)))
+        .map_err(|e| e.to_string())?;
+    menu_win.show().map_err(|e| e.to_string())?;
+    menu_win.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Hide the menu window. Called when the user closes the menu (clicks an
+/// action, presses Escape, or the window loses focus).
+#[tauri::command]
+pub fn hide_menu_window(app: AppHandle) -> Result<(), String> {
+    let Some(menu_win) = app.get_webview_window("menu") else {
+        return Ok(());
+    };
+    let _ = menu_win.hide();
+    Ok(())
 }
 
 /// Replace the set of "clickable rectangles" (model bounds / status bar /

@@ -16,6 +16,47 @@ html, body {
   font-size: 13px;
 }
 
+/* Body is a flex row so the pet-container can be right-aligned (menu-left)
+ * or left-aligned (default) WITHOUT a JS transform. This matters because
+ * growing the window leftward moves its left edge; if the pet is anchored to
+ * the right edge via flex (justify-content: flex-end), the browser's layout
+ * pass — which runs SYNCHRONOUSLY inside the WM_SIZE handler when the window
+ * resizes — re-positions the pet-container in the same frame the window
+ * moves, keeping the pet at its on-screen position. A JS transform instead
+ * has to cross a ~13ms IPC gap before the window moves, painting one frame
+ * with the pet shifted → visible flicker. The only in-flow child is
+ * #pet-container (#context-menu and #edge-dock-bar are position: fixed). */
+body {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: flex-start; /* default: pet on the left (menu opens right) */
+}
+/* While a left-side menu is open, anchor the pet to the right edge so a
+ * leftward window grow keeps it in place via layout. No-op while the window
+ * is at its normal width (pet-container fills the window). */
+body.menu-left {
+  justify-content: flex-end;
+}
+
+/* ===== Menu window mode (separate window) =====
+   When the context menu is shown in its own Tauri window (zero-flicker
+   approach), the pet-container is hidden and the context-menu fills the
+   window at the top-left corner. */
+body.menu-window {
+  display: block;
+}
+body.menu-window #pet-container {
+  display: none;
+}
+body.menu-window #context-menu {
+  position: relative;
+  top: 0;
+  left: 0;
+  max-height: 100vh;
+  border-radius: 8px;
+}
+
 /* ===== Pet Container ===== */
 #pet-container {
   width: 260px;
@@ -353,6 +394,7 @@ html, body {
 
 .project-ide.ide-trae { background: rgba(100, 150, 255, 0.22); color: #9db9ff; }
 .project-ide.ide-qoder { background: rgba(186, 140, 255, 0.22); color: #cfaaff; }
+.project-ide.ide-cursor { background: rgba(80, 210, 190, 0.22); color: #8fe8d8; }
 
 .project-name {
   color: rgba(255, 255, 255, 0.85);

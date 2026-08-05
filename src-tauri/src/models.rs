@@ -8,15 +8,17 @@ use crate::user_config;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// IDE type identifier for Trae and Qoder.
+/// IDE type identifier for Trae, Qoder and Cursor.
 ///
-/// Serialized as lowercase `"trae"` / `"qoder"` (see `#[serde(rename_all)]`)
-/// so the frontend contract stays unchanged when swapping from plain strings.
+/// Serialized as lowercase `"trae"` / `"qoder"` / `"cursor"` (see
+/// `#[serde(rename_all)]`) so the frontend contract stays unchanged when
+/// swapping from plain strings.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IdeKind {
     Trae,
     Qoder,
+    Cursor,
 }
 
 impl IdeKind {
@@ -24,6 +26,7 @@ impl IdeKind {
         match self {
             IdeKind::Trae => "trae",
             IdeKind::Qoder => "qoder",
+            IdeKind::Cursor => "cursor",
         }
     }
 }

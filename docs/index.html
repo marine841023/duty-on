@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Duty On · 开工啦 — 让喜欢的角色替你盯梢 AI 编程</title>
-<meta name="description" content="开工啦 (Duty On)：让喜欢的角色替你盯梢——AI 在忙什么，一眼就知道。浮在桌面顶层的 Live2D 精灵，随心换角色，实时监控所有 Trae/Qoder IDE 里 AI 任务的状态。Tauri 2 + Rust，开源免费。">
+<meta name="description" content="开工啦 (Duty On)：让喜欢的角色替你盯梢——AI 在忙什么，一眼就知道。浮在桌面顶层的 Live2D 精灵，随心换角色，实时监控所有 Trae/Qoder/Cursor IDE 里 AI 任务的状态。Tauri 2 + Rust，开源免费。">
 <style>
   :root {
     --bg: #0f1123; --bg2: #171a35; --card: #1e2244; --line: #2c3160;
@@ -53,6 +53,15 @@
   .how { background: var(--bg2); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
   pre.arch { background: #0b0d1e; border: 1px solid var(--line); border-radius: 14px; padding: 24px; overflow-x: auto; font-size: 12.5px; line-height: 1.55; color: #b9c0ee; }
 
+  /* guide */
+  .steps { display: flex; flex-direction: column; gap: 16px; max-width: 780px; margin: 0 auto; }
+  .step { display: flex; gap: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 20px 24px; }
+  .step-num { flex: none; width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 17px; color: #fff; background: linear-gradient(135deg, var(--accent), #5a8bff); }
+  .step h4 { font-size: 17px; margin-bottom: 4px; }
+  .step p { color: var(--dim); font-size: 14px; }
+  .step strong { color: var(--fg); }
+  .guide-tip { max-width: 780px; margin: 26px auto 0; padding: 16px 22px; border: 1px dashed rgba(57,208,196,.45); border-radius: 12px; color: var(--dim); font-size: 13.5px; background: rgba(57,208,196,.05); }
+
   /* models */
   .split { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; }
   .codeblock { background: #0b0d1e; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; font-family: Consolas, monospace; font-size: 13px; color: #b9c0ee; }
@@ -76,11 +85,12 @@
       <h1>Duty On<span class="zh">开工啦 · 你的 AI 打工监督员</span></h1>
       <p class="tagline">
         让喜欢的角色替你盯梢——AI 在忙什么，一眼就知道。
-        随心换上你的本命角色，让她浮在桌面替你盯着所有 Trae / Qoder 会话：
+        随心换上你的本命角色，让她浮在桌面替你盯着所有 Trae / Qoder / Cursor 会话：
         干活、干完、还是卡在等你确认，再也不用 Alt-Tab 挨个查。
       </p>
       <div class="cta">
         <a class="btn btn-primary" href="https://github.com/marine841023/duty-on/releases">⬇ 下载 Windows 版</a>
+        <a class="btn btn-ghost" href="#guide">📖 使用指南</a>
         <a class="btn btn-ghost" href="https://github.com/marine841023/duty-on">★ GitHub 仓库</a>
       </div>
     </div>
@@ -103,11 +113,56 @@
     <p class="section-sub">多 IDE 状态监控该有的样子</p>
     <div class="grid">
       <div class="feat"><div class="ico">🧭</div><h4>聚合状态</h4><p>提醒 &gt; 忙碌 &gt; 睡觉，一个表情读懂所有 IDE 会话的整体状态。</p></div>
-      <div class="feat"><div class="ico">📋</div><h4>项目状态栏</h4><p>每个 IDE 项目独立列出，T/Q 徽章区分 Trae / Qoder，点名字直接跳到对应窗口。</p></div>
+      <div class="feat"><div class="ico">📋</div><h4>项目状态栏</h4><p>每个 IDE 项目独立列出，T/Q/C 徽章区分 Trae / Qoder / Cursor，点名字直接跳到对应窗口。</p></div>
       <div class="feat"><div class="ico">👻</div><h4>真·点击穿透</h4><p>透明无边框悬浮窗，光标只有落在小人儿和菜单上才可点，其余操作直达下层窗口。</p></div>
       <div class="feat"><div class="ico">🤏</div><h4>迷你模式</h4><p>一键缩成 130×210 的角落小伙伴，随时切回完整尺寸。</p></div>
       <div class="feat"><div class="ico">🎭</div><h4>换皮自由</h4><p>把任意 Cubism 4 模型丢进 ~/.dutyon/live2d/ 就能换形象，21 个内置动作开箱即用。</p></div>
       <div class="feat"><div class="ico">🌍</div><h4>8 种语言</h4><p>简中/繁中/英/日/韩/法/德/西，自动跟随系统语言。</p></div>
+    </div>
+  </section>
+
+  <section id="guide">
+    <h2 class="section-title">使用指南</h2>
+    <p class="section-sub">三分钟上手，关键在第 3 步：一定要安装 Hook 集成</p>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div>
+          <h4>下载安装</h4>
+          <p>到 <a href="https://github.com/marine841023/duty-on/releases">Releases</a> 下载最新版 Windows 安装包，一路下一步装完即可。</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div>
+          <h4>启动 Duty On</h4>
+          <p>开始菜单或桌面快捷方式启动，角色会出现在桌面上，默认浮在所有窗口顶层。右键她可以换形象、切迷你模式、调整位置。</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div>
+          <h4>安装 Hook 集成（必做 ⚠️）</h4>
+          <p><strong>右键角色 → 安装 Hook 集成</strong>。一键写入 Trae / Qoder / Cursor 三个 IDE 的 hook 配置，没有这一步宠物收不到任何 AI 状态。</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div>
+          <h4>重启 IDE / 开始新会话</h4>
+          <p>配置写入后，重启正在运行的 IDE（或直接开始一个新的 AI 会话）让 hook 生效。</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">5</div>
+        <div>
+          <h4>看状态</h4>
+          <p>给 AI 发一条消息：她进入<strong>忙碌 ⚡</strong>；AI 干完回到<strong>睡觉 💤</strong>；AI 卡在等你确认时<strong>提醒 🔔</strong>。项目状态栏里也能看到每个项目的实时状态。</p>
+        </div>
+      </div>
+    </div>
+    <div class="guide-tip">
+      💡 Hook 集成只在你的电脑上把 AI 会话状态发给本地宠物（127.0.0.1），不上传任何数据、不会打断 AI 工作流；卸载时在右键菜单里选择「卸载 Hook 集成」即可还原。
     </div>
   </section>
 
@@ -123,7 +178,7 @@
                    │ HTTP POST /hook (localhost)
         ┌──────────┼──────────┐
      ┌──┴───┐   ┌──┴───┐   ┌──┴───┐
-     │ Trae │   │Qoder │   │ Trae │   ← 每个 IDE 的 AI 生命周期事件
+     │ Trae │   │Qoder │   │Cursor│   ← 每个 IDE 的 AI 生命周期事件
      └──────┘   └──────┘   └──────┘     (提交/工具调用/通知/完成)</pre>
     </div>
   </section>
@@ -131,11 +186,11 @@
   <section>
     <div class="split">
       <div>
-        <h2 class="section-title" style="text-align:left">三分钟上手</h2>
-        <p style="color:var(--dim)">下载安装包 → 右键菜单「安装 Hook 集成」→ 重启 IDE。完事。</p>
+        <h2 class="section-title" style="text-align:left">从源码构建</h2>
+        <p style="color:var(--dim)">前端是纯静态文件——没有 npm、没有打包器，clone 下来直接构建。</p>
       </div>
       <div class="codeblock">
-        <span class="c"># 或者从源码构建（无需 npm）</span><br>
+        <span class="c"># 从源码构建（无需 npm）</span><br>
         git clone https://github.com/marine841023/duty-on.git<br>
         cd duty-on/src-tauri<br>
         cargo tauri build

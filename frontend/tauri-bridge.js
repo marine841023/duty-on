@@ -28,6 +28,9 @@
     // Pull-mode fetch: covers the startup gap where the first state-update
     // fires before this listener is registered (IDE opened before the pet).
     getState: () => invoke('get_state'),
+    // Manually reset all sessions to Idle (fallback when the IDE doesn't fire
+    // a Stop hook event, e.g., user aborts during the AI's thinking phase).
+    resetToIdle: () => invoke('reset_to_idle'),
 
     // ===== Hooks =====
     installHooks: () => invoke('install_hooks'),
@@ -95,12 +98,21 @@
 
     // ===== Test / window control =====
     testAlert: () => invoke('test_alert'),
+    // Frontend diagnostic log via invoke (reliable in dev, unlike fetch /log).
+    debugLog: (msg) => invoke('debug_log', { msg }),
     dragWindow: (deltaX, deltaY) => invoke('drag_window', { deltaX, deltaY }),
-    // Grow the window horizontally for the context menu. The backend picks
-    // the side by the pet's position on its monitor (left half -> right,
-    // right half -> left). Returns { side, delta }.
-    openMenuSpace: (width) => invoke('open_menu_space', { width }),
+    // Make room for the context menu beside the pet. Two-phase: calculate
+    // picks the side/delta WITHOUT moving the window (lets the renderer stage
+    // its translateX first); apply does the actual resize/shift. Splitting is
+    // required so the transform is staged before the WM_SIZE-triggered
+    // composite, otherwise the pet visibly jumps on left-side menus.
+    calculateMenuSpace: (width) => invoke('calculate_menu_space', { width }),
+    applyMenuSpace: (side, delta) => invoke('apply_menu_space', { side, delta }),
     closeMenuSpace: () => invoke('close_menu_space'),
+    // Separate menu window (zero-flicker): show/hide a second Tauri window
+    // beside the pet. The pet window never resizes → no layout lag.
+    showMenuWindow: (x, y, w, h) => invoke('show_menu_window', { x, y, w, h }),
+    hideMenuWindow: () => invoke('hide_menu_window'),
     // Click-through (Tauri has no {forward:true} mode, so the Rust polling
     // thread owns set_ignore_cursor_events; the renderer reports the clickable
     // rectangles and a force-clickable flag for drag / menu-open states).

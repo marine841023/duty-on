@@ -20,8 +20,8 @@
 Running AI agents in several IDE windows at once? Stop Alt-Tabbing to check
 whether they're still working, done, or waiting for your confirmation.
 **Duty On** is a tiny transparent Live2D character that floats above your
-desktop and shows the live status of every Trae / Qoder IDE session at a
-glance:
+desktop and shows the live status of every Trae / Qoder / Cursor IDE session
+at a glance:
 
 - 💤 **Sleeping** — everything is idle (she naps, Zzz…)
 - ⚡ **Working** — an AI task is running right now
@@ -40,8 +40,9 @@ Built with **Tauri 2 + Rust** (system WebView, no bundled Chromium):
 - **Live status at a glance** — one character reflects the aggregate state of
   all connected IDE sessions (alert > working > sleeping)
 - **Per-project status bar** — every IDE project listed under the pet with a
-  T/Q badge; click a project to focus its IDE window
-- **Multi-IDE** — monitors any number of Trae / Qoder instances concurrently
+  T/Q/C badge; click a project to focus its IDE window
+- **Multi-IDE** — monitors any number of Trae / Qoder / Cursor instances
+  concurrently
 - **True click-through** — the window is transparent to the mouse except over
   the character and menus (30 ms cursor polling, Win32/CoreGraphics/X11)
 - **Mini mode** — shrinks to a 130×210 corner buddy; toggle from the menu
@@ -98,7 +99,7 @@ on Windows), then restart your IDE or start a new AI session.
                    │ HTTP POST /hook (localhost)
         ┌──────────┼──────────┐
      ┌──┴───┐   ┌──┴───┐   ┌──┴───┐
-     │ Trae │   │Qoder │   │ Trae │
+     │ Trae │   │Qoder │   │Cursor│
      │ IDE 1│   │ IDE 2│   │ IDE 3│
      └──────┘   └──────┘   └──────┘
 ```
@@ -138,7 +139,7 @@ End-to-end regression scripts (pet must be running):
 ## Tech stack
 
 Tauri 2 · Rust (tokio, axum, serde) · PixiJS v7 · pixi-live2d-display ·
-Live2D Cubism Core · Trae/Qoder IDE hooks
+Live2D Cubism Core · Trae/Qoder/Cursor IDE hooks
 
 ## Roadmap
 

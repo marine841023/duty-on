@@ -72,12 +72,43 @@ pub const QODER_HOOK_EVENTS: &[&str] = &[
     "PermissionRequest",
 ];
 
+// Events wired into ~/.cursor/hooks.json. Cursor uses its own camelCase
+// event names and a flatter schema (event -> [{command, timeout}]); the
+// bridge normalizes them to the canonical names the state machine knows:
+//   sessionStart       -> SessionStart
+//   beforeSubmitPrompt -> UserPromptSubmit
+//   preToolUse         -> PreToolUse   \  the AskUserQuestion tool pair is
+//   postToolUse        -> PostToolUse  /  the alert signal (Qoder's trick —
+//                                        Cursor has no notification event)
+//   stop               -> Stop
+// Cursor's stdin payload carries hook_event_name in camelCase (which the
+// state machine does not match), so the installed command bakes the event
+// into the `-HookEvent` argument and the bridge overrides with the canonical
+// PascalCase name (see hooks_installer::hook_command).
+pub const CURSOR_HOOK_EVENTS: &[&str] = &[
+    "sessionStart",
+    "beforeSubmitPrompt",
+    "preToolUse",
+    "postToolUse",
+    "stop",
+];
+
 // Tools whose calls bracket a "waiting for user input" period. Qoder has no
 // Notification event, so AskUserQuestion is the alert signal there:
 // PreToolUse(AskUserQuestion) → confirmation-needed; the matching PostToolUse
 // (after the user answers) → working again. Trae fires real Notification
 // events for the same situation; both paths set ConfirmationNeeded.
-pub const ASK_USER_TOOLS: &[&str] = &["AskUserQuestion"];
+//
+// The AskQuestion variants are pre-wired for Cursor: its AskQuestion tool
+// currently fires NO hook events at all (confirmed Cursor bug, forum thread
+// "AskQuestion tool skips preToolUse and postToolUse hooks"), so these never
+// match today — but once Cursor fixes it, the alert lights up automatically.
+pub const ASK_USER_TOOLS: &[&str] = &[
+    "AskUserQuestion",
+    "AskQuestion",
+    "ask_question",
+    "askQuestion",
+];
 
 // ===== Notification classification =====
 // Used by StateManager::check_confirmation_needed.
@@ -129,3 +160,10 @@ pub const SCAN_INTERVAL_IDLE_MS: u64 = 15000;
 pub const TRAE_TITLE_SUFFIX: &str = " - Trae CN";
 // Qoder window titles look like "<file> - <project> - Qoder".
 pub const QODER_TITLE_SUFFIX: &str = " - Qoder";
+// Cursor (VS Code fork) window titles look like "<file> - <project> - Cursor".
+pub const CURSOR_TITLE_SUFFIX: &str = " - Cursor";
+// Cursor 3.x also has a standalone Agents panel window whose editor main
+// window may carry an empty title; the panel itself is the visible surface,
+// titled "Cursor Agents" (no workspace) or "<folder> - Cursor Agents".
+pub const CURSOR_AGENTS_TITLE: &str = "Cursor Agents";
+pub const CURSOR_AGENTS_TITLE_SUFFIX: &str = " - Cursor Agents";

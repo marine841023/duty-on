@@ -9,10 +9,6 @@
  * 5. Fallback canvas animation if Live2D fails
  */
 
-// Gate verbose per-frame / periodic diagnostic logging behind a flag so
-// production builds stay quiet. One-shot init logs are kept unconditionally.
-const DEBUG = false;
-
 // ===== State =====
 let pixiApp = null;
 let live2dModel = null;
@@ -175,10 +171,14 @@ async function toggleAutoLaunch() {
 
 // ===== Initialize =====
 async function init() {
-  if (window.__petSendLog) window.__petSendLog('info', '[init] start');
+  // Menu window mode: skip all Live2D/pet initialization. This window only
+  // hosts the context menu, communicating with the main pet window via Tauri
+  // events. The pet window never resizes → zero flicker on both sides.
+  if (window.__MENU_MODE__) {
+    return initMenuMode();
+  }
   // Load the UI language (persisted or OS default) before any UI text renders.
   await loadLanguage();
-  if (window.__petSendLog) window.__petSendLog('info', '[init] language loaded');
   applyTranslations();
 
   setupIPC();
@@ -195,14 +195,11 @@ async function init() {
     loadStateMotions(),
     loadAppearance(),
   ]);
-  if (window.__petSendLog) window.__petSendLog('info', '[init] model catalog loaded, currentModelUrl=' + currentModelUrl);
   buildSettingsMenu();
   updateFlipMenuCheck();
 
   // Wait for libraries to load
-  if (window.__petSendLog) window.__petSendLog('info', '[init] waiting for libs...');
   const libsReady = await waitForLibs();
-  if (window.__petSendLog) window.__petSendLog('info', '[init] libsReady=' + libsReady);
 
   if (libsReady) {
     await initLive2D();
@@ -210,7 +207,6 @@ async function init() {
 
   if (!live2dModel) {
     // Fallback to canvas animation
-    if (window.__petSendLog) window.__petSendLog('warn', '[init] no model, using fallback canvas');
     initFallbackCanvas();
     setPetState('sleeping');
   }
@@ -241,78 +237,292 @@ async function init() {
   // Check if hooks are installed + show diagnostic status
   checkHooksStatus();
 
-  // Post-init diagnostic: check rendering state after 3s to diagnose
-  // "completely transparent / can't click" issues.
-  if (DEBUG) {
-    setTimeout(() => {
-      try {
-        const canvasEl = document.querySelector('#live2d-canvas canvas');
-        const statusBar = document.getElementById('status-bar');
-        const sbStyle = statusBar ? getComputedStyle(statusBar) : null;
-        const bodyStyle = getComputedStyle(document.body);
-        const diag = [
-          'win=' + window.innerWidth + 'x' + window.innerHeight,
-          'styleSheets=' + document.styleSheets.length,
-          'body.bg=' + bodyStyle.backgroundColor,
-          'body.display=' + bodyStyle.display,
-          'sb.display=' + (sbStyle ? sbStyle.display : 'null'),
-          'sb.bg=' + (sbStyle ? sbStyle.backgroundColor : 'null'),
-          'sb.vis=' + (sbStyle ? sbStyle.visibility : 'null'),
-          'sb.opacity=' + (sbStyle ? sbStyle.opacity : 'null'),
-          'canvas=' + (canvasEl ? canvasEl.width + 'x' + canvasEl.height : 'NOT FOUND'),
-          'canvas.parent=' + (canvasEl ? (canvasEl.parentElement ? canvasEl.parentElement.id : 'no parent') : 'N/A'),
-          'stage.children=' + (pixiApp ? pixiApp.stage.children.length : 'no pixiApp'),
-          'model=' + (live2dModel ? 'exists' : 'null'),
-        ];
-        if (live2dModel) {
-          try {
-            const b = live2dModel.getBounds();
-            diag.push('model.bounds=' + b.x + ',' + b.y + ',' + b.width + 'x' + b.height);
-            diag.push('model.scale=' + live2dModel.scale.x + ',' + live2dModel.scale.y);
-            diag.push('model.pos=' + live2dModel.x + ',' + live2dModel.y);
-            diag.push('model.visible=' + live2dModel.visible);
-            diag.push('model.alpha=' + live2dModel.alpha);
-          } catch (e) { diag.push('model.err=' + e.message); }
-        }
-        if (pixiApp) {
-          diag.push('pixi.running=' + pixiApp.ticker.started);
-          diag.push('pixi.FPS=' + Math.round(pixiApp.ticker.FPS));
-        }
-        diag.push('visState=' + document.visibilityState);
-        diag.push('hasFocus=' + document.hasFocus());
-        if (window.__petSendLog) window.__petSendLog('info', '[diag] ' + diag.join(' | '));
-      } catch (e) {
-        if (window.__petSendLog) window.__petSendLog('error', '[diag] error: ' + e.message);
-      }
-    }, 3000);
-  }
-
   // Health check: detect if backend HTTP server is down (e.g. port 17521
   // occupied). The app window still shows but the pet stays "sleeping"
-  // forever — this probes /health and surfaces a localized warning after 2
-  // consecutive failures, auto-clearing on recovery.
+  // forever — this probes /health and surfaces a localized warning after 3
+  // consecutive failures (with retry), auto-clearing on recovery.
   let healthFailCount = 0;
   setTimeout(() => {
     setInterval(async () => {
+      // Fetch with a 5s timeout and one immediate retry. Without the timeout
+      // a hung connection (rare but possible on Windows loopback) would block
+      // the interval indefinitely; the retry absorbs transient blips so they
+      // don't inflate the failure counter.
+      const probe = async () => {
+        const controller = new AbortController();
+        const tid = setTimeout(() => controller.abort(), 5000);
+        try {
+          const resp = await fetch('http://127.0.0.1:17521/health', { signal: controller.signal });
+          clearTimeout(tid);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        } finally {
+          clearTimeout(tid);
+        }
+      };
       try {
-        const resp = await fetch('http://127.0.0.1:17521/health');
-        if (resp.ok) {
-          if (healthFailCount > 0) {
-            healthFailCount = 0;
-            updateStateUI(currentState);
-          }
-        } else {
-          throw new Error(`HTTP ${resp.status}`);
+        try { await probe(); }
+        catch (firstErr) { await probe(); /* retry once */ }
+        if (healthFailCount > 0) {
+          healthFailCount = 0;
+          updateStateUI(currentState);
         }
       } catch (e) {
         healthFailCount++;
-        if (healthFailCount >= 2) {
+        if (healthFailCount >= 3) {
           const el = document.getElementById('pet-state-text');
           if (el) el.textContent = i18n.t('status.serverDown');
         }
       }
     }, 30000);
   }, 5000);
+}
+
+// ===== Menu window mode =====
+// This runs in the separate menu Tauri window (zero-flicker approach). The
+// menu window loads the same index.html with window.__MENU_MODE__ = true
+// (injected by Rust's initialization_script). It skips all Live2D/pet init
+// and only hosts the context menu, communicating with the main pet window
+// via Tauri events.
+
+/**
+ * Initialize the menu window: load i18n, fetch menu data from Tauri commands,
+ * set up event listeners that forward actions to the main window, and listen
+ * for live data updates (motion groups, etc.) from the main window.
+ */
+async function initMenuMode() {
+  const { emit } = window.__TAURI__.event;
+
+  // ---- Helpers (must be defined before build function overrides) ----
+  const sendAction = (action, params) => {
+    emit('menu-action', { action, params: params || {} });
+  };
+  const closeSelf = () => {
+    emit('menu-close', {});
+    if (window.petAPI && window.petAPI.hideMenuWindow) window.petAPI.hideMenuWindow();
+  };
+
+  // ---- Override build functions BEFORE applyTranslations/data loading ----
+  // applyTranslations() and loadModelCatalog() call buildModelMenu /
+  // buildLanguageMenu / buildMotionMenu / buildSettingsMenu. The overrides
+  // must be in place first so these calls produce items with menu-window
+  // event handlers (emit to main) instead of main-window handlers.
+
+  buildLanguageMenu = function () {
+    const container = document.getElementById('language-list');
+    if (!container) return;
+    container.innerHTML = '';
+    for (const lang of i18n.getLanguages()) {
+      const item = document.createElement('div');
+      item.className = 'menu-item';
+      item.textContent = lang.name;
+      if (lang.code === i18n.currentLanguage) item.classList.add('active');
+      item.addEventListener('click', () => {
+        if (lang.code === i18n.currentLanguage) return;
+        i18n.setLanguage(lang.code);
+        if (window.petAPI && window.petAPI.setLanguage) window.petAPI.setLanguage(lang.code);
+        applyTranslations();
+        sendAction('switchLanguage', { lang: lang.code });
+      });
+      container.appendChild(item);
+    }
+  };
+
+  buildModelMenu = function () {
+    const container = document.getElementById('model-list');
+    if (!container) return;
+    container.innerHTML = '';
+    for (const model of availableModels) {
+      const item = document.createElement('div');
+      item.className = 'menu-item';
+      item.dataset.url = model.url;
+      item.textContent = model.name;
+      if (model.url === currentModelUrl) item.classList.add('active');
+      item.addEventListener('click', () => {
+        if (model.url === currentModelUrl) return;
+        currentModelUrl = model.url;
+        container.querySelectorAll('.menu-item').forEach((el) => el.classList.remove('active'));
+        item.classList.add('active');
+        sendAction('switchModel', { url: model.url });
+        closeSelf();
+      });
+      container.appendChild(item);
+    }
+  };
+
+  buildMotionMenu = function (mode, targetState) {
+    const container = document.getElementById('motion-list');
+    if (!container) return;
+    container.innerHTML = '';
+    const label = document.getElementById('motion-view-label');
+    if (label) {
+      label.textContent = mode === 'assign'
+        ? i18n.t('menu.actionSettings') + ' → ' + i18n.t('settings.' + targetState)
+        : i18n.t('menu.playMotion');
+    }
+    if (!currentMotionGroups || currentMotionGroups.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'menu-item';
+      empty.style.color = 'rgba(255,255,255,0.35)';
+      empty.style.fontStyle = 'italic';
+      empty.textContent = i18n.t('menu.noMotions') || '(no motions)';
+      container.appendChild(empty);
+      return;
+    }
+    for (const [name, count] of currentMotionGroups) {
+      for (let i = 0; i < count; i++) {
+        const item = document.createElement('div');
+        item.className = 'menu-item';
+        item.textContent = count > 1 ? name + ' #' + (i + 1) : name;
+        item.addEventListener('mouseenter', () => {
+          sendAction('previewMotion', { group: name, idx: i });
+        });
+        item.addEventListener('mouseleave', () => {
+          sendAction('stopPreview', {});
+        });
+        item.addEventListener('click', () => {
+          if (mode === 'assign') {
+            sendAction('assignMotion', { state: targetState, group: name, idx: i });
+            showView('menu-settings-view');
+          } else {
+            sendAction('playMotion', { group: name, idx: i });
+            closeSelf();
+          }
+        });
+        container.appendChild(item);
+      }
+    }
+  };
+
+  // ---- Load language + apply translations (uses overridden build funcs) ----
+  await loadLanguage();
+  applyTranslations();
+
+  // ---- Mark body as menu-window + show context menu ----
+  document.body.classList.add('menu-window');
+  document.getElementById('context-menu').classList.remove('hidden');
+
+  // ---- Load data from Tauri commands ----
+  await Promise.all([
+    loadModelCatalog(),
+    loadStateMotions(),
+    loadAppearance(),
+  ]);
+  loadAutoLaunchState();
+
+  // ---- Listen for live data from the main window ----
+  window.__TAURI__.event.listen('menu-data', (e) => {
+    const data = e.payload || {};
+    if (data.motions) currentMotionGroups = data.motions;
+    if (data.flipHorizontal !== undefined) {
+      flipHorizontal = data.flipHorizontal;
+      updateFlipMenuCheck();
+    }
+    if (data.miniMode !== undefined) {
+      miniMode = data.miniMode;
+      const item = document.getElementById('menu-mini-mode');
+      if (item) item.classList.toggle('active', miniMode);
+    }
+    if (data.hooksInstalled !== undefined) {
+      hooksInstalled = data.hooksInstalled;
+    }
+    if (data.hookStatusHint !== undefined) {
+      const el = document.getElementById('hook-status-hint');
+      if (el) el.textContent = data.hookStatusHint;
+    }
+    if (data.currentState) {
+      currentState = data.currentState;
+    }
+    if (data.sessions) {
+      currentSnapshot = { overallState: currentState, sessions: data.sessions };
+    }
+    buildMotionMenu(motionPickerMode, motionPickerTarget);
+    buildSettingsMenu();
+  });
+
+  // ---- Static event listeners (submenu navigation + actions) ----
+  document.getElementById('menu-models-trigger').addEventListener('click', () => {
+    showView('menu-model-view');
+  });
+  document.getElementById('menu-play-motion').addEventListener('click', () => {
+    openMotionView('play');
+  });
+  document.getElementById('menu-settings-trigger').addEventListener('click', () => {
+    buildSettingsMenu();
+    showView('menu-settings-view');
+  });
+  document.getElementById('settings-sleeping').addEventListener('click', () => {
+    openMotionView('assign', 'sleeping');
+  });
+  document.getElementById('settings-working').addEventListener('click', () => {
+    openMotionView('assign', 'working');
+  });
+  document.getElementById('settings-alert').addEventListener('click', () => {
+    openMotionView('assign', 'alert');
+  });
+  document.getElementById('menu-language-trigger').addEventListener('click', () => {
+    showView('menu-language-view');
+  });
+  document.getElementById('menu-language-back').addEventListener('click', () => {
+    showView('menu-main-view');
+  });
+  document.getElementById('menu-model-back').addEventListener('click', () => {
+    showView('menu-main-view');
+  });
+  document.getElementById('menu-motion-back').addEventListener('click', () => {
+    showView(motionPickerMode === 'assign' ? 'menu-settings-view' : 'menu-main-view');
+  });
+  document.getElementById('menu-settings-back').addEventListener('click', () => {
+    showView('menu-main-view');
+  });
+
+  // Toggle actions (optimistic update + emit to main)
+  document.getElementById('menu-flip').addEventListener('click', () => {
+    flipHorizontal = !flipHorizontal;
+    updateFlipMenuCheck();
+    sendAction('toggleFlip');
+  });
+  document.getElementById('menu-mini-mode').addEventListener('click', () => {
+    miniMode = !miniMode;
+    document.getElementById('menu-mini-mode').classList.toggle('active', miniMode);
+    sendAction('toggleMiniMode');
+  });
+  document.getElementById('menu-auto-launch').addEventListener('click', () => {
+    const item = document.getElementById('menu-auto-launch');
+    const newState = !item.classList.contains('active');
+    item.classList.toggle('active', newState);
+    sendAction('toggleAutoLaunch');
+  });
+
+  // Actions that close the menu
+  document.getElementById('menu-upload-live2d').addEventListener('click', () => {
+    closeSelf();
+    if (window.petAPI && window.petAPI.openLive2DFolder) {
+      Promise.resolve(window.petAPI.openLive2DFolder()).catch(() => {});
+    }
+  });
+  document.getElementById('menu-test-alert').addEventListener('click', () => {
+    closeSelf();
+    sendAction('testAlert');
+  });
+  document.getElementById('menu-install-hooks').addEventListener('click', () => {
+    closeSelf();
+    sendAction('installHooks');
+  });
+  document.getElementById('menu-hook-status').addEventListener('click', () => {
+    closeSelf();
+    sendAction('showHookStatus');
+  });
+  document.getElementById('menu-quit').addEventListener('click', () => {
+    if (window.petAPI) window.petAPI.quit();
+  });
+
+  // Escape closes the menu
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeSelf();
+    }
+  });
 }
 
 /**
@@ -330,7 +540,6 @@ async function loadModelCatalog() {
     let url = saved || (availableModels[0] && availableModels[0].url) || null;
     if (url && url.startsWith('../../')) {
       url = url.replace(/^(\.\.\/)+/, '');
-      if (window.__petSendLog) window.__petSendLog('info', '[models] normalized URL: ' + saved + ' → ' + url);
       // Persist the corrected URL so it doesn't re-trigger every launch.
       if (window.petAPI.switchModel) window.petAPI.switchModel(url);
     }
@@ -378,18 +587,11 @@ function updateModelMenuActive(url) {
  */
 function waitForLibs() {
   return new Promise((resolve) => {
-    window.addEventListener('libs-ready', () => {
-      if (window.__petSendLog) window.__petSendLog('info', '[waitForLibs] libs-ready event');
-      resolve(true);
-    }, { once: true });
-    window.addEventListener('libs-failed', () => {
-      if (window.__petSendLog) window.__petSendLog('warn', '[waitForLibs] libs-failed event');
-      resolve(false);
-    }, { once: true });
+    window.addEventListener('libs-ready', () => resolve(true), { once: true });
+    window.addEventListener('libs-failed', () => resolve(false), { once: true });
 
     // If already loaded (script finished before listener attached)
     if (window.PIXI && window.PIXI.live2d) {
-      if (window.__petSendLog) window.__petSendLog('info', '[waitForLibs] already loaded');
       resolve(true);
     }
   });
@@ -402,14 +604,10 @@ function waitForLibs() {
  */
 async function initLive2D() {
   try {
-    if (window.__petSendLog) window.__petSendLog('info', '[live2d] init start');
     initPixiApp();
-    if (window.__petSendLog) window.__petSendLog('info', '[live2d] pixi app created');
     await loadInitialModel();
-    if (window.__petSendLog) window.__petSendLog('info', '[live2d] init done, model=' + (live2dModel ? 'loaded' : 'null'));
   } catch (err) {
     if (window.__petSendLog) window.__petSendLog('error', '[live2d] init FAILED: ' + (err && err.message ? err.message : err));
-    console.error('[Live2D] Initialization failed:', err);
     live2dModel = null;
   }
 }
@@ -445,23 +643,6 @@ function initPixiApp() {
   // network bandwidth). No focus/blur switching needed.
   pixiApp.ticker.maxFPS = 24;
 
-  // FPS monitor: log average FPS once per second so we can diagnose lag.
-  // Output goes to the webview console (devtools is opened in debug builds).
-  if (DEBUG) {
-    let fpsFrames = 0;
-    let fpsLast = performance.now();
-    pixiApp.ticker.add(() => {
-      fpsFrames++;
-      const now = performance.now();
-      if (now - fpsLast >= 1000) {
-        const fps = Math.round((fpsFrames * 1000) / (now - fpsLast));
-        console.log(`[FPS] ${fps} fps | focused=${document.hasFocus()} | maxFPS=${pixiApp.ticker.maxFPS}`);
-        fpsFrames = 0;
-        fpsLast = now;
-      }
-    });
-  }
-
   // Register the click-through region reporter now that pixiApp exists (it
   // registers a PixiJS ticker callback). The _done guard makes re-entry safe.
   setupClickThrough();
@@ -485,8 +666,6 @@ async function loadInitialModel() {
     if (seen.has(url)) continue;
     seen.add(url);
     try {
-      if (window.__petSendLog) window.__petSendLog('info', '[live2d] trying model: ' + url);
-      console.log('[Live2D] Trying model:', url);
       live2dModel = await Live2DModel.from(url);
       currentModelUrl = url;
       attachModel(live2dModel);
@@ -494,12 +673,9 @@ async function loadInitialModel() {
       // no-op — kick off the state motion directly.
       oneShotPlaying = false;
       playStateMotion(MOTION_PRIORITY_FORCE);
-      if (window.__petSendLog) window.__petSendLog('info', '[live2d] model loaded OK: ' + url);
-      console.log('[Live2D] Model loaded successfully:', url);
       return;
     } catch (err) {
       if (window.__petSendLog) window.__petSendLog('warn', '[live2d] model FAIL ' + url + ': ' + (err && err.message ? err.message : err));
-      console.warn('[Live2D] Failed to load from:', url, err.message);
     }
   }
   live2dModel = null;
@@ -700,9 +876,6 @@ function refineContentFit(model, content) {
   model.scale.set(scale);
   model.x = pixiApp.screen.width / 2;
   model.y = pixiApp.screen.height + bottomOffset * scale;
-  if (window.__petSendLog) {
-    window.__petSendLog('info', `[live2d] content fit ${Math.round(content.width)}x${Math.round(content.height)} canvas ${Math.round(model.width)}x${Math.round(model.height)} scale=${scale.toFixed(4)}`);
-  }
 }
 
 /**
@@ -741,11 +914,6 @@ function updateHeadEffectAnchor() {
     inset = Math.min(Math.max(b.height * 0.2, 16), 48);
   }
   const topY = b.y + inset;
-  if (updateHeadEffectAnchor._logAt === undefined || performance.now() - updateHeadEffectAnchor._logAt > 5000) {
-    updateHeadEffectAnchor._logAt = performance.now();
-    if (window.__petSendLog) window.__petSendLog('info',
-      `[headfx] bounds=${Math.round(b.width)}x${Math.round(b.height)} aspect=${aspect.toFixed(2)} inset=${inset.toFixed(1)} scale=${(updateHeadEffectAnchor._k || 1).toFixed(2)}`);
-  }
   // Effect scale: 1.0 at the reference height a typical bundled model renders
   // at (240×260 canvas × 0.72 fit ≈ 190px bounds). Smoothed to avoid jitter
   // as the bounds breathe with animation.
@@ -835,8 +1003,6 @@ async function switchModel(url) {
   }
 
   try {
-    if (window.__petSendLog) window.__petSendLog('info', '[live2d] switching to: ' + url);
-    console.log('[Live2D] Switching to:', url);
     live2dModel = await Live2DModel.from(url);
     currentModelUrl = url;
     attachModel(live2dModel);
@@ -848,7 +1014,6 @@ async function switchModel(url) {
     if (window.petAPI && window.petAPI.switchModel) {
       window.petAPI.switchModel(url);
     }
-    console.log('[Live2D] Switched successfully:', url);
   } catch (err) {
     const errMsg = (err && err.message) ? err.message : String(err);
     const errFrame = (err && err.stack) ? err.stack.split('\n').slice(0, 3).join(' <- ') : '';
@@ -862,7 +1027,6 @@ async function switchModel(url) {
     } catch (probeErr) {
       if (window.__petSendLog) window.__petSendLog('error', '[live2d] probe threw: ' + ((probeErr && probeErr.message) || probeErr));
     }
-    console.error('[Live2D] Switch failed, falling back:', err.message);
     // Restore the previous model if the new one failed to load
     await loadInitialModel();
     stateText.textContent = i18n.t('model.switchFailed');
@@ -938,10 +1102,6 @@ function refreshMotionGroups() {
     if (Array.isArray(arr) && arr.length > 0) {
       currentMotionGroups.push([name, arr.length]);
     }
-  }
-  if (window.__petSendLog) {
-    window.__petSendLog('info', '[motions] model groups: ' +
-      (currentMotionGroups.map(([n, c]) => `${n}(${c})`).join(', ') || '(none)'));
   }
 }
 
@@ -1116,8 +1276,10 @@ function playRandomOneShot() {
  * - mode 'play'   : hovering (or clicking) an item loops that motion as a
  *                   live preview; the menu stays open — only the back button
  *                   or clicking outside closes it.
- * - mode 'assign' : clicking a motion assigns it to `targetState` and returns
- *                   to the 动作设定 view; the current choice is checkmarked.
+ * - mode 'assign' : hovering an item loops it as a live preview (so the user
+ *                   can see the motion before committing); clicking assigns
+ *                   it to `targetState` and returns to the 动作设定 view. The
+ *                   current choice is checkmarked.
  */
 function buildMotionMenu(mode = 'play', targetState = null) {
   const container = document.getElementById('motion-list');
@@ -1135,15 +1297,19 @@ function buildMotionMenu(mode = 'play', targetState = null) {
       if (resolvedCurrent && resolvedCurrent[0] === group && resolvedCurrent[1] === idx) {
         item.classList.add('active');
       }
+      // Both modes share the hover preview: moving the cursor onto an item
+      // instantly loops that motion (see startMotionPreview / motionFinish).
+      item.addEventListener('mouseenter', () => startMotionPreview(group, idx));
       if (mode === 'assign' && targetState) {
+        // Click commits the assignment and returns to the 动作设定 view
+        // (showView stops the preview and resumes the state motion).
         item.addEventListener('click', () => {
           assignStateMotion(targetState, group, idx);
           showView('menu-settings-view');
         });
       } else {
-        // Hover = instant looping preview; clicking does the same and does
-        // NOT close the menu — only the back button or clicking outside does.
-        item.addEventListener('mouseenter', () => startMotionPreview(group, idx));
+        // Play mode: clicking just keeps the preview looping — only the back
+        // button or clicking outside closes the menu.
         item.addEventListener('click', () => startMotionPreview(group, idx));
       }
       container.appendChild(item);
@@ -1232,9 +1398,6 @@ function applyStateMotionsForModel(modelUrl) {
     }
   }
   STATE_MOTIONS = next;
-  if (window.__petSendLog) {
-    window.__petSendLog('info', `[motions] applied per-model settings for ${modelUrl} (${saved ? 'saved' : 'defaults'})`);
-  }
 }
 
 /**
@@ -1368,10 +1531,9 @@ function applyMiniMode(enabled, resizeWindow = true) {
     Promise.resolve(window.petAPI.setMiniMode(enabled)).catch((e) => {
       console.warn('[mini] Failed to resize window:', e && e.message);
     });
-    // If the menu is open, the mini-mode resize invalidated the grown space —
-    // re-grow it on the new base width for the new pet size.
-    if (menuSpaceInfo !== null) {
-      menuSpaceInfo = null;
+    // If the menu window is open, re-position it for the new pet size.
+    if (menuWindowOpen) {
+      closeMenu();
       positionMenu();
     }
   }
@@ -1475,7 +1637,6 @@ function initFallbackCanvas() {
   }
 
   drawFallback();
-  console.log('[Fallback] Canvas animation started');
 }
 
 function getStateColor(state) {
@@ -1485,7 +1646,6 @@ function getStateColor(state) {
 // ===== State Management =====
 function setPetState(state) {
   if (currentState === state) return;
-  console.log('[State] Transition:', currentState, '→', state);
   currentState = state;
 
   // Cancel any in-flight one-shot and immediately play the new state's motion
@@ -1558,7 +1718,7 @@ function updateStatusBar(snapshot) {
     // instead of letting the long alert text squeeze it out.
     name.className = 'project-name' + (session.status === 'confirmation-needed' ? ' alert' : '');
     name.textContent = session.projectName;
-    const ideName = session.ide === 'qoder' ? 'Qoder' : session.ide === 'trae' ? 'Trae CN' : '';
+    const ideName = session.ide === 'qoder' ? 'Qoder' : session.ide === 'trae' ? 'Trae CN' : session.ide === 'cursor' ? 'Cursor' : '';
     name.title = (ideName ? `[${ideName}] ` : '') + (session.projectPath || session.projectName);
 
     const statusText = document.createElement('div');
@@ -1577,12 +1737,13 @@ function updateStatusBar(snapshot) {
 
     item.appendChild(dot);
 
-    // IDE badge (T = Trae, Q = Qoder) when the source IDE is known.
+    // IDE badge (T = Trae, Q = Qoder, C = Cursor) when the source IDE is known.
     if (session.ide) {
       const ide = document.createElement('div');
       ide.className = `project-ide ide-${session.ide}`;
-      ide.textContent = session.ide === 'qoder' ? 'Q' : 'T';
-      ide.title = session.ide === 'qoder' ? 'Qoder' : 'Trae CN';
+      const ideLabel = session.ide === 'qoder' ? 'Qoder' : session.ide === 'cursor' ? 'Cursor' : 'Trae CN';
+      ide.textContent = ideLabel.charAt(0);
+      ide.title = ideLabel;
       item.appendChild(ide);
     }
 
@@ -1626,9 +1787,6 @@ function setupIPC() {
   // locally: forget the grown space and close the menu if it was open.
   if (window.petAPI && window.petAPI.onDisplayChanged) {
     window.petAPI.onDisplayChanged(() => {
-      menuSpaceInfo = null;
-      const petContainer = document.getElementById('pet-container');
-      if (petContainer) petContainer.style.marginLeft = '';
       closeMenu();
     });
   }
@@ -1638,6 +1796,73 @@ function setupIPC() {
     setPetState('alert');
     // Flash window attention
     flashWindowAttention();
+  });
+
+  // ===== Menu window event handlers =====
+  // The separate menu window sends actions here for the main window to
+  // process (play motion on the pet, toggle settings, etc.).
+  const { listen } = window.__TAURI__.event;
+  listen('menu-action', (e) => {
+    const { action, params } = e.payload || {};
+    switch (action) {
+      case 'toggleFlip': toggleFlip(); break;
+      case 'toggleMiniMode': toggleMiniMode(); break;
+      case 'toggleAutoLaunch': toggleAutoLaunch(); break;
+      case 'switchModel':
+        if (params && params.url && window.petAPI && window.petAPI.switchModel) {
+          window.petAPI.switchModel(params.url);
+        }
+        break;
+      case 'switchLanguage':
+        // Already persisted by the menu window; just re-apply translations.
+        applyTranslations();
+        break;
+      case 'playMotion':
+        if (params) playMotionOnce(params.group, params.idx);
+        break;
+      case 'previewMotion':
+        if (params) startMotionPreview(params.group, params.idx);
+        break;
+      case 'stopPreview': stopMotionPreview(); break;
+      case 'assignMotion':
+        if (params) assignStateMotion(params.state, params.group, params.idx);
+        break;
+      case 'testAlert':
+        if (window.petAPI && window.petAPI.testAlert) window.petAPI.testAlert();
+        break;
+      case 'installHooks':
+        (async () => {
+          const before = await window.petAPI.isHooksInstalled();
+          const result = await window.petAPI.installHooks();
+          if (result.success) {
+            showInstallResult(true, result, !!(before && before.installed));
+            checkHooksStatus();
+          } else {
+            showInstallResult(false, result);
+          }
+        })();
+        break;
+      case 'showHookStatus':
+        (async () => {
+          const status = await window.petAPI.isHooksInstalled();
+          showHookStatusDialog(status);
+        })();
+        break;
+      default:
+        console.warn('[menu] Unknown action from menu window:', action);
+    }
+  });
+
+  // Menu window closed by user (Escape, back button, or action that closes)
+  listen('menu-close', () => {
+    closeMenu();
+  });
+
+  // Menu window lost focus (Rust blur handler emitted this)
+  listen('menu-closed', () => {
+    menuWindowOpen = false;
+    if (window.petAPI && window.petAPI.setForceClickable) window.petAPI.setForceClickable(false);
+    showView('menu-main-view');
   });
 }
 
@@ -1650,9 +1875,10 @@ function flashWindowAttention() {
 }
 
 // ===== Context Menu =====
-// Result of openMenuSpace ({ side, delta }) while the menu is open; null =
-// the window is at its normal width.
-let menuSpaceInfo = null;
+// Whether the separate menu window is currently open. Used by setupContextMenu
+// to toggle the menu on ☰ click (the main window's context-menu element is
+// always hidden now — the menu lives in its own Tauri window).
+let menuWindowOpen = false;
 // Menu width (210 CSS) plus a small gap — the horizontal space to grow.
 const MENU_SIDE_WIDTH = 218;
 
@@ -1665,7 +1891,7 @@ function statusBarBottom() {
 /**
  * Fallback menu side when the backend grow fails: pet on the left half of
  * the screen -> open rightward, and vice versa. Normally the backend picks
- * the side itself (open_menu_space) using exact monitor geometry.
+ * the side itself (calculate_menu_space) using exact monitor geometry.
  */
 function fallbackMenuSide() {
   const winCenterX = (window.screenX ?? 0) + window.innerWidth / 2;
@@ -1674,57 +1900,71 @@ function fallbackMenuSide() {
 }
 
 /**
- * Position the menu BESIDE the character — on the side chosen by the pet's
- * position on its monitor (backend decision) — spanning the full content
- * height (from the top of the character down to the bottom of the IDE
- * project list). The window grows horizontally first (restored in
- * closeMenu); when growing leftward the content is shifted right by the same
- * amount so the pet never moves on screen.
+ * Open the context menu in a SEPARATE Tauri window. The pet window never
+ * resizes — the menu window is shown beside it (left or right depending on
+ * which half of the monitor the pet is on). Because the pet window's geometry
+ * is unchanged, there's zero WebView2 layout lag → zero flicker on BOTH
+ * sides. The menu window loads the same index.html with __MENU_MODE__=true
+ * and communicates with the main window via Tauri events.
  */
 async function positionMenu() {
-  const contextMenu = document.getElementById('context-menu');
-  const petContainer = document.getElementById('pet-container');
-  contextMenu.classList.remove('hidden');
-  // Menu open: keep the whole window clickable so menu items stay interactive
-  // and click-outside can close (the ticker also reports the menu rect, but
-  // force-clickable covers the gap before the next ticker fire / on submenu
-  // resize). Cleared in closeMenu().
-  if (window.petAPI && window.petAPI.setForceClickable) window.petAPI.setForceClickable(true);
-  // Grow the window on the side the backend picks from the pet's screen
-  // position (skipped when already grown).
-  if (!menuSpaceInfo && window.petAPI && window.petAPI.openMenuSpace) {
+  // Determine which side of the monitor the pet is on.
+  let side = 'right';
+  if (window.petAPI && window.petAPI.calculateMenuSpace) {
     try {
-      menuSpaceInfo = await window.petAPI.openMenuSpace(MENU_SIDE_WIDTH);
+      const info = await window.petAPI.calculateMenuSpace(MENU_SIDE_WIDTH);
+      side = info.side;
     } catch (e) {
-      console.warn('[menu] Failed to grow window:', e && e.message);
-      menuSpaceInfo = null;
+      side = fallbackMenuSide();
+    }
+  } else {
+    side = fallbackMenuSide();
+  }
+
+  // Calculate the menu window position in screen coordinates (CSS px).
+  const petX = window.screenLeft ?? window.screenX;
+  const petY = window.screenTop ?? window.screenY;
+  const petW = window.innerWidth;
+  const petH = window.innerHeight;
+  const menuW = 230;
+  const menuH = Math.min(petH, 500);
+  const menuX = side === 'right'
+    ? petX + petW + 4
+    : petX - menuW - 4;
+
+  if (window.petAPI && window.petAPI.setForceClickable) window.petAPI.setForceClickable(true);
+
+  // Show the menu window at the calculated position.
+  if (window.petAPI && window.petAPI.showMenuWindow) {
+    try {
+      await window.petAPI.showMenuWindow(menuX, petY, menuW, menuH);
+      menuWindowOpen = true;
+    } catch (e) {
+      console.warn('[menu] Failed to show menu window:', e && e.message);
     }
   }
-  // Let the webview lay out the new window size before measuring.
-  await new Promise((r) => requestAnimationFrame(r));
-  const side = menuSpaceInfo ? menuSpaceInfo.side : fallbackMenuSide();
-  const delta = menuSpaceInfo ? menuSpaceInfo.delta : 0;
-  // Growing leftward shifted the window left; slide the content right by the
-  // same amount so the pet stays exactly where it was on screen.
-  petContainer.style.marginLeft = side === 'left' ? delta + 'px' : '';
-  // Full content height: character top (window top) down to the IDE list bottom.
-  contextMenu.style.top = '2px';
-  contextMenu.style.height = Math.max(120, statusBarBottom() - 6) + 'px';
-  contextMenu.style.maxHeight = '';
-  const menuWidth = contextMenu.offsetWidth || 210;
-  contextMenu.style.left = side === 'right'
-    ? petContainer.offsetWidth + 4 + 'px'
-    : Math.max(2, delta - menuWidth - 4) + 'px';
+
+  // Send live data to the menu window so it can populate dynamic items.
+  const { emit } = window.__TAURI__.event;
+  emit('menu-data', {
+    motions: currentMotionGroups,
+    flipHorizontal: flipHorizontal,
+    miniMode: miniMode,
+    hooksInstalled: hooksInstalled,
+    hookStatusHint: (document.getElementById('hook-status-hint') || {}).textContent || '',
+    currentState: currentState,
+    sessions: (currentSnapshot && currentSnapshot.sessions) || [],
+  });
 }
 
 /**
  * Re-clamp the menu after the content changed (project list update while the
- * menu is open): only the height follows the status bar's bottom edge.
+ * menu is open). No-op for the separate menu window approach — the menu
+ * window handles its own sizing.
  */
 function repositionMenu() {
-  const contextMenu = document.getElementById('context-menu');
-  if (contextMenu.classList.contains('hidden')) return;
-  contextMenu.style.height = Math.max(120, statusBarBottom() - 6) + 'px';
+  // No-op: the menu window is sized by show_menu_window and doesn't need
+  // re-clamping when the main window's content changes.
 }
 
 /**
@@ -1736,37 +1976,28 @@ function showView(viewId) {
   }
   // Leaving the motion list ends the hover preview loop.
   if (viewId !== 'menu-motion-view') stopMotionPreview();
-  repositionMenu();
 }
 
-/** Hide the menu and reset it to the main view for the next open. */
+/** Hide the menu window and reset menu state. */
 function closeMenu() {
+  if (!menuWindowOpen) return;
+  menuWindowOpen = false;
   if (window.petAPI && window.petAPI.setForceClickable) window.petAPI.setForceClickable(false);
-  document.getElementById('context-menu').classList.add('hidden');
   showView('menu-main-view');
-  // Shrink the window back to its normal width (and drop the content offset).
-  if (menuSpaceInfo) {
-    menuSpaceInfo = null;
-    const petContainer = document.getElementById('pet-container');
-    if (petContainer) petContainer.style.marginLeft = '';
-    if (window.petAPI && window.petAPI.closeMenuSpace) {
-      window.petAPI.closeMenuSpace().catch((e) =>
-        console.warn('[menu] Failed to restore window:', e && e.message)
-      );
-    }
+  if (window.petAPI && window.petAPI.hideMenuWindow) {
+    window.petAPI.hideMenuWindow().catch(() => {});
   }
 }
 
 function setupContextMenu() {
   const menuBtn = document.getElementById('menu-btn');
-  const contextMenu = document.getElementById('context-menu');
 
   // Toggle open/close on ☰ click. Clicking the button doesn't bubble to the
   // document (stopPropagation), so without a toggle a second click would just
   // reposition the already-open menu.
   menuBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (!contextMenu.classList.contains('hidden')) {
+    if (menuWindowOpen) {
       closeMenu();
       return;
     }
@@ -1774,17 +2005,13 @@ function setupContextMenu() {
     positionMenu();
   });
 
-  // Right-click on the pet (model or status bar) opens the same menu. The
-  // menu always anchors to the ☰ button (it opens upward), so the position
-  // is stable regardless of where the user right-clicked.
+  // Right-click on the pet (model or status bar) opens the same menu.
   document.addEventListener('contextmenu', (e) => {
     // Always suppress the native webview context menu — this window is a pet,
     // not a page.
     e.preventDefault();
-    if (!contextMenu.classList.contains('hidden')) {
-      // Menu already open: right-click toggles it closed (unless the click
-      // landed inside the menu itself — right-clicking items stays a no-op).
-      if (!contextMenu.contains(e.target)) closeMenu();
+    if (menuWindowOpen) {
+      closeMenu();
       return;
     }
     const onModel = e.target.closest('#canvas-wrapper') && isPointOnModel(e.clientX, e.clientY);
@@ -1794,19 +2021,14 @@ function setupContextMenu() {
     positionMenu();
   });
 
-  // Clicking anywhere outside the menu (blank space) closes it.
+  // Clicking anywhere on the pet window closes the menu (the menu window
+  // also loses focus, which triggers Rust's blur handler).
   document.addEventListener('click', () => {
     closeMenu();
   });
 
-  // Window losing focus (user clicked another app) also closes the menu —
-  // the transparent pet window is small and can't receive click events from
-  // outside its bounds, so the document click handler above won't fire.
+  // Window losing focus (user clicked another app) also closes the menu.
   window.addEventListener('blur', closeMenu);
-
-  contextMenu.addEventListener('click', (e) => {
-    e.stopPropagation();
-  });
 
   // Secondary menus: 切换形象 / 播放动作 / 动作设定  ->  pop out the list
   document.getElementById('menu-models-trigger').addEventListener('click', () => {
@@ -1936,6 +2158,7 @@ function showInstallResult(success, result, alreadyInstalled) {
         '',
         'Trae IDE: Settings -> Hooks -> Local auto-run -> Enable -> New AI session',
         'Qoder: restart the IDE (hooks load automatically on startup)',
+        'Cursor: hooks.json reloads on save (restart the IDE if nothing happens)',
       ].join('\n');
     }
     // Recovery notices (e.g. a foreign/corrupt config was backed up and
@@ -1999,6 +2222,7 @@ function showHookStatusDialog(status) {
     `${i18n.t('hook.dialogBridge')}: ${status.bridgeExists ? i18n.t('hook.exists') : i18n.t('hook.missing')}`,
     `${i18n.t('hook.dialogHooksJson')}: ${status.hooksExist ? i18n.t('hook.exists') : i18n.t('hook.missing')}`,
     `${i18n.t('hook.dialogQoderSettings')}: ${status.qoderHooksExist ? i18n.t('hook.exists') : i18n.t('hook.missing')}`,
+    `${i18n.t('hook.dialogCursorHooks')}: ${status.cursorHooksExist ? i18n.t('hook.exists') : i18n.t('hook.missing')}`,
   ];
   stateText.textContent = status.installed ? i18n.t('hook.dialogInstalledMsg') : i18n.t('hook.dialogNotInstalledMsg');
   stateText.title = lines.join('\n') + '\n\n' + i18n.t('hook.dialogHint');
@@ -2338,7 +2562,6 @@ function setupClickThrough() {
   if (setupClickThrough._done) return;
   setupClickThrough._done = true;
   if (!window.petAPI || !window.petAPI.updateClickRegions) return;
-  if (window.__petSendLog) window.__petSendLog('info', '[clickThrough] region reporter registered (Rust polls GetCursorPos)');
 
   // Convert a CSS-px DOMRect to physical-pixel window-local coords for Rust.
   // devicePixelRatio is read fresh each call so a monitor/DPI change mid-run
@@ -2410,12 +2633,4 @@ function setupClickThrough() {
 }
 
 // ===== Start =====
-// Surface uncaught renderer errors to the main-process log for diagnostics.
-window.addEventListener('error', (e) => {
-  console.error('[uncaught]', e.message, e.filename + ':' + e.lineno);
-});
-window.addEventListener('unhandledrejection', (e) => {
-  console.error('[unhandled rejection]', e.reason && e.reason.message ? e.reason.message : e.reason);
-});
-
 init();

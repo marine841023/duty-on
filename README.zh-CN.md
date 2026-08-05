@@ -25,9 +25,9 @@
 ## 功能
 
 - **Live2D 精灵**：浮在桌面最顶层的透明无边框窗口，支持拖拽移动、位置记忆
-- **状态栏**：精灵下方显示所有已连接的 IDE 项目及状态，带 T/Q 徽章区分 Trae/Qoder
+- **状态栏**：精灵下方显示所有已连接的 IDE 项目及状态，带 T/Q/C 徽章区分 Trae/Qoder/Cursor
 - **点击跳转**：点击状态栏中的项目名，自动激活对应的 IDE 窗口
-- **多 IDE 支持**：同时监控多个 Trae / Qoder 实例，每个实例独立追踪
+- **多 IDE 支持**：同时监控多个 Trae / Qoder / Cursor 实例，每个实例独立追踪
 - **智能点击穿透**：光标落在模型/菜单上时可点击，其余区域鼠标事件穿透到下层窗口
 - **迷你模式**：一键缩小为 130×210 的桌面角落小伙伴（菜单切换，双向还原）
 - **高清渲染**：超采样渲染（2x 分辨率缓冲），高 DPI 屏幕下边缘锐利
@@ -80,7 +80,7 @@ cargo tauri build    # 打包：产物在 target/release/bundle/
                    │ HTTP POST /hook (localhost)
     ┌──────────────┼──────────────┐
 ┌───┴───┐    ┌────┴───┐    ┌────┴───┐
-│ Trae  │    │ Qoder  │    │ Trae   │
+│ Trae  │    │ Qoder  │    │ Cursor │
 │Proj A │    │Proj B  │    │Proj C  │
 └───────┘    └────────┘    └────────┘
 ```
@@ -134,7 +134,7 @@ cargo test    # 52 个单元测试（状态机/Hook合并/服务器/点击穿透
 - **Tauri 2.0** — 桌面应用框架（系统 WebView2 / WKWebView / WebKitGTK）
 - **Rust** — tokio + axum（HTTP）、serde、regex；平台层 windows crate / core-graphics / x11rb
 - **PixiJS v7 + pixi-live2d-display + Cubism Core** — Live2D 渲染
-- **Trae / Qoder IDE Hooks** — AI 生命周期事件钩子
+- **Trae / Qoder / Cursor IDE Hooks** — AI 生命周期事件钩子
 
 ## 常见问题
 

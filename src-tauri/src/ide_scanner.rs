@@ -1,6 +1,6 @@
-//! IDE window scanner for detecting running Trae and Qoder IDE instances.
-//! Scans window titles across Windows, macOS, and Linux (X11) to identify
-//! active project windows and their IDE type.
+//! IDE window scanner for detecting running Trae, Qoder and Cursor IDE
+//! instances. Scans window titles across Windows, macOS, and Linux (X11) to
+//! identify active project windows and their IDE type.
 
 use crate::config;
 use crate::models::IdeKind;
@@ -16,10 +16,16 @@ pub struct DetectedProject {
 /// Windows appends a privilege suffix to the window title of elevated
 /// (run-as-administrator) processes. The suffix is locale-dependent
 /// ("[Administrator]" on en-US, "[管理员]" on zh-CN, ...), so match the
-/// generic ` - Qoder/Trae CN [<anything>]` shape instead of enumerating
-/// translations. Returns the title with the suffix stripped.
+/// generic ` - Qoder/Trae CN/Cursor [<anything>]` shape instead of
+/// enumerating translations. Returns the title with the suffix stripped.
 fn strip_privilege_suffix(title: &str) -> &str {
-    for suffix in [config::QODER_TITLE_SUFFIX, config::TRAE_TITLE_SUFFIX] {
+    for suffix in [
+        config::QODER_TITLE_SUFFIX,
+        config::TRAE_TITLE_SUFFIX,
+        config::CURSOR_AGENTS_TITLE_SUFFIX,
+        config::CURSOR_TITLE_SUFFIX,
+        config::CURSOR_AGENTS_TITLE,
+    ] {
         // " - Qoder [管理员]".len() == suffix.len() + 1 + bracket contents
         if let Some(ide_end) = title.rfind(suffix) {
             let rest = &title[ide_end + suffix.len()..];
@@ -43,13 +49,28 @@ fn strip_privilege_suffix(title: &str) -> &str {
 ///
 /// Trae IDE: "<file> - <project> - Trae CN"
 /// Qoder:    "<file> - <project> - Qoder"
+/// Cursor:   "<file> - <project> - Cursor"
+///           "<folder> - Cursor Agents" / "Cursor Agents" (3.x Agents panel —
+///           the editor main window may be untitled, so the panel title is
+///           the only visible signal; without a workspace it shows up as a
+///           project named "Cursor Agents")
 /// Elevated windows carry a privilege suffix: "... - Qoder [管理员]".
 fn parse_title(title: &str) -> Option<(&str, IdeKind)> {
     let title = strip_privilege_suffix(title);
+    // Check the Agents-panel suffix before " - Cursor": " - Cursor Agents"
+    // doesn't end with " - Cursor", but the standalone "Cursor Agents"
+    // title matches neither suffix — handle it as an exact title.
+    if title == config::CURSOR_AGENTS_TITLE {
+        return Some((config::CURSOR_AGENTS_TITLE, IdeKind::Cursor));
+    }
     let ide = if title.ends_with(config::TRAE_TITLE_SUFFIX) {
         IdeKind::Trae
     } else if title.ends_with(config::QODER_TITLE_SUFFIX) {
         IdeKind::Qoder
+    } else if title.ends_with(config::CURSOR_AGENTS_TITLE_SUFFIX) {
+        IdeKind::Cursor
+    } else if title.ends_with(config::CURSOR_TITLE_SUFFIX) {
+        IdeKind::Cursor
     } else {
         return None;
     };
@@ -62,6 +83,7 @@ fn parse_title(title: &str) -> Option<(&str, IdeKind)> {
         || folder == "Trae"
         || folder == "Trae CN"
         || folder == "Qoder"
+        || folder == "Cursor"
     {
         return None;
     }
@@ -96,7 +118,7 @@ fn suspect_ide_titles(titles: &[String]) -> Vec<String> {
         .iter()
         .filter(|t| {
             let low = t.to_lowercase();
-            low.contains("qoder") || low.contains("trae")
+            low.contains("qoder") || low.contains("trae") || low.contains("cursor")
         })
         .take(8)
         .map(|t| t.chars().take(200).collect::<String>())
@@ -126,7 +148,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// Executable image names of the IDEs we track (case-insensitive, matched
 /// against the last path segment of the owning process image).
 #[cfg(windows)]
-const IDE_PROCESS_EXES: &[&str] = &["Qoder.exe", "Trae CN.exe", "Trae.exe"];
+const IDE_PROCESS_EXES: &[&str] = &["Qoder.exe", "Trae CN.exe", "Trae.exe", "Cursor.exe"];
 
 /// Hard cap (ms) for every title request sent to an IDE window.
 #[cfg(windows)]
@@ -399,18 +421,22 @@ pub fn scan_ide_projects() -> (Vec<DetectedProject>, Vec<String>) {
 }
 
 /// macOS can't precisely activate a specific window of another app without the
-/// Accessibility API. Scan on-screen titles to decide whether the project lives
-/// in a Qoder or Trae window, then activate the matching app (best-effort).
+/// Accessibility API. Scan on-screen titles to decide which IDE owns the
+/// project, then activate the matching app (best-effort).
 #[cfg(target_os = "macos")]
 pub fn focus_project_window(name: &str) -> bool {
     let titles = cg::on_screen_window_titles();
-    let is_qoder = titles.iter().any(|t| {
-        matches!(
-            parse_title(t),
-            Some((p, IdeKind::Qoder)) if p.eq_ignore_ascii_case(name)
-        )
+    let owner = titles.iter().find_map(|t| {
+        match parse_title(t) {
+            Some((p, ide)) if p.eq_ignore_ascii_case(name) => Some(ide),
+            _ => None,
+        }
     });
-    let app = if is_qoder { "Qoder" } else { "Trae CN" };
+    let app = match owner {
+        Some(IdeKind::Qoder) => "Qoder",
+        Some(IdeKind::Cursor) => "Cursor",
+        _ => "Trae CN",
+    };
     match std::process::Command::new("open").arg("-a").arg(app).spawn() {
         Ok(_) => true,
         Err(e) => {
@@ -619,6 +645,41 @@ mod tests {
         // Qoder window title: "<file> - <project> - Qoder"
         let result = parse_title("app.ts - MyProject - Qoder");
         assert_eq!(result, Some(("MyProject", IdeKind::Qoder)));
+    }
+
+    #[test]
+    fn parse_title_standard_cursor() {
+        // Cursor window title: "<file> - <project> - Cursor"
+        let result = parse_title("main.py - MyProject - Cursor");
+        assert_eq!(result, Some(("MyProject", IdeKind::Cursor)));
+    }
+
+    #[test]
+    fn parse_title_cursor_generic_no_project() {
+        // Cursor with no project open: "Cursor - Cursor" → folder segment is
+        // "Cursor" → filtered out (same shape as "Trae CN - Trae CN")
+        let result = parse_title("Cursor - Cursor");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_title_cursor_agents_panel_standalone() {
+        // Cursor 3.x standalone Agents panel (editor main window untitled).
+        let result = parse_title("Cursor Agents");
+        assert_eq!(result, Some(("Cursor Agents", IdeKind::Cursor)));
+    }
+
+    #[test]
+    fn parse_title_cursor_agents_panel_with_workspace() {
+        let result = parse_title("MyProject - Cursor Agents");
+        assert_eq!(result, Some(("MyProject", IdeKind::Cursor)));
+    }
+
+    #[test]
+    fn parse_title_cursor_agents_panel_elevated() {
+        // Privilege suffix on the panel title is stripped like any IDE title.
+        let result = parse_title("Cursor Agents [管理员]");
+        assert_eq!(result, Some(("Cursor Agents", IdeKind::Cursor)));
     }
 
     #[test]

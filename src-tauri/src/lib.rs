@@ -61,10 +61,15 @@ pub fn run() {
             commands::get_auto_launch,
             commands::set_auto_launch,
             commands::get_state,
+            commands::reset_to_idle,
+            commands::debug_log,
             commands::test_alert,
             commands::drag_window,
-            commands::open_menu_space,
+            commands::calculate_menu_space,
+            commands::apply_menu_space,
             commands::close_menu_space,
+            commands::show_menu_window,
+            commands::hide_menu_window,
             commands::update_click_regions,
             commands::set_force_clickable,
             commands::bring_to_front,
@@ -112,6 +117,43 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .inner_size(config::EDGE_DOCK_THICKNESS as f64, 200.0)
         .build()?;
     let _ = preview.set_ignore_cursor_events(true);
+
+    // ----- Menu window (separate, zero-flicker) -----
+    // A second borderless transparent window that hosts the context menu. The
+    // pet window NEVER resizes when the menu opens — instead this window is
+    // shown beside the pet. Because the pet window's geometry is unchanged,
+    // WebView2's one-frame layout lag (the root cause of left-side menu
+    // flicker) never triggers. The window loads the same index.html with an
+    // injected flag (window.__MENU_MODE__ = true) so renderer.js can skip
+    // PixiJS/Live2D init and run in menu-only mode.
+    let menu_win = WebviewWindowBuilder::new(
+        app,
+        "menu",
+        WebviewUrl::App("index.html".into()),
+    )
+    .title("Menu")
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .resizable(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .visible(false)
+    .inner_size(230.0, 500.0)
+    .initialization_script("window.__MENU_MODE__ = true;")
+    .build()?;
+
+    // Hide the menu window when it loses focus (user clicks elsewhere,
+    // Alt-Tab, etc.). Emit an event so the main window can reset its menu
+    // state.
+    let menu_win_for_blur = menu_win.clone();
+    let app_for_blur = app.handle().clone();
+    menu_win.on_window_event(move |event| {
+        if let tauri::WindowEvent::Focused(false) = event {
+            let _ = menu_win_for_blur.hide();
+            let _ = app_for_blur.emit("menu-closed", ());
+        }
+    });
 
     // Log window state for debugging "completely transparent / can't click"
     let vis = window.is_visible().unwrap_or(false);

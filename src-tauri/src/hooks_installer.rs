@@ -1,6 +1,7 @@
-//! Hook installer for Trae and Qoder IDE integration.
+//! Hook installer for Trae, Qoder and Cursor IDE integration.
 //! Installs bridge scripts to `~/.dutyon/hooks/` and registers hook entries
-//! in `~/.trae-cn/hooks.json` and `~/.qoder/settings.json`.
+//! in `~/.trae-cn/hooks.json`, `~/.qoder/settings.json` and
+//! `~/.cursor/hooks.json`.
 
 use crate::config;
 use serde::Serialize;
@@ -24,6 +25,8 @@ pub struct InstallResult {
     pub hooks_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qoder_hooks_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor_hooks_path: Option<String>,
     pub needs_enable: bool,
 }
 
@@ -34,6 +37,16 @@ pub struct InstalledStatus {
     pub hooks_exist: bool,
     pub bridge_exists: bool,
     pub qoder_hooks_exist: bool,
+    pub cursor_hooks_exist: bool,
+}
+
+/// Hook config shapes differ per IDE:
+/// - `Nested` (Trae/Qoder, Claude-Code style): event -> [{"hooks": [...]}]
+/// - `Flat`   (Cursor): event -> [{"command": ..., "timeout": ...}]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookFormat {
+    Nested,
+    Flat,
 }
 
 fn home() -> PathBuf {
@@ -61,16 +74,24 @@ fn bridge_filename() -> &'static str {
 /// On macOS/Linux: `bash "$HOME/..."` (sh-compatible) — explicit `bash`
 /// avoids depending on the executable bit and the `~` expansion quirks of
 /// some shells.
-/// The `ide` argument ("trae" / "qoder") is forwarded by the bridge so the
-/// pet can badge each session with its source IDE.
-fn hook_command(ide: &str) -> String {
+/// The `ide` argument ("trae" / "qoder" / "cursor") is forwarded by the
+/// bridge so the pet can badge each session with its source IDE. Cursor's
+/// stdin payload names events in camelCase (which the state machine does
+/// not match), so for Cursor the event is baked into the command (`event`
+/// arg) and the bridge overrides the payload's name with the canonical one.
+fn hook_command(ide: &str, event: Option<&str>) -> String {
     if cfg!(windows) {
+        // Named -HookEvent, NOT -Event: a param named $Event collides with
+        // PowerShell's automatic $Event variable and degraded every parsed
+        // JSON object to a String (verified in the field: all POSTs 422).
+        let event_arg = event.map(|e| format!(" -HookEvent {}", e)).unwrap_or_default();
         format!(
-            r#"powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1" -Ide {}"#,
-            ide
+            r#"powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1" -Ide {}{}"#,
+            ide, event_arg
         )
     } else {
-        format!(r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh" {}"#, ide)
+        let event_arg = event.map(|e| format!(" {}", e)).unwrap_or_default();
+        format!(r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh" {}{}"#, ide, event_arg)
     }
 }
 
@@ -122,11 +143,14 @@ fn qoder_shell() -> &'static str {
 
 /// Merge pet hook entries into a hooks config file, preserving any other keys
 /// already present (e.g. Qoder's `enabledPlugins` and hooks from other tools).
-/// For each event in `events`, removes existing pet groups (to avoid
-/// duplicates on re-install) then appends a fresh group. `shell` is written
-/// into each hook entry when given (Qoder honors it; Trae ignores the unknown
-/// field, so we only set it for Qoder). `add_version` writes a Trae-style
-/// `version: 1` top-level field.
+/// For each event in `events`, removes existing pet entries (to avoid
+/// duplicates on re-install) then appends fresh ones. `hook_command` maps an
+/// event name to its command string (Trae/Qoder use one command for all
+/// events; Cursor bakes the event into each command). `shell` is written into
+/// each hook entry when given (Qoder honors it; Trae ignores the unknown
+/// field, so we only set it for Qoder). `add_version` writes a `version: 1`
+/// top-level field (Trae-style hooks.json and Cursor's schema both use it).
+/// `format` selects the entry shape (see `HookFormat`).
 ///
 /// Robustness against configs modified by other tools:
 /// - A UTF-8 BOM is tolerated.
@@ -141,9 +165,10 @@ fn qoder_shell() -> &'static str {
 fn merge_hooks_into_file(
     path: &Path,
     events: &[&str],
-    hook_command: &str,
+    hook_command: &dyn Fn(&str) -> String,
     shell: Option<&str>,
     add_version: bool,
+    format: HookFormat,
 ) -> Result<Option<String>, String> {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -211,21 +236,35 @@ fn merge_hooks_into_file(
 
     if let Some(hooks) = existing["hooks"].as_object_mut() {
         for event in events {
-            let mut group = json!({
-                "hooks": [{
-                    "type": "command",
-                    "command": hook_command,
-                    "timeout": config::BRIDGE_TIMEOUT_SEC
-                }]
-            });
-            if let Some(shell) = shell {
-                group["hooks"][0]["shell"] = json!(shell);
-            }
+            // Build the pet entry for this event in the IDE's native shape.
+            let group = match format {
+                HookFormat::Nested => {
+                    let mut g = json!({
+                        "hooks": [{
+                            "type": "command",
+                            "command": hook_command(event),
+                            "timeout": config::BRIDGE_TIMEOUT_SEC
+                        }]
+                    });
+                    if let Some(shell) = shell {
+                        g["hooks"][0]["shell"] = json!(shell);
+                    }
+                    g
+                }
+                // Cursor's flat entry. `loop_limit: null` lifts Cursor's
+                // default limit of 5 invocations for stop-style events, so
+                // the pet keeps receiving events across a long session.
+                HookFormat::Flat => json!({
+                    "command": hook_command(event),
+                    "timeout": config::BRIDGE_TIMEOUT_SEC,
+                    "loop_limit": null
+                }),
+            };
             let arr = hooks.entry(event.to_string()).or_insert(json!([]));
             if !arr.is_array() {
                 // Another tool wrote a non-array value for this event. Keep
                 // the original value by wrapping it as the first element
-                // instead of dropping it, then append our group.
+                // instead of dropping it, then append our entry.
                 let old = arr.take();
                 *arr = json!([old]);
                 if warning.is_none() {
@@ -237,20 +276,28 @@ fn merge_hooks_into_file(
                 }
             }
             if let Some(a) = arr.as_array_mut() {
-                // Remove existing pet hook groups (avoid duplicates).
-                a.retain(|g| {
-                    g["hooks"]
-                        .as_array()
-                        .map(|hs| {
-                            !hs.iter().any(|h| {
-                                h["command"]
-                                    .as_str()
-                                    .map(|c| is_pet_command(c))
-                                    .unwrap_or(false)
+                // Remove existing pet entries (avoid duplicates on re-install).
+                match format {
+                    HookFormat::Nested => a.retain(|g| {
+                        g["hooks"]
+                            .as_array()
+                            .map(|hs| {
+                                !hs.iter().any(|h| {
+                                    h["command"]
+                                        .as_str()
+                                        .map(is_pet_command)
+                                        .unwrap_or(false)
+                                })
                             })
-                        })
-                        .unwrap_or(true)
-                });
+                            .unwrap_or(true)
+                    }),
+                    HookFormat::Flat => a.retain(|e| {
+                        !e["command"]
+                            .as_str()
+                            .map(is_pet_command)
+                            .unwrap_or(false)
+                    }),
+                }
                 a.push(group);
             }
         }
@@ -270,6 +317,7 @@ fn fail(error: &str) -> InstallResult {
         hook_dir: None,
         hooks_path: None,
         qoder_hooks_path: None,
+        cursor_hooks_path: None,
         needs_enable: false,
     }
 }
@@ -315,14 +363,15 @@ pub fn install(hooks_source_dir: &Path) -> InstallResult {
     // Merge hooks into Trae's ~/.trae-cn/hooks.json (Trae events, no shell
     // field, Trae-style version key).
     let trae_hooks_path = home.join(".trae-cn").join("hooks.json");
-    let trae_hook_command = hook_command("trae");
+    let trae_hook_command = hook_command("trae", None);
     let mut warnings: Vec<String> = Vec::new();
     match merge_hooks_into_file(
         &trae_hooks_path,
         config::HOOK_EVENTS,
-        &trae_hook_command,
+        &|_| trae_hook_command.clone(),
         None,
         true,
+        HookFormat::Nested,
     ) {
         Ok(Some(w)) => warnings.push(w),
         Ok(None) => {}
@@ -338,13 +387,14 @@ pub fn install(hooks_source_dir: &Path) -> InstallResult {
     let mut qoder_hooks_path_str: Option<String> = None;
     if qoder_dir.exists() {
         let qoder_hooks_path = qoder_dir.join("settings.json");
-        let qoder_hook_command = hook_command("qoder");
+        let qoder_hook_command = hook_command("qoder", None);
         match merge_hooks_into_file(
             &qoder_hooks_path,
             config::QODER_HOOK_EVENTS,
-            &qoder_hook_command,
+            &|_| qoder_hook_command.clone(),
             Some(qoder_shell()),
             false,
+            HookFormat::Nested,
         ) {
             Ok(maybe_warning) => {
                 if let Some(w) = maybe_warning {
@@ -361,6 +411,39 @@ pub fn install(hooks_source_dir: &Path) -> InstallResult {
         log::info!("[hooks] Qoder not detected (~/.qoder absent); skipping Qoder hook install");
     }
 
+    // Merge hooks into Cursor's ~/.cursor/hooks.json when Cursor is
+    // installed. Cursor uses its own flatter schema and camelCase events;
+    // each command carries the event name because Cursor's stdin payload
+    // doesn't include one (the bridge normalizes it). Cursor reloads
+    // hooks.json on save, so no IDE restart is needed. Non-fatal like Qoder.
+    let cursor_dir = home.join(".cursor");
+    let mut cursor_hooks_path_str: Option<String> = None;
+    if cursor_dir.exists() {
+        let cursor_hooks_path = cursor_dir.join("hooks.json");
+        match merge_hooks_into_file(
+            &cursor_hooks_path,
+            config::CURSOR_HOOK_EVENTS,
+            &|event| hook_command("cursor", Some(event)),
+            None,
+            true,
+            HookFormat::Flat,
+        ) {
+            Ok(maybe_warning) => {
+                if let Some(w) = maybe_warning {
+                    warnings.push(format!("Cursor: {}", w));
+                }
+                cursor_hooks_path_str =
+                    Some(cursor_hooks_path.to_string_lossy().to_string());
+            }
+            Err(e) => {
+                log::warn!("[hooks] Cursor hooks.json merge failed: {}", e);
+                warnings.push(format!("Cursor hooks.json merge failed: {}", e));
+            }
+        }
+    } else {
+        log::info!("[hooks] Cursor not detected (~/.cursor absent); skipping Cursor hook install");
+    }
+
     InstallResult {
         success: true,
         error: None,
@@ -372,42 +455,40 @@ pub fn install(hooks_source_dir: &Path) -> InstallResult {
         hook_dir: Some(target_hook_dir.to_string_lossy().to_string()),
         hooks_path: Some(trae_hooks_path.to_string_lossy().to_string()),
         qoder_hooks_path: qoder_hooks_path_str,
+        cursor_hooks_path: cursor_hooks_path_str,
         needs_enable: true,
     }
 }
 
-/// Check whether hooks are already installed. Reports Trae and Qoder
-/// independently; `installed` is true when the bridge exists AND at least one
-/// IDE has the pet hooks wired.
+/// Check whether hooks are already installed. Reports Trae, Qoder and
+/// Cursor independently; `installed` is true when the bridge exists AND at
+/// least one IDE has the pet hooks wired.
 pub fn is_installed() -> InstalledStatus {
     let home = home();
     let trae_hooks_path = home.join(".trae-cn").join("hooks.json");
     let qoder_hooks_path = home.join(".qoder").join("settings.json");
+    let cursor_hooks_path = home.join(".cursor").join("hooks.json");
     let bridge_path = home.join(".dutyon").join("hooks").join(bridge_filename());
 
     let bridge_exists = bridge_path.exists();
 
-    let trae_hooks_contain_pet = if trae_hooks_path.exists() {
-        fs::read_to_string(&trae_hooks_path)
-            .map(|c| is_pet_command(&c))
-            .unwrap_or(false)
-    } else {
-        false
+    let contains_pet = |path: &Path| -> bool {
+        path.exists()
+            && fs::read_to_string(path)
+                .map(|c| is_pet_command(&c))
+                .unwrap_or(false)
     };
-
-    let qoder_hooks_contain_pet = if qoder_hooks_path.exists() {
-        fs::read_to_string(&qoder_hooks_path)
-            .map(|c| is_pet_command(&c))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let trae_hooks_contain_pet = contains_pet(&trae_hooks_path);
+    let qoder_hooks_contain_pet = contains_pet(&qoder_hooks_path);
+    let cursor_hooks_contain_pet = contains_pet(&cursor_hooks_path);
 
     InstalledStatus {
-        installed: bridge_exists && (trae_hooks_contain_pet || qoder_hooks_contain_pet),
+        installed: bridge_exists
+            && (trae_hooks_contain_pet || qoder_hooks_contain_pet || cursor_hooks_contain_pet),
         hooks_exist: trae_hooks_contain_pet,
         bridge_exists,
         qoder_hooks_exist: qoder_hooks_contain_pet,
+        cursor_hooks_exist: cursor_hooks_contain_pet,
     }
 }
 
@@ -434,8 +515,8 @@ mod tests {
         }"#;
         fs::write(&path, original).unwrap();
 
-        let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#;
-        merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, cmd, Some("powershell"), false)
+        let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#.to_string();
+        merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, &|_| cmd.clone(), Some("powershell"), false, HookFormat::Nested)
             .unwrap();
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -470,8 +551,8 @@ mod tests {
         let path = dir.join("hooks.json");
         fs::write(&path, "{}").unwrap();
 
-        let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#;
-        merge_hooks_into_file(&path, config::HOOK_EVENTS, cmd, None, true).unwrap();
+        let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#.to_string();
+        merge_hooks_into_file(&path, config::HOOK_EVENTS, &|_| cmd.clone(), None, true, HookFormat::Nested).unwrap();
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["version"], 1);
@@ -493,9 +574,9 @@ mod tests {
         let path = dir.join("settings.json");
         fs::write(&path, "{}").unwrap();
 
-        let cmd = r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh""#;
-        merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, cmd, Some("bash"), false).unwrap();
-        merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, cmd, Some("bash"), false).unwrap();
+        let cmd = r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh""#.to_string();
+        merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, &|_| cmd.clone(), Some("bash"), false, HookFormat::Nested).unwrap();
+        merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, &|_| cmd.clone(), Some("bash"), false, HookFormat::Nested).unwrap();
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         for ev in config::QODER_HOOK_EVENTS {
@@ -528,8 +609,8 @@ mod tests {
         }"#;
         fs::write(&path, legacy).unwrap();
 
-        let cmd = r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh""#;
-        merge_hooks_into_file(&path, &["Stop"], cmd, Some("bash"), false).unwrap();
+        let cmd = r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh""#.to_string();
+        merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), Some("bash"), false, HookFormat::Nested).unwrap();
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let arr = v["hooks"]["Stop"].as_array().unwrap();
@@ -559,8 +640,8 @@ mod tests {
         )
         .unwrap();
 
-        let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#;
-        let warning = merge_hooks_into_file(&path, &["Stop"], cmd, None, true).unwrap();
+        let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#.to_string();
+        let warning = merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), None, true, HookFormat::Nested).unwrap();
         assert!(warning.is_none(), "BOM should not trigger a warning");
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -582,8 +663,8 @@ mod tests {
         let corrupt = "this is not json {{{";
         fs::write(&path, corrupt).unwrap();
 
-        let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#;
-        let warning = merge_hooks_into_file(&path, &["Stop"], cmd, None, true).unwrap();
+        let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#.to_string();
+        let warning = merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), None, true, HookFormat::Nested).unwrap();
         let warning = warning.expect("corrupt file must produce a warning");
         assert!(warning.contains("backed up"), "warning: {}", warning);
 
@@ -613,8 +694,8 @@ mod tests {
         let path = dir.join("settings.json");
         fs::write(&path, r#"{ "hooks": { "Stop": "echo legacy-string-form" } }"#).unwrap();
 
-        let cmd = r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh""#;
-        let warning = merge_hooks_into_file(&path, &["Stop"], cmd, Some("bash"), false).unwrap();
+        let cmd = r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh""#.to_string();
+        let warning = merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), Some("bash"), false, HookFormat::Nested).unwrap();
         assert!(warning.is_some(), "non-array event value must warn");
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -635,8 +716,8 @@ mod tests {
         let path = dir.join("hooks.json");
         fs::write(&path, r#"{ "hooks": "weird" }"#).unwrap();
 
-        let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#;
-        let warning = merge_hooks_into_file(&path, &["Stop"], cmd, None, true).unwrap();
+        let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#.to_string();
+        let warning = merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), None, true, HookFormat::Nested).unwrap();
         let warning = warning.expect("wrong-shape hooks must warn");
         assert!(warning.contains("backed up"), "warning: {}", warning);
 
@@ -648,6 +729,78 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".dutyon-backup-"))
             .collect();
         assert_eq!(backups.len(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Cursor's ~/.cursor/hooks.json uses a FLAT schema (event ->
+    /// [{command, timeout}]) with per-event commands and version: 1. Merge
+    /// must produce that shape, bake the event into each command, set
+    /// loop_limit to null (lifts Cursor's stop-event invocation cap), and be
+    /// idempotent while preserving third-party flat entries.
+    #[test]
+    fn cursor_flat_merge_shape_and_idempotent() {
+        let dir = std::env::temp_dir().join("duty-on-cursor-merge-test");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("hooks.json");
+        let original = r#"{
+            "version": 1,
+            "hooks": {
+                "afterFileEdit": [{ "command": ".cursor/hooks/format.sh" }]
+            }
+        }"#;
+        fs::write(&path, original).unwrap();
+
+        // The command must carry the pet marker (.dutyon) or dedup won't
+        // recognize it on re-install.
+        let cmd = |ev: &str| {
+            format!(
+                "powershell -File \"$env:USERPROFILE\\.dutyon\\hooks\\trae-hook-bridge.ps1\" -Ide cursor -HookEvent {}",
+                ev
+            )
+        };
+        merge_hooks_into_file(
+            &path,
+            config::CURSOR_HOOK_EVENTS,
+            &cmd,
+            None,
+            true,
+            HookFormat::Flat,
+        )
+        .unwrap();
+        // Re-install must not stack duplicates flat entries.
+        merge_hooks_into_file(
+            &path,
+            config::CURSOR_HOOK_EVENTS,
+            &cmd,
+            None,
+            true,
+            HookFormat::Flat,
+        )
+        .unwrap();
+
+        let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["version"], 1);
+        // Third-party flat entry untouched.
+        assert_eq!(v["hooks"]["afterFileEdit"][0]["command"], ".cursor/hooks/format.sh");
+        for ev in config::CURSOR_HOOK_EVENTS {
+            let arr = v["hooks"][ev].as_array().expect(ev);
+            assert_eq!(arr.len(), 1, "expected exactly 1 flat entry for {}", ev);
+            let entry = &arr[0];
+            // Flat shape: command/timeout/loop_limit at the top level, no
+            // nested "hooks" array.
+            assert!(entry.get("hooks").is_none());
+            assert_eq!(entry["timeout"], config::BRIDGE_TIMEOUT_SEC);
+            assert!(entry["loop_limit"].is_null());
+            assert!(
+                entry["command"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(&format!("-HookEvent {}", ev)),
+                "event must be baked into the command for {}",
+                ev
+            );
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }

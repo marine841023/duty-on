@@ -243,10 +243,14 @@ impl StateManager {
                     // The user answered; the agent resumed.
                     session.status = SessionStatus::Working;
                     session.alert_message = None;
-                } else if session.status != SessionStatus::ConfirmationNeeded {
-                    // Tool completed; AI may call more tools.
-                    session.status = SessionStatus::Working;
+                } else if session.status == SessionStatus::Working {
+                    // Already Working — tool completed, AI may call more tools.
+                    // (Stays Working; this is the normal in-flight case.)
                 }
+                // If Idle (e.g., after a Stop event from manual abort), a stray
+                // delayed PostToolUse from the interrupted tool must NOT revive
+                // the Working state. If ConfirmationNeeded, keep waiting for the
+                // user's answer.
             }
             "Notification" => {
                 // Notification fires when:
@@ -283,6 +287,19 @@ impl StateManager {
             self.sessions.remove(&wid);
         }
 
+        self.recompute_state();
+    }
+
+    /// Manually reset all sessions to Idle and clear alerts. Used as a
+    /// fallback when the IDE doesn't fire a Stop hook (e.g., user aborts
+    /// during the AI's "thinking" phase). Broadcasts the updated snapshot.
+    pub fn reset_all_to_idle(&mut self) {
+        let now = self.now_ms();
+        for session in self.sessions.values_mut() {
+            session.status = SessionStatus::Idle;
+            session.alert_message = None;
+            session.last_event_time = now;
+        }
         self.recompute_state();
     }
 
@@ -836,6 +853,21 @@ mod tests {
         e2.tool_name = Some("AskUserQuestion".to_string());
         sm.handle_hook_event(&e2);
         assert_eq!(sm.overall_state, PetState::Working);
+    }
+
+    #[test]
+    fn cursor_ask_question_variants_trigger_alert() {
+        // Cursor's AskQuestion tool currently fires no hook events (confirmed
+        // Cursor bug), but the whitelist pre-wires its likely names so the
+        // alert works automatically once the bug is fixed upstream.
+        for tool in ["AskQuestion", "ask_question", "askQuestion"] {
+            let (mut sm, _t) = make_manager();
+            sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+            let mut e = event("s1", "PreToolUse");
+            e.tool_name = Some(tool.to_string());
+            sm.handle_hook_event(&e);
+            assert_eq!(sm.overall_state, PetState::Alert, "tool={tool}");
+        }
     }
 
     #[test]

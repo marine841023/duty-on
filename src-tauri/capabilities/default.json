@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for DutyOn main window",
-  "windows": ["main"],
+  "description": "Default capability for DutyOn windows (main pet, menu, dock-preview)",
+  "windows": ["main", "menu", "dock-preview"],
   "permissions": [
     "core:default",
     "core:window:default",

@@ -2,20 +2,25 @@
 .SYNOPSIS
     Trae IDE Hook Bridge - Forwards hook events to the DutyOn (开工啦) desktop application.
 .DESCRIPTION
-    This script is called by Trae IDE's Hook system for each AI lifecycle event.
-    It reads the hook event JSON from stdin, enriches it with project information,
-    and sends it to the DutyOn app's local HTTP server (http://127.0.0.1:17521/hook).
-    The script is designed to be fast and non-blocking - if the pet is not running,
-    it exits silently without affecting the AI's workflow.
+    This script is called by Trae/Qoder/Cursor's Hook system for each AI
+    lifecycle event. It reads the hook event JSON from stdin, enriches it
+    with project information, and sends it to the DutyOn app's local HTTP
+    server (http://127.0.0.1:17521/hook). The script is designed to be fast
+    and non-blocking - if the pet is not running, it exits silently without
+    affecting the AI's workflow.
 
     Diagnostic log is written to ~/.dutyon/hooks/bridge.log so we can confirm
-    whether Trae IDE is actually invoking the hook.
+    whether the IDE is actually invoking the hook.
 
-    The -Ide argument ("trae" / "qoder") is passed by the installed hook
-    command so the pet can badge each session with its source IDE.
+    The -Ide argument ("trae" / "qoder" / "cursor") is passed by the
+    installed hook command so the pet can badge each session with its source
+    IDE. Cursor's stdin payload carries no event name, so its installed
+    commands also pass -HookEvent (normalized to the canonical
+    hook_event_name). The parameter must NOT be named `$Event` — that name
+    broke JSON parsing in field testing (every event degraded to a String).
 #>
 
-param([string]$Ide = '')
+param([string]$Ide = '', [string]$HookEvent = '')
 
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -55,6 +60,9 @@ try {
   Write-BridgeLog "binary stdin read failed: $($_.Exception.Message); falling back to text read"
   $stdinText = [Console]::In.ReadToEnd()
 }
+# Cursor writes its JSON with a UTF-8 BOM, which ConvertFrom-Json rejects
+# ("invalid JSON primitive"); strip it before parsing.
+$stdinText = $stdinText.TrimStart([char]0xFEFF)
 Write-BridgeLog "stdin: $stdinText"
 
 if ([string]::IsNullOrWhiteSpace($stdinText)) {
@@ -65,11 +73,44 @@ if ([string]::IsNullOrWhiteSpace($stdinText)) {
 try {
   $event = $stdinText | ConvertFrom-Json
 } catch {
-  Write-BridgeLog "JSON parse failed: $_"
+  Write-BridgeLog "JSON parse failed: $($_.Exception.Message)"
   exit 0
 }
 
 Write-BridgeLog "event=$($event.hook_event_name) session=$($event.session_id)"
+
+# Cursor's stdin payload carries its own hook_event_name, but in camelCase
+# (postToolUse, stop, ...), which the state machine does not match. The
+# installed hook command bakes the event in via -HookEvent; always override
+# with the canonical PascalCase name.
+if (-not [string]::IsNullOrWhiteSpace($HookEvent)) {
+  $normalized = switch ($HookEvent) {
+    'sessionStart'       { 'SessionStart' }
+    'beforeSubmitPrompt' { 'UserPromptSubmit' }
+    'preToolUse'         { 'PreToolUse' }
+    'postToolUse'        { 'PostToolUse' }
+    'stop'               { 'Stop' }
+    default              { $HookEvent }
+  }
+  $event | Add-Member -NotePropertyName 'hook_event_name' -NotePropertyValue $normalized -Force
+}
+# Cursor keys sessions by conversation_id; the state machine keys by
+# session_id, so backfill to keep a session's events correlatable.
+if ($Ide -eq 'cursor' -and [string]::IsNullOrWhiteSpace($event.session_id)) {
+  $sid = $event.conversation_id
+  if ([string]::IsNullOrWhiteSpace($sid)) { $sid = 'cursor-session' }
+  $event | Add-Member -NotePropertyName 'session_id' -NotePropertyValue $sid -Force
+}
+# Cursor tool payloads may nest the tool name (toolInfo.name / tool.name);
+# the state machine reads tool_name for the AskUserQuestion alert signal, so
+# normalize whatever shape arrives.
+if ($Ide -eq 'cursor' -and [string]::IsNullOrWhiteSpace($event.tool_name)) {
+  $tn = $event.toolInfo.name
+  if ([string]::IsNullOrWhiteSpace($tn)) { $tn = $event.tool.name }
+  if (-not [string]::IsNullOrWhiteSpace($tn)) {
+    $event | Add-Member -NotePropertyName 'tool_name' -NotePropertyValue $tn -Force
+  }
+}
 
 # Get project information from environment
 # QODER_PROJECT_DIR is set when invoked by Qoder's hook runner; TRAE_PROJECT_DIR
@@ -82,12 +123,23 @@ if ([string]::IsNullOrEmpty($projectDir)) {
   $projectDir = $env:CLAUDE_PROJECT_DIR
 }
 if ([string]::IsNullOrEmpty($projectDir)) {
+  $projectDir = $env:CURSOR_PROJECT_DIR
+}
+if ([string]::IsNullOrEmpty($projectDir)) {
   $projectDir = $event.cwd
+}
+if ([string]::IsNullOrEmpty($projectDir)) {
+  # Cursor payloads may expose the workspace as workspace_roots instead of cwd.
+  $roots = $event.workspace_roots
+  if ($roots -and @($roots).Count -gt 0) { $projectDir = @($roots)[0] }
 }
 
 $projectName = ''
 if (-not [string]::IsNullOrEmpty($projectDir)) {
   $projectName = Split-Path $projectDir -Leaf
+}
+if ($Ide -eq 'cursor') {
+  Write-BridgeLog "cursor normalized event=$($event.hook_event_name) tool=$($event.tool_name) session=$($event.session_id) project=$projectName"
 }
 
 # IDE kind: the explicit -Ide argument wins; fall back to the runner's env

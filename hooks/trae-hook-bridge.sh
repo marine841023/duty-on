@@ -35,16 +35,64 @@ write_log() {
 
 write_log "INVOKED pid=$$"
 
-# IDE kind ("trae" / "qoder") passed as $1 by the installed hook command.
+# IDE kind ("trae" / "qoder" / "cursor") passed as $1 by the installed hook
+# command. Cursor's stdin payload carries no event name, so its installed
+# commands bake it into $2 (normalized below).
 ide="${1:-}"
+hook_event="${2:-}"
 
 # Read JSON from stdin.
 stdin_text=$(cat)
+# Cursor may prefix its JSON with a UTF-8 BOM; strip it so jq/python3 can parse.
+stdin_text=${stdin_text#"$(printf '\357\273\277')"}
 write_log "stdin: $stdin_text"
 
 if [ -z "$stdin_text" ]; then
   write_log "empty stdin, exit"
   exit 0
+fi
+
+# Cursor payloads carry hook_event_name in camelCase (postToolUse, stop, ...)
+# which the state machine does not match, and use conversation_id /
+# workspace_roots where the state machine expects session_id / cwd. Patch
+# them in before enrichment. Best-effort: needs jq or python3; without either
+# the raw stdin goes through (the server will drop it — logged for triage).
+if [ "$ide" = "cursor" ] && [ -n "$hook_event" ]; then
+  case "$hook_event" in
+    sessionStart) hook_event="SessionStart" ;;
+    beforeSubmitPrompt) hook_event="UserPromptSubmit" ;;
+    preToolUse) hook_event="PreToolUse" ;;
+    postToolUse) hook_event="PostToolUse" ;;
+    stop) hook_event="Stop" ;;
+  esac
+  patched=""
+  if command -v jq >/dev/null 2>&1; then
+    patched=$(printf '%s' "$stdin_text" | jq -c --arg ev "$hook_event" '
+      .hook_event_name = $ev
+      | .session_id = ((.session_id // .conversation_id // "cursor-session"))
+      | .cwd = ((.cwd // (.workspace_roots[0] // "")))
+      | .tool_name = ((.tool_name // .toolInfo.name // .tool.name))
+    ' 2>/dev/null)
+  elif command -v python3 >/dev/null 2>&1; then
+    patched=$(printf '%s' "$stdin_text" | EV="$hook_event" python3 -c '
+import json, os, sys
+e = json.load(sys.stdin)
+e["hook_event_name"] = os.environ["EV"]
+e.setdefault("session_id", e.get("conversation_id") or "cursor-session")
+e.setdefault("cwd", (e.get("workspace_roots") or [""])[0])
+if "tool_name" not in e:
+    ti = e.get("toolInfo") or e.get("tool") or {}
+    if isinstance(ti, dict) and ti.get("name"):
+        e["tool_name"] = ti["name"]
+print(json.dumps(e, separators=(",", ":")))
+' 2>/dev/null)
+  fi
+  if [ -n "$patched" ]; then
+    stdin_text="$patched"
+    write_log "cursor patched: $stdin_text"
+  else
+    write_log "cursor payload patch skipped (no jq/python3)"
+  fi
 fi
 
 # Resolve project dir: env override first, else .cwd from the event JSON.
@@ -56,6 +104,9 @@ if [ -z "$project_dir" ]; then
 fi
 if [ -z "$project_dir" ]; then
   project_dir="$CLAUDE_PROJECT_DIR"
+fi
+if [ -z "$project_dir" ]; then
+  project_dir="$CURSOR_PROJECT_DIR"
 fi
 if [ -z "$project_dir" ]; then
   if command -v jq >/dev/null 2>&1; then
