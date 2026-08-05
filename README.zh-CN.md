@@ -8,6 +8,11 @@
 
 [English](README.md) · **简体中文**
 
+### 🎉 v1.1.5 — 正式支持 Cursor IDE！
+
+> **新增：** 全面支持 Cursor IDE！现在可以同时监控 Trae / Qoder / Cursor 三款 AI 编辑器的任务状态。
+> [下载 v1.1.5 →](https://github.com/marine841023/duty-on/releases/tag/v1.1.5)
+
 </div>
 
 ---

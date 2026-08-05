@@ -11,6 +11,12 @@
 [![Built with Tauri](https://img.shields.io/badge/Tauri-2.0-24C8D8?logo=tauri&logoColor=white)](https://v2.tauri.app)
 [![Release](https://img.shields.io/github/v/release/marine841023/duty-on)](https://github.com/marine841023/duty-on/releases)
 
+### 🎉 v1.1.5 — Now supports Cursor IDE!
+
+> **New:** Cursor IDE is now fully supported alongside Trae and Qoder!
+> The pet monitors all three AI editors simultaneously — Trae / Qoder / Cursor.
+> [Download v1.1.5 →](https://github.com/marine841023/duty-on/releases/tag/v1.1.5)
+
 **English** · [简体中文](README.zh-CN.md)
 
 </div>
