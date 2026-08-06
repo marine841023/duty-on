@@ -76,6 +76,10 @@
       <div class="menu-item" id="menu-flip" data-i18n="menu.flipHorizontal">左右翻转</div>
       <div class="menu-item" id="menu-mini-mode" data-i18n="menu.miniMode">迷你模式</div>
       <div class="menu-item" id="menu-auto-launch" data-i18n="menu.autoLaunch">开机自启动</div>
+      <!-- 外接显示屏功能暂时隐藏（允许外部访问 + 打开声音文件夹）；
+           恢复时去掉下面两项的 hidden 属性即可，JS 逻辑无需改动。 -->
+      <div class="menu-item" id="menu-external-access" data-i18n="menu.externalAccess" hidden>允许外部访问</div>
+      <div class="menu-item" id="menu-sounds-folder" data-i18n="menu.soundsFolder" hidden>打开声音文件夹</div>
       <div class="menu-item submenu-trigger" id="menu-language-trigger">
         <span data-i18n="menu.language">语言</span><span class="submenu-arrow">▶</span>
       </div>

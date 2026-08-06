@@ -4,6 +4,7 @@
 
 use crate::config;
 use crate::models::IdeKind;
+use sysinfo::System;
 
 /// A detected IDE window: project folder name + which IDE owns the window.
 /// Carries the IDE kind so the pet can badge each project in the status bar.
@@ -118,11 +119,81 @@ fn suspect_ide_titles(titles: &[String]) -> Vec<String> {
         .iter()
         .filter(|t| {
             let low = t.to_lowercase();
-            low.contains("qoder") || low.contains("trae") || low.contains("cursor")
+            // Codex/OpenCode are CLIs (no GUI window to parse), but a terminal
+            // hosting them may carry "codex"/"opencode" in its title — logging
+            // those suspects helps diagnose "why isn't my session showing up".
+            // They never become sessions: parse_title has no such suffix.
+            low.contains("qoder")
+                || low.contains("trae")
+                || low.contains("cursor")
+                || low.contains("codex")
+                || low.contains("opencode")
         })
         .take(8)
         .map(|t| t.chars().take(200).collect::<String>())
         .collect()
+}
+
+// ============================================================================
+// CLI agent process liveness (Codex / OpenCode)
+// ============================================================================
+//
+// Codex and OpenCode are CLI/TUI tools with no GUI window for the window
+// scanner to detect. When such a CLI crashes or is closed, its hook session
+// would otherwise hang in "working" until SESSION_TIMEOUT (10 min) — the pet
+// looks stuck. This polls the process list and reports whether each CLI is
+// still alive so the state manager can prune dead sessions fast (~8s at the
+// active scan rate).
+//
+// OpenCode may run under a `node` process (its plugin host), in which case the
+// image name won't contain "opencode" and liveness falls back to the existing
+// timeout — detected process names are logged for diagnosis.
+
+/// Liveness flags for the CLI agents we track.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CliLiveness {
+    pub codex_alive: bool,
+    pub opencode_alive: bool,
+}
+
+/// Scan the process list for codex / opencode image names (case-insensitive
+/// substring match). Cheap enough for the 4s active scan interval; on an empty
+/// process table both flags are false.
+pub fn scan_cli_processes() -> CliLiveness {
+    let mut sys = System::new();
+    sys.refresh_processes();
+    let mut codex_alive = false;
+    let mut opencode_alive = false;
+    for process in sys.processes().values() {
+        let name = process.name().to_lowercase();
+        if name.contains("codex") {
+            codex_alive = true;
+        }
+        if name.contains("opencode") {
+            opencode_alive = true;
+        }
+    }
+    if codex_alive || opencode_alive {
+        let detected: Vec<String> = sys
+            .processes()
+            .values()
+            .map(|p| p.name().to_string())
+            .filter(|n| {
+                let low = n.to_lowercase();
+                low.contains("codex") || low.contains("opencode")
+            })
+            .collect();
+        log::debug!(
+            "[scanner] cli liveness codex={} opencode={} procs={:?}",
+            codex_alive,
+            opencode_alive,
+            detected
+        );
+    }
+    CliLiveness {
+        codex_alive,
+        opencode_alive,
+    }
 }
 
 // ============================================================================

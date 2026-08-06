@@ -13,17 +13,24 @@
 //! the Node http server). `SO_KEEPALIVE` is set on the listening socket via
 //! raw `setsockopt` (axum 0.7's `Serve` does not expose `tcp_keepalive`).
 
+use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::config;
 use crate::state_manager::{HookEvent, SharedStateManager};
-use axum::extract::{Path, State};
+use crate::user_config;
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{header::CONTENT_TYPE, Method, StatusCode};
+use axum::middleware::{from_fn, Next};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde_json::json;
 use tokio::net::TcpListener;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt as _;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 // ── TCP keepalive FFI ──────────────────────────────────────────────────
@@ -154,13 +161,17 @@ mod keepalive_ffi {
 
 /// Build the axum Router with all routes, CORS, and shared state.
 /// Separated from `start` so tests can spin up a server on an ephemeral port.
+///
+/// Routes are split into two CORS tiers:
+///   - internal (`/hook` `/unregister` `/log` `/status` `/live2d/*`): Tauri
+///     webview origins only, and write endpoints are guarded by
+///     `loopback_guard` so an externally-bound server can't be fed fake events.
+///   - external (`/api/*` `/health`): any origin, read-only — the "hardware
+///     display" surface for third-party clients (a browser on a Raspberry Pi,
+///     a phone, etc.). CORS is wide open so cross-origin fetch + EventSource
+///     work without configuration.
 fn build_router(state: SharedStateManager) -> Router {
-    // CORS: restrict to Tauri webview origins only. Bridge scripts use
-    // curl/Invoke-RestMethod (non-browser clients ignore CORS), so only the
-    // webview's fetch/XHR calls need to pass preflight here. Headers are
-    // wide-open because the cubism4/pixi model loaders send library-specific
-    // request headers we cannot enumerate.
-    let cors = CorsLayer::new()
+    let internal_cors = CorsLayer::new()
         .allow_origin(AllowOrigin::list([
             "http://tauri.localhost".parse().unwrap(),
             "tauri://localhost".parse().unwrap(),
@@ -169,31 +180,81 @@ fn build_router(state: SharedStateManager) -> Router {
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers(Any);
 
-    Router::new()
+    let internal = Router::new()
         .route("/hook", post(hook))
         .route("/unregister", post(unregister))
         .route("/log", post(frontend_log))
         .route("/status", get(status))
-        .route("/health", get(health))
         .route("/live2d/*path", get(serve_live2d_file))
-        .layer(cors)
+        .layer(from_fn(loopback_guard))
+        .layer(internal_cors);
+
+    let api_cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::OPTIONS])
+        .allow_headers(Any);
+
+    let api = Router::new()
+        .route("/api/status", get(status))
+        .route("/api/events", get(api_events))
+        .route("/api/sounds/:state", get(serve_sound_file))
+        .route("/health", get(health))
+        .layer(api_cors);
+
+    Router::new()
+        .merge(internal)
+        .merge(api)
         .with_state(state)
 }
 
-/// Start the HTTP server on the configured loopback port. Runs until the
-/// runtime is shut down (app exit).
+/// Middleware rejecting non-loopback peers on the internal write endpoints
+/// (`/hook` `/unregister` `/log`). When `external_access` binds the server to
+/// 0.0.0.0, this keeps third-party devices from injecting fake hook events —
+/// they may only READ `/api/*`. On the default 127.0.0.1 bind every peer is
+/// loopback so the guard is a no-op.
+async fn loopback_guard(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !addr.ip().is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            "write endpoints are loopback-only; use /api/* for remote access",
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+/// Start the HTTP server. Runs until the runtime is shut down (app exit).
+///
+/// Bind address follows `user_config.external_access`: default 127.0.0.1
+/// (loopback only); when enabled, 0.0.0.0 so other devices on the LAN can read
+/// `/api/*` for the hardware-display use case. Write endpoints stay
+/// loopback-guarded either way. Toggling requires an app restart — a live
+/// listener's bind address can't change.
 pub async fn start(state: SharedStateManager) {
     let app = build_router(state);
 
-    match TcpListener::bind((config::HOST, config::PORT)).await {
+    let external = user_config::load().external_access.unwrap_or(false);
+    let host = if external { "0.0.0.0" } else { config::HOST };
+    match TcpListener::bind((host, config::PORT)).await {
         Ok(listener) => {
             log::info!(
-                "[PetServer] Listening on http://{}:{}",
-                config::HOST,
-                config::PORT
+                "[PetServer] Listening on http://{}:{} (external_access={})",
+                host,
+                config::PORT,
+                external
             );
             keepalive_ffi::set_keepalive(&listener, Duration::from_secs(60));
-            let serve = axum::serve(listener, app).tcp_nodelay(true);
+            // into_make_service_with_connect_info supplies the peer SocketAddr
+            // so loopback_guard can extract it via ConnectInfo<SocketAddr>.
+            let serve = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .tcp_nodelay(true);
             if let Err(e) = serve.await {
                 log::error!("[PetServer] serve error: {}", e);
             }
@@ -343,6 +404,62 @@ async fn frontend_log(Json(body): Json<serde_json::Value>) -> Response {
     ok_json(&json!({ "ok": true }))
 }
 
+/// GET /api/events — Server-Sent Events stream of state snapshots. Each time
+/// the state manager emits an `update` (session changed, state transition,
+/// alert reminder), the full Snapshot is pushed as an SSE `data` event. A
+/// keep-alive comment is sent every 15s so proxies don't drop idle
+/// connections. This is the real-time channel the hardware-display demo
+/// subscribes to (alongside a one-shot /api/status fetch on load).
+async fn api_events(
+    State(state): State<SharedStateManager>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let rx = {
+        let sm = state.lock().await;
+        sm.subscribe_update()
+    };
+    let stream = BroadcastStream::new(rx)
+        .filter_map(|r| r.ok())
+        .map(|snap| {
+            Ok::<Event, Infallible>(Event::default().data(
+                serde_json::to_string(&snap).unwrap_or_else(|_| "{}".to_string()),
+            ))
+        });
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    )
+}
+
+/// GET /api/sounds/:state — serve a user-provided sound clip for a state name
+/// (idle/working/alert/thinking/tool-use/confirmation-needed). Looks
+/// for `~/.dutyon/sounds/{state}.{mp3,wav,ogg}` and returns the first match.
+/// Sounds are optional per state — 404 when none exists (the demo simply
+/// stays silent). The state name is validated to alphanumerics + dash so a
+/// crafted path can't escape the sounds directory.
+async fn serve_sound_file(Path(state): Path<String>) -> Response {
+    if state.is_empty() || !state.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return (StatusCode::BAD_REQUEST, "invalid state").into_response();
+    }
+    let Some(home) = dirs::home_dir() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "home dir unavailable").into_response();
+    };
+    let dir = home.join(".dutyon").join("sounds");
+    for ext in ["mp3", "wav", "ogg"] {
+        let file = dir.join(format!("{}.{}", state, ext));
+        if let Ok(bytes) = tokio::fs::read(&file).await {
+            let mime = match ext {
+                "mp3" => "audio/mpeg",
+                "wav" => "audio/wav",
+                "ogg" => "audio/ogg",
+                _ => "application/octet-stream",
+            };
+            return (StatusCode::OK, [(CONTENT_TYPE, mime)], bytes).into_response();
+        }
+    }
+    (StatusCode::NOT_FOUND, "no sound for this state").into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,7 +478,11 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
         });
         // Yield once so the spawned server task gets to call accept().
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

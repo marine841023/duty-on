@@ -93,6 +93,51 @@ pub const CURSOR_HOOK_EVENTS: &[&str] = &[
     "stop",
 ];
 
+// Events wired into ~/.codex/hooks.json. Codex CLI uses the same PascalCase
+// event names and nested JSON schema as Trae/Claude Code, so no event-name
+// normalization is needed (unlike Cursor). We wire the 6 events the pet state
+// machine cares about; SubagentStart/Stop and Pre/PostCompact are omitted
+// (not relevant for pet state). PermissionRequest is the alert signal (like
+// Qoder). Note: Codex requires hooks to be trusted via `/hooks` in the CLI
+// after installation — see install result hint.
+pub const CODEX_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "PermissionRequest",
+];
+
+// OpenCode (opencode.ai) integration. Unlike Trae/Cursor/Codex, OpenCode has
+// NO config-file shell hook — its extension points are JS/TS plugins auto-
+// loaded from `~/.config/opencode/plugins/` at startup. So the installer does
+// NOT merge hook entries; instead it writes a self-contained plugin file
+// (`dutyon-bridge.js`) that subscribes to OpenCode's event bus and POSTs the
+// canonical hook events below to this app's HTTP server. The list is purely
+// documentary (the plugin emits these names); it is not consumed by any merge.
+// Event mapping (OpenCode -> canonical):
+//   session.created            -> SessionStart
+//   message.part.updated(text,user) -> UserPromptSubmit
+//   message.part.updated(tool,running)   -> PreToolUse
+//   message.part.updated(tool,completed) -> PostToolUse
+//   session.status(idle)/session.deleted -> Stop
+//   permission.asked/question.asked      -> PermissionRequest
+pub const OPENCODE_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "PermissionRequest",
+];
+/// Global plugin dir where OpenCode auto-loads JS/TS plugins at startup.
+/// opencode uses `~/.config/opencode/` consistently across platforms, so this
+/// is relative to the user's home directory.
+pub const OPENCODE_PLUGIN_SUBDIR: &str = ".config/opencode/plugins";
+/// Filename of the generated bridge plugin inside `OPENCODE_PLUGIN_SUBDIR`.
+pub const OPENCODE_PLUGIN_FILENAME: &str = "dutyon-bridge.js";
+
 // Tools whose calls bracket a "waiting for user input" period. Qoder has no
 // Notification event, so AskUserQuestion is the alert signal there:
 // PreToolUse(AskUserQuestion) → confirmation-needed; the matching PostToolUse

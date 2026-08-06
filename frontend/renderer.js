@@ -94,6 +94,7 @@ function applyTranslations() {
   buildSettingsMenu();
   buildLanguageMenu();
   loadAutoLaunchState();
+  loadExternalAccessState();
   updateHookStatusHint(hooksInstalled, currentSnapshot);
   checkHooksStatus();
   // Re-seed the project list so the "waiting" placeholder uses the new language.
@@ -165,6 +166,41 @@ async function toggleAutoLaunch() {
   const newState = !item.classList.contains('active');
   if (window.petAPI && window.petAPI.setAutoLaunch) {
     window.petAPI.setAutoLaunch(newState);
+  }
+  item.classList.toggle('active', newState);
+}
+
+// ===== External display access =====
+/**
+ * Load the external_access flag from config and update the menu checkmark.
+ * When enabled, the HTTP server binds 0.0.0.0 so other devices on the LAN
+ * can read the read-only /api/* routes (external display). Takes effect on
+ * the next restart.
+ */
+async function loadExternalAccessState() {
+  const item = document.getElementById('menu-external-access');
+  if (!item) return;
+  try {
+    const enabled = window.petAPI && window.petAPI.getExternalAccess
+      ? await window.petAPI.getExternalAccess()
+      : false;
+    item.classList.toggle('active', enabled);
+  } catch (err) {
+    console.warn('[externalAccess] Failed to read state:', err.message);
+  }
+}
+
+/**
+ * Toggle external access on/off. Persists via main process; the change needs
+ * an app restart to take effect (the live listener's bind address can't
+ * change).
+ */
+async function toggleExternalAccess() {
+  const item = document.getElementById('menu-external-access');
+  if (!item) return;
+  const newState = !item.classList.contains('active');
+  if (window.petAPI && window.petAPI.setExternalAccess) {
+    window.petAPI.setExternalAccess(newState);
   }
   item.classList.toggle('active', newState);
 }
@@ -372,7 +408,10 @@ async function initMenuMode() {
       for (let i = 0; i < count; i++) {
         const item = document.createElement('div');
         item.className = 'menu-item';
-        item.textContent = count > 1 ? name + ' #' + (i + 1) : name;
+        // Use motionDisplayName (translated label, e.g. 发呆/开心/哈欠) so the
+        // separate menu window matches the main window — raw group names like
+        // "Idle #1" / "Tap #2" looked like every motion had been renamed.
+        item.textContent = motionDisplayName(name, i);
         item.addEventListener('mouseenter', () => {
           sendAction('previewMotion', { group: name, idx: i });
         });
@@ -408,6 +447,7 @@ async function initMenuMode() {
     loadAppearance(),
   ]);
   loadAutoLaunchState();
+  loadExternalAccessState();
 
   // ---- Listen for live data from the main window ----
   window.__TAURI__.event.listen('menu-data', (e) => {
@@ -492,12 +532,24 @@ async function initMenuMode() {
     item.classList.toggle('active', newState);
     sendAction('toggleAutoLaunch');
   });
+  document.getElementById('menu-external-access').addEventListener('click', () => {
+    const item = document.getElementById('menu-external-access');
+    const newState = !item.classList.contains('active');
+    item.classList.toggle('active', newState);
+    sendAction('toggleExternalAccess');
+  });
 
   // Actions that close the menu
   document.getElementById('menu-upload-live2d').addEventListener('click', () => {
     closeSelf();
     if (window.petAPI && window.petAPI.openLive2DFolder) {
       Promise.resolve(window.petAPI.openLive2DFolder()).catch(() => {});
+    }
+  });
+  document.getElementById('menu-sounds-folder').addEventListener('click', () => {
+    closeSelf();
+    if (window.petAPI && window.petAPI.openSoundsFolder) {
+      Promise.resolve(window.petAPI.openSoundsFolder()).catch(() => {});
     }
   });
   document.getElementById('menu-test-alert').addEventListener('click', () => {
@@ -1718,7 +1770,7 @@ function updateStatusBar(snapshot) {
     // instead of letting the long alert text squeeze it out.
     name.className = 'project-name' + (session.status === 'confirmation-needed' ? ' alert' : '');
     name.textContent = session.projectName;
-    const ideName = session.ide === 'qoder' ? 'Qoder' : session.ide === 'trae' ? 'Trae CN' : session.ide === 'cursor' ? 'Cursor' : '';
+    const ideName = session.ide === 'qoder' ? 'Qoder' : session.ide === 'trae' ? 'Trae CN' : session.ide === 'cursor' ? 'Cursor' : session.ide === 'codex' ? 'Codex' : session.ide === 'opencode' ? 'OpenCode' : '';
     name.title = (ideName ? `[${ideName}] ` : '') + (session.projectPath || session.projectName);
 
     const statusText = document.createElement('div');
@@ -1729,6 +1781,10 @@ function updateStatusBar(snapshot) {
       // never displaces the project name.
       statusText.textContent = i18n.t('status.confirmationNeeded');
       if (session.alertMessage) statusText.title = session.alertMessage;
+    } else if (session.status === 'thinking') {
+      statusText.textContent = i18n.t('status.thinking');
+    } else if (session.status === 'tool-use') {
+      statusText.textContent = i18n.t('status.toolUse');
     } else if (session.status === 'working') {
       statusText.textContent = i18n.t('status.busy');
     } else {
@@ -1737,12 +1793,15 @@ function updateStatusBar(snapshot) {
 
     item.appendChild(dot);
 
-    // IDE badge (T = Trae, Q = Qoder, C = Cursor) when the source IDE is known.
+    // IDE badge (T = Trae, Q = Qoder, C = Cursor, X = Codex, O = OpenCode)
+    // when the source IDE is known. Codex shares the "C" initial with Cursor,
+    // so its badge shows "X" (the distinctive ending); the tooltip still
+    // reads "Codex". OpenCode's "O" is unique, so it uses the first letter.
     if (session.ide) {
       const ide = document.createElement('div');
       ide.className = `project-ide ide-${session.ide}`;
-      const ideLabel = session.ide === 'qoder' ? 'Qoder' : session.ide === 'cursor' ? 'Cursor' : 'Trae CN';
-      ide.textContent = ideLabel.charAt(0);
+      const ideLabel = session.ide === 'qoder' ? 'Qoder' : session.ide === 'cursor' ? 'Cursor' : session.ide === 'codex' ? 'Codex' : session.ide === 'opencode' ? 'OpenCode' : 'Trae CN';
+      ide.textContent = session.ide === 'codex' ? 'X' : ideLabel.charAt(0);
       ide.title = ideLabel;
       item.appendChild(ide);
     }
@@ -1808,9 +1867,10 @@ function setupIPC() {
       case 'toggleFlip': toggleFlip(); break;
       case 'toggleMiniMode': toggleMiniMode(); break;
       case 'toggleAutoLaunch': toggleAutoLaunch(); break;
+      case 'toggleExternalAccess': toggleExternalAccess(); break;
       case 'switchModel':
-        if (params && params.url && window.petAPI && window.petAPI.switchModel) {
-          window.petAPI.switchModel(params.url);
+        if (params && params.url) {
+          switchModel(params.url);
         }
         break;
       case 'switchLanguage':
@@ -2048,6 +2108,17 @@ function setupContextMenu() {
     }
   });
 
+  // 打开声音文件夹 -> open ~/.dutyon/sounds (creates it + README on first
+  // use). Users drop {state}.mp3 files here for the external display.
+  document.getElementById('menu-sounds-folder').addEventListener('click', () => {
+    closeMenu();
+    if (window.petAPI && window.petAPI.openSoundsFolder) {
+      Promise.resolve(window.petAPI.openSoundsFolder()).catch((e) =>
+        console.warn('[sounds] open folder failed:', e)
+      );
+    }
+  });
+
   document.getElementById('menu-play-motion').addEventListener('click', () => {
     openMotionView('play');
   });
@@ -2080,6 +2151,12 @@ function setupContextMenu() {
   // 开机自启动 -> toggle the Windows Run registry entry.
   document.getElementById('menu-auto-launch').addEventListener('click', () => {
     toggleAutoLaunch();
+  });
+
+  // 允许外部访问 -> toggle 0.0.0.0 binding for the /api/* read-only routes
+  // (external display). Needs an app restart to take effect.
+  document.getElementById('menu-external-access').addEventListener('click', () => {
+    toggleExternalAccess();
   });
 
   // 预览提醒效果 -> trigger a fake confirmation-needed session for 8s.
@@ -2159,6 +2236,8 @@ function showInstallResult(success, result, alreadyInstalled) {
         'Trae IDE: Settings -> Hooks -> Local auto-run -> Enable -> New AI session',
         'Qoder: restart the IDE (hooks load automatically on startup)',
         'Cursor: hooks.json reloads on save (restart the IDE if nothing happens)',
+        'Codex: run /hooks in the CLI to trust the hook, then start a new session',
+        'OpenCode: restart OpenCode to load the bridge plugin (auto-loaded from ~/.config/opencode/plugins/)',
       ].join('\n');
     }
     // Recovery notices (e.g. a foreign/corrupt config was backed up and
@@ -2223,6 +2302,8 @@ function showHookStatusDialog(status) {
     `${i18n.t('hook.dialogHooksJson')}: ${status.hooksExist ? i18n.t('hook.exists') : i18n.t('hook.missing')}`,
     `${i18n.t('hook.dialogQoderSettings')}: ${status.qoderHooksExist ? i18n.t('hook.exists') : i18n.t('hook.missing')}`,
     `${i18n.t('hook.dialogCursorHooks')}: ${status.cursorHooksExist ? i18n.t('hook.exists') : i18n.t('hook.missing')}`,
+    `${i18n.t('hook.dialogCodexHooks')}: ${status.codexHooksExist ? i18n.t('hook.exists') : i18n.t('hook.missing')}`,
+    `${i18n.t('hook.dialogOpencodePlugin')}: ${status.opencodePluginExist ? i18n.t('hook.exists') : i18n.t('hook.missing')}`,
   ];
   stateText.textContent = status.installed ? i18n.t('hook.dialogInstalledMsg') : i18n.t('hook.dialogNotInstalledMsg');
   stateText.title = lines.join('\n') + '\n\n' + i18n.t('hook.dialogHint');
@@ -2289,6 +2370,8 @@ function projectInitials(name) {
 
 function dockStatusText(status) {
   if (status === 'confirmation-needed') return i18n.t('status.confirmationNeeded');
+  if (status === 'thinking') return i18n.t('status.thinking');
+  if (status === 'tool-use') return i18n.t('status.toolUse');
   if (status === 'working') return i18n.t('status.busy');
   return i18n.t('status.idle');
 }
@@ -2339,7 +2422,11 @@ function updateEdgeDockIndicator() {
       level = 'alert';
       break;
     }
-    if (s.status === 'working') level = 'working';
+    // All active variants (working/thinking/tool-use) light the working lamp.
+    if (s.status === 'working' || s.status === 'thinking'
+        || s.status === 'tool-use') {
+      level = 'working';
+    }
   }
   indicator.className = `level-${level}`;
   indicator.title = level === 'alert'

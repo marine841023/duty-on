@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DutyOn 外接显示</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: #1e1e28;
+      color: rgba(255,255,255,0.9);
+      font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Connection bar ── */
+    #connection-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: rgba(255,255,255,0.04);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      flex-shrink: 0;
+    }
+    #connection-bar input {
+      flex: 1;
+      min-width: 120px;
+      background: rgba(0,0,0,0.3);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 6px;
+      padding: 6px 10px;
+      color: rgba(255,255,255,0.85);
+      font-size: 13px;
+      font-family: monospace;
+      outline: none;
+    }
+    #connection-bar input:focus { border-color: rgba(100,150,255,0.5); }
+    #connection-bar button {
+      background: rgba(100,150,255,0.2);
+      border: 1px solid rgba(100,150,255,0.3);
+      color: #9db9ff;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+    #connection-bar button:hover {
+      background: rgba(100,150,255,0.3);
+      color: #b0ccff;
+    }
+    #sound-toggle {
+      background: rgba(255,255,255,0.08) !important;
+      border-color: rgba(255,255,255,0.15) !important;
+      color: rgba(255,255,255,0.7) !important;
+      font-size: 16px;
+      padding: 4px 10px !important;
+    }
+    #sound-toggle.enabled {
+      background: rgba(255,200,50,0.18) !important;
+      border-color: rgba(255,200,50,0.35) !important;
+      color: #ffc832 !important;
+    }
+    #conn-status {
+      font-size: 12px;
+      color: rgba(255,255,255,0.4);
+      white-space: nowrap;
+    }
+    #conn-status.connected { color: #57d97a; }
+    #conn-status.disconnected { color: #ff6666; }
+
+    /* ── Main state display ── */
+    #main-state {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 18px 20px;
+      background: rgba(255,255,255,0.02);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      flex-shrink: 0;
+    }
+    #state-dot {
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      background: #6496ff;
+      opacity: 0.6;
+      flex-shrink: 0;
+      transition: background 0.3s ease, box-shadow 0.3s ease;
+    }
+    #state-dot.working {
+      background: #ffc832;
+      opacity: 1;
+      animation: pulse-dot 1s infinite;
+    }
+    #state-dot.alert {
+      background: #ff4444;
+      opacity: 1;
+      animation: pulse-dot 0.5s infinite;
+    }
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+    #state-text {
+      font-size: 18px;
+      font-weight: 600;
+      flex: 1;
+    }
+    #state-time {
+      font-size: 12px;
+      color: rgba(255,255,255,0.35);
+      font-family: monospace;
+    }
+
+    /* ── Session list ── */
+    #session-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 6px 0;
+    }
+    #session-list::-webkit-scrollbar { width: 4px; }
+    #session-list::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.15);
+      border-radius: 2px;
+    }
+    .session-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 20px;
+      border-left: 3px solid transparent;
+      transition: background 0.15s ease;
+    }
+    .session-item:hover { background: rgba(255,255,255,0.04); }
+    .session-item.status-idle { border-left-color: rgba(100,150,255,0.4); }
+    .session-item.status-working { border-left-color: rgba(255,200,50,0.6); background: rgba(255,200,50,0.05); }
+    .session-item.status-thinking { border-left-color: rgba(155,140,255,0.6); background: rgba(155,140,255,0.05); }
+    .session-item.status-tool-use { border-left-color: rgba(255,155,50,0.6); background: rgba(255,155,50,0.05); }
+    .session-item.status-confirmation-needed {
+      border-left-color: rgba(255,68,68,0.8);
+      background: rgba(255,68,68,0.08);
+      animation: item-glow 1.5s ease-in-out infinite alternate;
+    }
+    @keyframes item-glow {
+      0% { background: rgba(255,68,68,0.05); }
+      100% { background: rgba(255,68,68,0.12); }
+    }
+    .session-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .session-dot.idle { background: #6496ff; opacity: 0.5; }
+    .session-dot.working { background: #ffc832; animation: pulse-dot 1s infinite; }
+    .session-dot.thinking { background: #9b8cff; animation: pulse-dot 1s infinite; }
+    .session-dot.tool-use { background: #ff9b32; animation: pulse-dot 0.7s infinite; }
+    .session-dot.confirmation-needed { background: #ff4444; animation: pulse-dot 0.5s infinite; }
+
+    .session-ide {
+      width: 16px; height: 16px;
+      border-radius: 3px;
+      flex-shrink: 0;
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 16px;
+      text-align: center;
+    }
+    .session-ide.ide-trae { background: rgba(100,150,255,0.22); color: #9db9ff; }
+    .session-ide.ide-qoder { background: rgba(186,140,255,0.22); color: #cfaaff; }
+    .session-ide.ide-cursor { background: rgba(80,210,190,0.22); color: #8fe8d8; }
+    .session-ide.ide-codex { background: rgba(255,170,80,0.22); color: #ffc880; }
+    .session-ide.ide-opencode { background: rgba(255,120,160,0.22); color: #ff9fb5; }
+
+    .session-name {
+      flex: 1;
+      font-size: 13px;
+      color: rgba(255,255,255,0.85);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .session-status {
+      font-size: 12px;
+      flex-shrink: 0;
+      color: rgba(255,255,255,0.45);
+    }
+    .session-item.status-working .session-name,
+    .session-item.status-working .session-status { color: #ffc832; }
+    .session-item.status-thinking .session-name,
+    .session-item.status-thinking .session-status { color: #9b8cff; }
+    .session-item.status-tool-use .session-name,
+    .session-item.status-tool-use .session-status { color: #ff9b32; }
+    .session-item.status-confirmation-needed .session-name,
+    .session-item.status-confirmation-needed .session-status { color: #ff6666; font-weight: 600; }
+
+    .session-empty {
+      padding: 24px 20px;
+      text-align: center;
+      color: rgba(255,255,255,0.3);
+      font-style: italic;
+      font-size: 13px;
+    }
+
+    /* ── Footer ── */
+    #footer {
+      padding: 6px 14px;
+      background: rgba(0,0,0,0.2);
+      border-top: 1px solid rgba(255,255,255,0.06);
+      font-size: 11px;
+      color: rgba(255,255,255,0.25);
+      text-align: center;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+  <!-- Connection bar: server address + connect + sound toggle -->
+  <div id="connection-bar">
+    <input id="server-addr" value="http://127.0.0.1:17521" spellcheck="false">
+    <button id="connect-btn">连接</button>
+    <span id="conn-status">未连接</span>
+    <button id="sound-toggle" title="点击启用声音">🔇</button>
+  </div>
+
+  <!-- Main state indicator -->
+  <div id="main-state">
+    <div id="state-dot"></div>
+    <div id="state-text">等待连接…</div>
+    <div id="state-time"></div>
+  </div>
+
+  <!-- Session list (mirrors the pet's project list) -->
+  <div id="session-list">
+    <div class="session-empty">尚未连接到 DutyOn 服务</div>
+  </div>
+
+  <div id="footer">DutyOn 外接显示 · 只读模式 · 数据来自 /api/status + /api/events</div>
+
+  <script>
+  (function () {
+    'use strict';
+
+    // ── DOM refs ──
+    const addrInput = document.getElementById('server-addr');
+    const connectBtn = document.getElementById('connect-btn');
+    const connStatus = document.getElementById('conn-status');
+    const soundToggle = document.getElementById('sound-toggle');
+    const stateDot = document.getElementById('state-dot');
+    const stateText = document.getElementById('state-text');
+    const stateTime = document.getElementById('state-time');
+    const sessionList = document.getElementById('session-list');
+
+    // ── State ──
+    let serverAddr = addrInput.value.replace(/\/+$/, ''); // strip trailing slash
+    let eventSource = null;
+    let reconnectTimer = null;
+    let soundEnabled = false;
+    let lastTopStatus = null;  // last "top priority" session status (for sound triggers)
+    let lastOverallState = null;
+
+    // ── Status metadata: priority, color, label ──
+    // Priority order (highest first): confirmation-needed > tool-use > thinking >
+    // working > idle.  The "top status" across all sessions drives both the
+    // sound trigger and the fine-grained accent on the main indicator. A task
+    // finishing (Stop / completion Notification) goes straight to idle — there
+    // is no transient "complete" status anymore.
+    const STATUS_META = {
+      'confirmation-needed': { priority: 6, label: '需要确认', dot: 'alert' },
+      'tool-use':            { priority: 5, label: '执行中',   dot: 'working' },
+      'thinking':            { priority: 4, label: '思考中',   dot: 'working' },
+      'working':             { priority: 2, label: '忙碌',     dot: 'working' },
+      'idle':                { priority: 1, label: '空闲',     dot: '' },
+    };
+
+    // Map IdeKind (lowercase string from JSON) → badge letter
+    const IDE_LETTER = {
+      trae: 'T', qoder: 'Q', cursor: 'C', codex: 'X', opencode: 'O',
+    };
+
+    // ── Compute the highest-priority session status ──
+    function topStatus(sessions) {
+      if (!sessions || sessions.length === 0) return 'idle';
+      let best = 'idle';
+      for (const s of sessions) {
+        const meta = STATUS_META[s.status];
+        if (meta && (!STATUS_META[best] || meta.priority > STATUS_META[best].priority)) {
+          best = s.status;
+        }
+      }
+      return best;
+    }
+
+    // ── Play a sound for the given status via /api/sounds/:state ──
+    function playSound(status) {
+      if (!soundEnabled) return;
+      // Map status to the sound file name.  'confirmation-needed' also accepts
+      // 'alert' as an alias (the server checks both via the same endpoint).
+      const soundName = status === 'confirmation-needed' ? 'alert' : status;
+      const url = serverAddr + '/api/sounds/' + soundName;
+      const audio = new Audio(url);
+      audio.play().catch(function () {
+        // 404 (no sound file for this state) or autoplay block — stay silent.
+      });
+    }
+
+    // ── Render a snapshot ──
+    function renderSnapshot(snap) {
+      const overall = snap.overallState || 'sleeping';
+      const sessions = snap.sessions || [];
+
+      // Main indicator
+      stateDot.className = '';
+      if (overall === 'working') {
+        stateDot.classList.add('working');
+        stateText.textContent = '⚡ 忙碌中';
+        stateText.style.color = '#ffc832';
+      } else if (overall === 'alert') {
+        stateDot.classList.add('alert');
+        stateText.textContent = '🔔 需要确认！';
+        stateText.style.color = '#ff6666';
+      } else {
+        stateText.textContent = '💤 空闲中';
+        stateText.style.color = 'rgba(255,255,255,0.85)';
+      }
+
+      // Timestamp
+      if (snap.lastEventAt) {
+        const ago = Math.floor((Date.now() - snap.lastEventAt) / 1000);
+        stateTime.textContent = ago < 60 ? ago + 's前' : Math.floor(ago / 60) + 'm前';
+      }
+
+      // Session list
+      sessionList.innerHTML = '';
+      if (sessions.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'session-empty';
+        empty.textContent = '暂无活跃会话（等待 IDE 连接…）';
+        sessionList.appendChild(empty);
+      } else {
+        for (const s of sessions) {
+          const item = document.createElement('div');
+          item.className = 'session-item status-' + s.status;
+
+          // Dot
+          const dot = document.createElement('div');
+          dot.className = 'session-dot ' + s.status;
+          item.appendChild(dot);
+
+          // IDE badge
+          if (s.ide && IDE_LETTER[s.ide]) {
+            const badge = document.createElement('div');
+            badge.className = 'session-ide ide-' + s.ide;
+            badge.textContent = IDE_LETTER[s.ide];
+            item.appendChild(badge);
+          }
+
+          // Project name
+          const name = document.createElement('div');
+          name.className = 'session-name';
+          name.textContent = s.projectName || s.projectPath || '(unknown)';
+          if (s.alertMessage) name.title = s.alertMessage;
+          item.appendChild(name);
+
+          // Status text
+          const statusEl = document.createElement('div');
+          statusEl.className = 'session-status';
+          statusEl.textContent = (STATUS_META[s.status] || {}).label || s.status;
+          item.appendChild(statusEl);
+
+          sessionList.appendChild(item);
+        }
+      }
+
+      // Sound trigger: play when the top-priority session status changes.
+      // We DON'T play on the very first snapshot (lastTopStatus is null) —
+      // connecting shouldn't blast a sound.
+      const top = topStatus(sessions);
+      if (lastTopStatus !== null && top !== lastTopStatus) {
+        playSound(top);
+      }
+      lastTopStatus = top;
+      lastOverallState = overall;
+    }
+
+    // ── Fetch /api/status (one-shot, used on connect + SSE gap) ──
+    async function fetchStatus() {
+      try {
+        const res = await fetch(serverAddr + '/api/status');
+        if (!res.ok) return null;
+        return await res.json();
+      } catch (e) {
+        return null;
+      }
+    }
+
+    // ── Connect: fetch status, then open SSE ──
+    function connect() {
+      disconnect();
+      serverAddr = addrInput.value.replace(/\/+$/, '');
+
+      connStatus.textContent = '连接中…';
+      connStatus.className = '';
+
+      // 1. One-shot pull for immediate display (SSE may take a moment).
+      fetchStatus().then(function (snap) {
+        if (snap) {
+          renderSnapshot(snap);
+        }
+      });
+
+      // 2. SSE stream for real-time updates.
+      eventSource = new EventSource(serverAddr + '/api/events');
+      eventSource.onopen = function () {
+        connStatus.textContent = '已连接';
+        connStatus.className = 'connected';
+      };
+      eventSource.onmessage = function (e) {
+        try {
+          const snap = JSON.parse(e.data);
+          renderSnapshot(snap);
+        } catch (err) {
+          // Malformed event — ignore.
+        }
+      };
+      eventSource.onerror = function () {
+        connStatus.textContent = '已断开，重连中…';
+        connStatus.className = 'disconnected';
+        // EventSource auto-reconnects, but if the server is down it keeps
+        // retrying silently.  We also do a manual re-fetch after a delay so
+        // the one-shot /api/status path covers the gap.
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(function () {
+          fetchStatus().then(function (snap) {
+            if (snap) {
+              connStatus.textContent = '已连接';
+              connStatus.className = 'connected';
+              renderSnapshot(snap);
+            }
+          });
+        }, 3000);
+      };
+    }
+
+    function disconnect() {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    }
+
+    // ── Sound toggle: also unlocks audio (browsers block autoplay until a
+    //    user gesture).  Default OFF — the user opts in by clicking 🔊. ──
+    soundToggle.addEventListener('click', function () {
+      soundEnabled = !soundEnabled;
+      soundToggle.textContent = soundEnabled ? '🔊' : '🔇';
+      soundToggle.classList.toggle('enabled', soundEnabled);
+      soundToggle.title = soundEnabled ? '声音已开启' : '点击启用声音';
+    });
+
+    // ── Connect button + Enter in address input ──
+    connectBtn.addEventListener('click', connect);
+    addrInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') connect();
+    });
+
+    // ── Auto-connect on load ──
+    connect();
+
+    // ── Refresh the "time ago" label every 10s ──
+    setInterval(function () {
+      if (lastOverallState !== null) {
+        // Re-render just the time by re-fetching (cheap, read-only).
+        fetchStatus().then(function (snap) {
+          if (snap && eventSource && eventSource.readyState === 1) {
+            // SSE is live — don't overwrite, just update the time label.
+            if (snap.lastEventAt) {
+              const ago = Math.floor((Date.now() - snap.lastEventAt) / 1000);
+              stateTime.textContent = ago < 60 ? ago + 's前' : Math.floor(ago / 60) + 'm前';
+            }
+          }
+        });
+      }
+    }, 10000);
+  })();
+  </script>
+</body>
+</html>

@@ -97,7 +97,8 @@ fi
 
 # Resolve project dir: env override first, else .cwd from the event JSON.
 # QODER_PROJECT_DIR is set when invoked by Qoder's hook runner; TRAE_PROJECT_DIR
-# / CLAUDE_PROJECT_DIR when invoked by Trae IDE.
+# / CLAUDE_PROJECT_DIR when invoked by Trae IDE; CURSOR_PROJECT_DIR by Cursor;
+# CODEX_PROJECT_DIR by Codex CLI.
 project_dir="$TRAE_PROJECT_DIR"
 if [ -z "$project_dir" ]; then
   project_dir="$QODER_PROJECT_DIR"
@@ -107,6 +108,9 @@ if [ -z "$project_dir" ]; then
 fi
 if [ -z "$project_dir" ]; then
   project_dir="$CURSOR_PROJECT_DIR"
+fi
+if [ -z "$project_dir" ]; then
+  project_dir="$CODEX_PROJECT_DIR"
 fi
 if [ -z "$project_dir" ]; then
   if command -v jq >/dev/null 2>&1; then

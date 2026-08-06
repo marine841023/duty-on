@@ -12,8 +12,8 @@
     Diagnostic log is written to ~/.dutyon/hooks/bridge.log so we can confirm
     whether the IDE is actually invoking the hook.
 
-    The -Ide argument ("trae" / "qoder" / "cursor") is passed by the
-    installed hook command so the pet can badge each session with its source
+    The -Ide argument ("trae" / "qoder" / "cursor" / "codex") is passed by the
+installed hook command so the pet can badge each session with its source
     IDE. Cursor's stdin payload carries no event name, so its installed
     commands also pass -HookEvent (normalized to the canonical
     hook_event_name). The parameter must NOT be named `$Event` — that name
@@ -114,7 +114,8 @@ if ($Ide -eq 'cursor' -and [string]::IsNullOrWhiteSpace($event.tool_name)) {
 
 # Get project information from environment
 # QODER_PROJECT_DIR is set when invoked by Qoder's hook runner; TRAE_PROJECT_DIR
-# / CLAUDE_PROJECT_DIR when invoked by Trae IDE. Fall back to the event's cwd.
+# / CLAUDE_PROJECT_DIR when invoked by Trae IDE; CURSOR_PROJECT_DIR by Cursor;
+# CODEX_PROJECT_DIR by Codex CLI. Fall back to the event's cwd.
 $projectDir = $env:TRAE_PROJECT_DIR
 if ([string]::IsNullOrEmpty($projectDir)) {
   $projectDir = $env:QODER_PROJECT_DIR
@@ -124,6 +125,9 @@ if ([string]::IsNullOrEmpty($projectDir)) {
 }
 if ([string]::IsNullOrEmpty($projectDir)) {
   $projectDir = $env:CURSOR_PROJECT_DIR
+}
+if ([string]::IsNullOrEmpty($projectDir)) {
+  $projectDir = $env:CODEX_PROJECT_DIR
 }
 if ([string]::IsNullOrEmpty($projectDir)) {
   $projectDir = $event.cwd

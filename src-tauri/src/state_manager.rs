@@ -3,18 +3,20 @@
 //! Maintains a map of session_id → SessionInfo, processes hook events from
 //! the HTTP server, and computes the overall pet state (sleeping/working/alert).
 //!
-//! Session lifecycle:
-//!   SessionStart → idle
-//!   UserPromptSubmit → working
-//!   PreToolUse / PostToolUse → working
-//!   PreToolUse(AskUserQuestion) → confirmation-needed; its PostToolUse → working
+//! Session lifecycle (SessionStatus — Idle + 4 active variants):
+//!   SessionStart                       → Idle
+//!   UserPromptSubmit                   → Thinking
+//!   PreToolUse (non ask-user)          → ToolUse
+//!   PostToolUse (non ask-user)         → Thinking   (tool result → pondering)
+//!   PreToolUse(AskUserQuestion)        → ConfirmationNeeded; its PostToolUse → Thinking
 //!     (Qoder has no Notification event; the ask-user tool pair is its alert signal)
-//!   Notification (confirmation) → confirmation-needed
-//!   Stop → idle
+//!   Notification (confirmation)        → ConfirmationNeeded
+//!   Notification (complete) / Stop     → Idle
+//!   CLI agent (Codex/OpenCode) crash   → pruned by sync_cli_liveness
 //!
-//! Overall pet state:
+//! Overall pet state (unchanged, 3 tiers):
 //!   - If any session is confirmation-needed → alert
-//!   - Else if any session is working        → working
+//!   - Else if any session is working-ish    → working  (Thinking/ToolUse/Working)
 //!   - Else                                   → sleeping
 //!
 //! Events are delivered to the frontend via tokio broadcast channels
@@ -23,7 +25,7 @@
 //! re-reminders.
 
 use crate::config;
-use crate::ide_scanner::DetectedProject;
+use crate::ide_scanner::{CliLiveness, DetectedProject};
 use crate::models::IdeKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -41,12 +43,26 @@ pub enum PetState {
 }
 
 /// Per-session status.
+///
+/// `Working` is retained for backward compatibility (older snapshots / tests)
+/// but is no longer set by `handle_hook_event` — the finer `Thinking` /
+/// `ToolUse` variants replace it. Both map to `PetState::Working`; only
+/// `Idle` maps to `Sleeping` and `ConfirmationNeeded` to `Alert`.
+/// When a task finishes (Stop / completion Notification) the session goes
+/// straight to `Idle`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionStatus {
     Idle,
     Working,
     ConfirmationNeeded,
+    /// AI is thinking — between prompt submit and the first tool call, or
+    /// after a tool returns and before the next one. Replaces the old
+    /// catch-all `Working` for the "no tool in flight" phase.
+    Thinking,
+    /// AI is executing a tool (PreToolUse fired, matching PostToolUse not
+    /// yet seen). Distinguishes "running a command" from "pondering".
+    ToolUse,
 }
 
 /// Internal session record (carries timing fields not exposed in snapshots).
@@ -136,6 +152,11 @@ pub struct StateManager {
     now: Clock,
     /// Consecutive window-scan misses per real hook session (grace counter).
     window_miss_counts: HashMap<String, u32>,
+    /// Consecutive CLI-liveness misses per Codex/OpenCode session. CLI agents
+    /// have no GUI window, so a crash is detected only by the process
+    /// disappearing from the process list — `CLI_MISS_GRACE` consecutive
+    /// misses are required before pruning (sysinfo can briefly miss a process).
+    cli_miss_counts: HashMap<String, u32>,
 }
 
 /// Consecutive window-scan misses a REAL hook session tolerates before sync
@@ -144,6 +165,11 @@ pub struct StateManager {
 /// when startup completes), so a single miss must not kill a live hook
 /// session. `__window:` placeholders are still removed on the first miss.
 const WINDOW_MISS_GRACE: u32 = 3;
+
+/// Consecutive CLI-liveness misses a Codex/OpenCode session tolerates before
+/// sync removes it. sysinfo can transiently fail to enumerate a process, so a
+/// single miss must not kill a live CLI session.
+const CLI_MISS_GRACE: u32 = 2;
 
 impl StateManager {
     pub fn new() -> Self {
@@ -161,6 +187,7 @@ impl StateManager {
             last_signature: None,
             last_event_at: 0,
             window_miss_counts: HashMap::new(),
+            cli_miss_counts: HashMap::new(),
             update_tx,
             alert_tx,
             now,
@@ -223,7 +250,7 @@ impl StateManager {
                 session.alert_message = None;
             }
             "UserPromptSubmit" => {
-                session.status = SessionStatus::Working;
+                session.status = SessionStatus::Thinking;
                 session.alert_message = None;
             }
             "PreToolUse" => {
@@ -233,35 +260,40 @@ impl StateManager {
                     session.status = SessionStatus::ConfirmationNeeded;
                     session.alert_message = Some(Self::extract_alert_message(event));
                 } else {
-                    // AI is about to use a tool — always working (clears alert).
-                    session.status = SessionStatus::Working;
+                    // AI is about to use a tool — clears alert, marks tool-use.
+                    session.status = SessionStatus::ToolUse;
                     session.alert_message = None;
                 }
             }
             "PostToolUse" => {
                 if Self::is_ask_user_tool(event) {
-                    // The user answered; the agent resumed.
-                    session.status = SessionStatus::Working;
+                    // The user answered; the agent resumes thinking.
+                    session.status = SessionStatus::Thinking;
                     session.alert_message = None;
-                } else if session.status == SessionStatus::Working {
-                    // Already Working — tool completed, AI may call more tools.
-                    // (Stays Working; this is the normal in-flight case.)
+                } else if matches!(
+                    session.status,
+                    SessionStatus::ToolUse | SessionStatus::Working | SessionStatus::Thinking
+                ) {
+                    // Tool finished — AI is back to thinking (may call more
+                    // tools). This is the key refinement over the old flat
+                    // Working state: a returned tool result means "pondering",
+                    // not "still running the tool".
+                    session.status = SessionStatus::Thinking;
                 }
-                // If Idle (e.g., after a Stop event from manual abort), a stray
-                // delayed PostToolUse from the interrupted tool must NOT revive
-                // the Working state. If ConfirmationNeeded, keep waiting for the
-                // user's answer.
+                // If Idle (e.g. after a Stop from manual abort), a
+                // stray delayed PostToolUse must NOT revive the session. If
+                // ConfirmationNeeded, keep waiting for the user's answer.
             }
             "Notification" => {
                 // Notification fires when:
                 // 1. Tool execution needs user confirmation → confirmation-needed
-                // 2. AI completed task → idle
+                // 2. AI completed task → Idle
                 let needs_confirmation = Self::check_confirmation_needed(event, session);
                 if needs_confirmation {
                     session.status = SessionStatus::ConfirmationNeeded;
                     session.alert_message = Some(Self::extract_alert_message(event));
                 } else {
-                    // Task completed notification → clear alert and go idle.
+                    // Task completed notification → go straight to Idle.
                     session.status = SessionStatus::Idle;
                     session.alert_message = None;
                 }
@@ -274,6 +306,7 @@ impl StateManager {
                 session.alert_message = Some(Self::extract_alert_message(event));
             }
             "Stop" => {
+                // Task finished → straight to Idle (no transient Complete).
                 session.status = SessionStatus::Idle;
                 session.alert_message = None;
             }
@@ -418,7 +451,9 @@ impl StateManager {
                     new_state = PetState::Alert;
                     break;
                 }
-                SessionStatus::Working => {
+                SessionStatus::Working
+                | SessionStatus::Thinking
+                | SessionStatus::ToolUse => {
                     new_state = PetState::Working;
                 }
                 SessionStatus::Idle => {}
@@ -539,7 +574,16 @@ impl StateManager {
             // Mark working sessions idle only after a long silence — long
             // tool runs and Qoder's ask-user dialog (no hook event) both keep
             // a session silent for minutes while still genuinely active.
-            if session.status == SessionStatus::Working && elapsed > config::WORKING_TIMEOUT {
+            // Any active/transient status (old Working or the new Thinking /
+            // ToolUse) drops to Idle after the working silence
+            // timeout. ConfirmationNeeded is exempt (handled above).
+            if matches!(
+                session.status,
+                SessionStatus::Working
+                    | SessionStatus::Thinking
+                    | SessionStatus::ToolUse
+            ) && elapsed > config::WORKING_TIMEOUT
+            {
                 session.status = SessionStatus::Idle;
                 changed = true;
             }
@@ -622,6 +666,14 @@ impl StateManager {
                     self.window_miss_counts.remove(&id);
                     continue;
                 }
+                // Codex and OpenCode are CLI/TUI tools — they have no GUI
+                // window for the scanner to detect. Skip window-based pruning
+                // for their sessions; SESSION_TIMEOUT handles cleanup instead.
+                let session_ide = self.sessions.get(&id).and_then(|s| s.ide.clone());
+                if matches!(session_ide, Some(IdeKind::Codex) | Some(IdeKind::OpenCode)) {
+                    self.window_miss_counts.remove(&id);
+                    continue;
+                }
                 if id.starts_with(WINDOW_PREFIX) {
                     // Placeholder sessions track the window 1:1 — remove at once.
                     self.sessions.remove(&id);
@@ -633,9 +685,7 @@ impl StateManager {
                     // Qoder showing a setup page like "安装 - Qoder" instead
                     // of "file - project - Qoder"). Suppress the miss so the
                     // hook session isn't killed while the IDE is still open.
-                    let session_ide =
-                        self.sessions.get(&id).and_then(|s| s.ide.clone());
-                    if session_ide.map_or(false, |ide| detected_ides.contains(&ide))
+                    if session_ide.as_ref().map_or(false, |ide| detected_ides.contains(ide))
                     {
                         continue;
                     }
@@ -703,6 +753,48 @@ impl StateManager {
             self.recompute_state();
         }
     }
+
+    /// Reconcile Codex/OpenCode sessions with the CLI process list. CLI agents
+    /// have no GUI window, so `sync_detected_windows` can't prune them when
+    /// they crash — this does. Called by the scanner alongside
+    /// `sync_detected_windows`. A session is removed after `CLI_MISS_GRACE`
+    /// consecutive misses (the process vanished from the list), so a single
+    /// sysinfo hiccup doesn't kill a live session.
+    pub fn sync_cli_liveness(&mut self, liveness: &CliLiveness) {
+        let ids: Vec<String> = self.sessions.keys().cloned().collect();
+        let mut changed = false;
+        for id in ids {
+            let Some(session_ide) = self.sessions.get(&id).and_then(|s| s.ide.clone()) else {
+                continue;
+            };
+            // Only CLI agents are governed by process liveness; GUI IDEs are
+            // handled by sync_detected_windows.
+            if !matches!(session_ide, IdeKind::Codex | IdeKind::OpenCode) {
+                continue;
+            }
+            let alive = if session_ide == IdeKind::Codex {
+                liveness.codex_alive
+            } else {
+                // OpenCode (guaranteed by the matches! filter above).
+                liveness.opencode_alive
+            };
+            if alive {
+                self.cli_miss_counts.remove(&id);
+            } else {
+                let misses = self.cli_miss_counts.entry(id.clone()).or_insert(0);
+                *misses += 1;
+                if *misses >= CLI_MISS_GRACE {
+                    self.sessions.remove(&id);
+                    self.cli_miss_counts.remove(&id);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.last_signature = None; // force update emission
+            self.recompute_state();
+        }
+    }
 }
 
 /// Deduplication priority for a session status: higher = more important to
@@ -712,7 +804,9 @@ impl StateManager {
 fn dedup_priority(status: SessionStatus) -> u8 {
     match status {
         SessionStatus::ConfirmationNeeded => 3,
-        SessionStatus::Working => 2,
+        SessionStatus::Working
+        | SessionStatus::Thinking
+        | SessionStatus::ToolUse => 2,
         SessionStatus::Idle => 1,
     }
 }
@@ -828,6 +922,7 @@ mod tests {
         let mut e2 = event("s1", "Notification");
         e2.notification_type = Some("task_complete".to_string());
         sm.handle_hook_event(&e2);
+        // task_complete → Idle (maps to Sleeping).
         assert_eq!(sm.overall_state, PetState::Sleeping);
     }
 
@@ -908,7 +1003,12 @@ mod tests {
         let mut e = event("s1", "Notification");
         e.notification_type = Some("idle_prompt".to_string());
         sm.handle_hook_event(&e);
+        // idle_prompt is a completion type → straight to Idle.
         assert_eq!(sm.overall_state, PetState::Sleeping);
+        assert_eq!(
+            sm.get_snapshot().sessions[0].status,
+            SessionStatus::Idle
+        );
     }
 
     #[test]
@@ -922,11 +1022,16 @@ mod tests {
     }
 
     #[test]
-    fn stop_clears_to_idle() {
+    fn stop_goes_idle() {
         let (mut sm, _t) = make_manager();
         sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
         sm.handle_hook_event(&event("s1", "Stop"));
+        // Stop → straight to Idle (Sleeping).
         assert_eq!(sm.overall_state, PetState::Sleeping);
+        assert_eq!(
+            sm.get_snapshot().sessions[0].status,
+            SessionStatus::Idle
+        );
     }
 
     #[test]
@@ -1123,6 +1228,7 @@ mod tests {
         // The user answers (Stop resolves the session) → back to sleep tier.
         t.store(1000 + config::SESSION_TIMEOUT * 2 + 1000, Ordering::SeqCst);
         sm.handle_hook_event(&event("s1", "Stop"));
+        // Stop → Idle; the alert is cleared.
         assert_eq!(sm.overall_state, PetState::Sleeping);
     }
 
@@ -1237,10 +1343,134 @@ mod tests {
         sm.handle_hook_event(&e2);
         // Internal tracking still keeps both sessions.
         assert_eq!(sm.session_count(), 2);
-        // Snapshot collapses them into one entry, keeping the Working one.
+        // Snapshot collapses them into one entry, keeping the Thinking one
+        // (UserPromptSubmit → Thinking, priority 2 > SessionStart → Idle, 1).
         let snap = sm.get_snapshot();
         assert_eq!(snap.sessions.len(), 1);
-        assert_eq!(snap.sessions[0].status, SessionStatus::Working);
+        assert_eq!(snap.sessions[0].status, SessionStatus::Thinking);
         assert_eq!(snap.sessions[0].session_id, "s1");
+    }
+
+    #[test]
+    fn user_prompt_goes_thinking() {
+        let (mut sm, _t) = make_manager();
+        sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+        assert_eq!(sm.overall_state, PetState::Working);
+        assert_eq!(
+            sm.get_snapshot().sessions[0].status,
+            SessionStatus::Thinking
+        );
+    }
+
+    #[test]
+    fn pre_tool_use_regular_tool_is_tool_use() {
+        let (mut sm, _t) = make_manager();
+        sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+        let mut e = event("s1", "PreToolUse");
+        e.tool_name = Some("Bash".to_string());
+        sm.handle_hook_event(&e);
+        assert_eq!(
+            sm.get_snapshot().sessions[0].status,
+            SessionStatus::ToolUse
+        );
+    }
+
+    #[test]
+    fn post_tool_use_returns_to_thinking() {
+        let (mut sm, _t) = make_manager();
+        sm.handle_hook_event(&event("s1", "UserPromptSubmit")); // Thinking
+        let mut pre = event("s1", "PreToolUse");
+        pre.tool_name = Some("Bash".to_string());
+        sm.handle_hook_event(&pre); // ToolUse
+        let mut post = event("s1", "PostToolUse");
+        post.tool_name = Some("Bash".to_string());
+        sm.handle_hook_event(&post); // back to Thinking
+        assert_eq!(
+            sm.get_snapshot().sessions[0].status,
+            SessionStatus::Thinking
+        );
+    }
+
+    #[test]
+    fn post_tool_use_does_not_revive_after_stop() {
+        // A stray delayed PostToolUse arriving after Stop must NOT revive the
+        // session out of Idle.
+        let (mut sm, _t) = make_manager();
+        sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+        sm.handle_hook_event(&event("s1", "Stop")); // → Idle
+        let mut post = event("s1", "PostToolUse");
+        post.tool_name = Some("Bash".to_string());
+        sm.handle_hook_event(&post);
+        assert_eq!(
+            sm.get_snapshot().sessions[0].status,
+            SessionStatus::Idle
+        );
+    }
+
+    #[test]
+    fn thinking_decays_to_idle_after_timeout() {
+        let (mut sm, t) = make_manager();
+        sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+        assert_eq!(sm.overall_state, PetState::Working);
+        t.store(1000 + config::WORKING_TIMEOUT + 1, Ordering::SeqCst);
+        sm.cleanup_stale_sessions();
+        assert_eq!(sm.overall_state, PetState::Sleeping);
+        assert_eq!(
+            sm.get_snapshot().sessions[0].status,
+            SessionStatus::Idle
+        );
+    }
+
+    #[test]
+    fn sync_cli_liveness_removes_dead_codex() {
+        let (mut sm, _t) = make_manager();
+        let mut e = event("s1", "UserPromptSubmit");
+        e.ide = Some(IdeKind::Codex);
+        sm.handle_hook_event(&e);
+        assert_eq!(sm.session_count(), 1);
+        // Process gone — grace survives one miss, removed on the second.
+        sm.sync_cli_liveness(&CliLiveness {
+            codex_alive: false,
+            opencode_alive: false,
+        });
+        assert_eq!(sm.session_count(), 1);
+        sm.sync_cli_liveness(&CliLiveness {
+            codex_alive: false,
+            opencode_alive: false,
+        });
+        assert_eq!(sm.session_count(), 0);
+        assert_eq!(sm.overall_state, PetState::Sleeping);
+    }
+
+    #[test]
+    fn sync_cli_liveness_keeps_alive_codex() {
+        let (mut sm, _t) = make_manager();
+        let mut e = event("s1", "UserPromptSubmit");
+        e.ide = Some(IdeKind::Codex);
+        sm.handle_hook_event(&e);
+        // Alive: never removed, miss counter stays clear.
+        for _ in 0..5 {
+            sm.sync_cli_liveness(&CliLiveness {
+                codex_alive: true,
+                opencode_alive: false,
+            });
+        }
+        assert_eq!(sm.session_count(), 1);
+    }
+
+    #[test]
+    fn sync_cli_liveness_ignores_gui_ide_sessions() {
+        // Trae sessions are governed by the window scanner, not liveness.
+        let (mut sm, _t) = make_manager();
+        let mut e = event("s1", "UserPromptSubmit");
+        e.ide = Some(IdeKind::Trae);
+        sm.handle_hook_event(&e);
+        for _ in 0..5 {
+            sm.sync_cli_liveness(&CliLiveness {
+                codex_alive: false,
+                opencode_alive: false,
+            });
+        }
+        assert_eq!(sm.session_count(), 1);
     }
 }

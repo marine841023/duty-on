@@ -347,6 +347,26 @@ body.menu-window #context-menu {
   color: #57d97a;
 }
 
+/* Thinking (purple) / tool-use (orange): the two refined working-tier
+   states. Both map to PetState::Working but get distinct accents so the
+   status bar shows what the agent is doing right now. */
+.project-item.status-thinking {
+  border-left-color: rgba(155, 140, 255, 0.6);
+  background: rgba(155, 140, 255, 0.05);
+}
+.project-item.status-thinking .project-name,
+.project-item.status-thinking .project-status-text {
+  color: #9b8cff;
+}
+.project-item.status-tool-use {
+  border-left-color: rgba(255, 155, 50, 0.6);
+  background: rgba(255, 155, 50, 0.05);
+}
+.project-item.status-tool-use .project-name,
+.project-item.status-tool-use .project-status-text {
+  color: #ff9b32;
+}
+
 .project-item.status-confirmation-needed {
   border-left-color: rgba(255, 68, 68, 0.8);
   background: rgba(255, 68, 68, 0.08);
@@ -378,6 +398,8 @@ body.menu-window #context-menu {
 
 .project-dot.idle { background: #6496ff; opacity: 0.5; }
 .project-dot.working { background: #ffc832; animation: pulse-dot 1s infinite; }
+.project-dot.thinking { background: #9b8cff; animation: pulse-dot 1s infinite; }
+.project-dot.tool-use { background: #ff9b32; animation: pulse-dot 0.7s infinite; }
 .project-dot.confirmation-needed { background: #ff4444; animation: pulse-dot 0.5s infinite; }
 
 /* IDE badge: small letter chip marking which IDE the session belongs to. */
@@ -395,6 +417,8 @@ body.menu-window #context-menu {
 .project-ide.ide-trae { background: rgba(100, 150, 255, 0.22); color: #9db9ff; }
 .project-ide.ide-qoder { background: rgba(186, 140, 255, 0.22); color: #cfaaff; }
 .project-ide.ide-cursor { background: rgba(80, 210, 190, 0.22); color: #8fe8d8; }
+.project-ide.ide-codex { background: rgba(255, 170, 80, 0.22); color: #ffc880; }
+.project-ide.ide-opencode { background: rgba(255, 120, 160, 0.22); color: #ff9fb5; }
 
 .project-name {
   color: rgba(255, 255, 255, 0.85);
@@ -729,6 +753,8 @@ body.edge-dock #edge-dock-bar { display: flex; }
 
 .edge-dock-badge.status-idle { color: #6496ff; }
 .edge-dock-badge.status-working { color: #ffc832; animation: pulse-dot 1s infinite; }
+.edge-dock-badge.status-thinking { color: #9b8cff; animation: pulse-dot 1s infinite; }
+.edge-dock-badge.status-tool-use { color: #ff9b32; animation: pulse-dot 0.7s infinite; }
 .edge-dock-badge.status-confirmation-needed {
   color: #ff4444;
   animation: pulse-dot 0.5s infinite;

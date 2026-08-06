@@ -8,17 +8,19 @@ use crate::user_config;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// IDE type identifier for Trae, Qoder and Cursor.
+/// IDE type identifier for Trae, Qoder, Cursor, Codex and OpenCode.
 ///
-/// Serialized as lowercase `"trae"` / `"qoder"` / `"cursor"` (see
-/// `#[serde(rename_all)]`) so the frontend contract stays unchanged when
-/// swapping from plain strings.
+/// Serialized as lowercase `"trae"` / `"qoder"` / `"cursor"` / `"codex"` /
+/// `"opencode"` (see `#[serde(rename_all)]`) so the frontend contract stays
+/// unchanged when swapping from plain strings.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IdeKind {
     Trae,
     Qoder,
     Cursor,
+    Codex,
+    OpenCode,
 }
 
 impl IdeKind {
@@ -27,6 +29,8 @@ impl IdeKind {
             IdeKind::Trae => "trae",
             IdeKind::Qoder => "qoder",
             IdeKind::Cursor => "cursor",
+            IdeKind::Codex => "codex",
+            IdeKind::OpenCode => "opencode",
         }
     }
 }
@@ -55,6 +59,17 @@ pub fn user_models_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".dutyon")
         .join("live2d")
+}
+
+/// Directory where users drop optional per-state sound clips for the external
+/// display. Created on demand by the "open sounds folder" menu command. Files
+/// are named `{state}.{mp3,wav,ogg}` where state is one of
+/// idle/working/alert/thinking/tool-use/confirmation-needed.
+pub fn user_sounds_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".dutyon")
+        .join("sounds")
 }
 
 /// Return all available models (built-in catalog + user uploads) and the
@@ -292,6 +307,69 @@ Cómo añadir un nuevo modelo Live2D:
 5. Asegúrate de tener derechos legales para usar el modelo.
 Nota: este README se puede borrar; al hacer clic de nuevo en
 «Añadir modelo Live2D» en el menú se regenera.
+"##;
+
+/// Multilingual README written into the user sounds dir on first open (see
+/// `open_sounds_folder` in commands.rs). Sound files are optional per state —
+/// the external display simply stays silent when no file exists for a state.
+pub const SOUNDS_README: &str = r##"This folder holds optional sound clips for DutyOn (开工啦) external display.
+本文件夹用于存放「开工啦 DutyOn」外接显示屏幕的可选声音文件。
+
+============================================================
+简体中文
+============================================================
+为每个宠物状态放置一个声音文件，外接屏幕在进入该状态时自动播放。
+文件命名规则：{状态名}.{mp3|wav|ogg}
+支持的状态名：
+  idle                  空闲
+  thinking              思考中
+  tool-use              执行中（工具调用）
+  working               忙碌中（旧状态，兼容）
+  alert                 需要确认
+  confirmation-needed   需要确认（同 alert）
+示例：alert.mp3、thinking.wav、tool-use.ogg
+说明：
+- 声音是可选的，没有文件的状态保持静音。
+- 每个状态只需一个文件，优先级 mp3 > wav > ogg。
+- 本 README 可删除；再次点击菜单「打开声音文件夹」会重新生成。
+
+============================================================
+English
+============================================================
+Drop one sound file per pet state; the external display plays it when the
+state is entered. Naming: {state}.{mp3|wav|ogg}
+Supported states:
+  idle                  Idle
+  thinking              Thinking
+  tool-use              Using tool
+  working               Working (legacy, kept for compatibility)
+  alert                 Confirmation needed
+  confirmation-needed   Same as alert
+Example: alert.mp3, thinking.wav, tool-use.ogg
+Notes:
+- Sounds are optional — states without a file stay silent.
+- Only one file per state is needed; priority mp3 > wav > ogg.
+- This README can be deleted; reopening the sounds folder regenerates it.
+
+============================================================
+日本語
+============================================================
+ペットの状態ごとに音声ファイルを置くと、外接画面がその状態に入った
+時に自動再生します。ファイル名：{状態名}.{mp3|wav|ogg}
+状態名：idle / thinking / tool-use / working / alert /
+confirmation-needed
+例：alert.mp3、thinking.wav、tool-use.ogg
+音声は任意です。ファイルがない状態は無音のままです。
+
+============================================================
+한국어
+============================================================
+펫 상태별로 소리 파일을 넣으면 외부 화면이 해당 상태 진입 시 자동
+재생합니다. 파일명: {상태명}.{mp3|wav|ogg}
+상태명: idle / thinking / tool-use / working / alert /
+confirmation-needed
+예: alert.mp3, thinking.wav, tool-use.ogg
+소리는 선택 사항이며 파일이 없는 상태는 조용히 유지됩니다.
 "##;
 
 include!(concat!(env!("OUT_DIR"), "/models.gen.rs"));

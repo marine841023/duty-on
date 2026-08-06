@@ -11,11 +11,13 @@
 [![Built with Tauri](https://img.shields.io/badge/Tauri-2.0-24C8D8?logo=tauri&logoColor=white)](https://v2.tauri.app)
 [![Release](https://img.shields.io/github/v/release/marine841023/duty-on)](https://github.com/marine841023/duty-on/releases)
 
-### 🎉 v1.1.5 — Now supports Cursor IDE!
+### 🎉 v1.1.6 — External display + refined state machine!
 
-> **New:** Cursor IDE is now fully supported alongside Trae and Qoder!
-> The pet monitors all three AI editors simultaneously — Trae / Qoder / Cursor.
-> [Download v1.1.5 →](https://github.com/marine841023/duty-on/releases/tag/v1.1.5)
+> **New:** External display screen — show the pet's live status on a separate
+> device (Raspberry Pi, tablet, phone) with real-time SSE + per-state sounds.
+> State machine now distinguishes Thinking / Tool-Use / Complete phases.
+> Codex CLI and OpenCode are now supported alongside Trae / Qoder / Cursor.
+> [Download v1.1.6 →](https://github.com/marine841023/duty-on/releases/tag/v1.1.6)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -26,8 +28,8 @@
 Running AI agents in several IDE windows at once? Stop Alt-Tabbing to check
 whether they're still working, done, or waiting for your confirmation.
 **Duty On** is a tiny transparent Live2D character that floats above your
-desktop and shows the live status of every Trae / Qoder / Cursor IDE session
-at a glance:
+desktop and shows the live status of every Trae / Qoder / Cursor / Codex / OpenCode
+session at a glance:
 
 - 💤 **Sleeping** — everything is idle (she naps, Zzz…)
 - ⚡ **Working** — an AI task is running right now
@@ -46,8 +48,8 @@ Built with **Tauri 2 + Rust** (system WebView, no bundled Chromium):
 - **Live status at a glance** — one character reflects the aggregate state of
   all connected IDE sessions (alert > working > sleeping)
 - **Per-project status bar** — every IDE project listed under the pet with a
-  T/Q/C badge; click a project to focus its IDE window
-- **Multi-IDE** — monitors any number of Trae / Qoder / Cursor instances
+  T/Q/C/X/O badge; click a project to focus its IDE window
+- **Multi-IDE** — monitors any number of Trae / Qoder / Cursor / Codex / OpenCode instances
   concurrently
 - **True click-through** — the window is transparent to the mouse except over
   the character and menus (30 ms cursor polling, Win32/CoreGraphics/X11)

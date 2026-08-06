@@ -64,6 +64,13 @@
     },
     switchModel: (modelUrl) => invoke('switch_model', { modelUrl }),
     openLive2DFolder: () => invoke('open_live2d_folder'),
+    openSoundsFolder: () => invoke('open_sounds_folder'),
+
+    // ===== External display access =====
+    // When true the HTTP server binds 0.0.0.0 so other devices on the LAN can
+    // read the read-only /api/* routes (external display). Toggle needs restart.
+    getExternalAccess: () => invoke('get_external_access'),
+    setExternalAccess: (enabled) => invoke('set_external_access', { enabled }),
 
     // ===== Per-state motions =====
     getStateMotions: () => invoke('get_state_motions'),

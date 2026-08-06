@@ -8,10 +8,12 @@
 
 [English](README.md) · **简体中文**
 
-### 🎉 v1.1.5 — 正式支持 Cursor IDE！
+### 🎉 v1.1.6 — 外接显示屏幕 + 状态机细化！
 
-> **新增：** 全面支持 Cursor IDE！现在可以同时监控 Trae / Qoder / Cursor 三款 AI 编辑器的任务状态。
-> [下载 v1.1.5 →](https://github.com/marine841023/duty-on/releases/tag/v1.1.5)
+> **新增：** 外接显示屏幕 — 在树莓派、平板、手机等设备上实时显示桌宠状态，
+> 支持每个状态对应的声音提醒。状态机细化为 思考中 / 执行中 / 完成 三阶段。
+> 新增 Codex CLI 和 OpenCode 支持。
+> [下载 v1.1.6 →](https://github.com/marine841023/duty-on/releases/tag/v1.1.6)
 
 </div>
 

@@ -31,6 +31,13 @@ pub struct UserConfig {
     pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_position: Option<WindowPosition>,
+    /// When true, the HTTP server binds to 0.0.0.0 instead of 127.0.0.1 so
+    /// other devices on the LAN can read the read-only `/api/*` routes (the
+    /// "external display" surface). Write endpoints stay loopback-guarded
+    /// either way. Toggling requires an app restart — a live listener's bind
+    /// address can't change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_access: Option<bool>,
 }
 
 /// Path to `~/.dutyon/config.json`.
@@ -97,6 +104,7 @@ mod tests {
         cfg.language = Some("ja".to_string());
         cfg.window_position = Some(WindowPosition { x: 100, y: 200 });
         cfg.state_motions = Some(serde_json::json!({"working": "motion_01"}));
+        cfg.external_access = Some(true);
 
         // Serialize → deserialize → compare.
         let json = serde_json::to_string(&cfg).unwrap();
@@ -111,6 +119,7 @@ mod tests {
             cfg.window_position
         );
         assert_eq!(deserialized.state_motions, cfg.state_motions);
+        assert_eq!(deserialized.external_access, cfg.external_access);
     }
 
     #[test]
@@ -122,6 +131,7 @@ mod tests {
         assert!(cfg.language.is_none());
         assert!(cfg.window_position.is_none());
         assert!(cfg.state_motions.is_none());
+        assert!(cfg.external_access.is_none());
     }
 
     #[test]

@@ -46,6 +46,9 @@ pub fn run() {
             commands::get_models,
             commands::switch_model,
             commands::open_live2d_folder,
+            commands::open_sounds_folder,
+            commands::get_external_access,
+            commands::set_external_access,
             commands::get_state_motions,
             commands::set_state_motions,
             commands::get_appearance,
@@ -410,9 +413,20 @@ fn spawn_ide_scanner(sm: SharedStateManager) {
     tauri::async_runtime::spawn(async move {
         let mut last_names: Vec<String> = Vec::new();
         loop {
-            let (names, suspects) = tokio::task::spawn_blocking(ide_scanner::scan_ide_projects)
+            // Run both the window scan and the CLI liveness probe in one
+            // blocking task (each touches the OS and would stall the async
+            // runtime if called on the async thread).
+            let ((names, suspects), liveness) =
+                tokio::task::spawn_blocking(|| {
+                    (
+                        ide_scanner::scan_ide_projects(),
+                        ide_scanner::scan_cli_processes(),
+                    )
+                })
                 .await
-                .unwrap_or_default();
+                .unwrap_or_else(|_| {
+                    ((Vec::new(), Vec::new()), ide_scanner::CliLiveness::default())
+                });
             let name_list: Vec<String> = names
                 .iter()
                 .map(|d| format!("{}({})", d.name, d.ide.as_str()))
@@ -430,6 +444,7 @@ fn spawn_ide_scanner(sm: SharedStateManager) {
             let next_delay = {
                 let mut s = sm.lock().await;
                 s.sync_detected_windows(&names);
+                s.sync_cli_liveness(&liveness);
                 if s.session_count() > 0 {
                     config::SCAN_INTERVAL_ACTIVE_MS
                 } else {

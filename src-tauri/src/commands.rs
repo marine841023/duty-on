@@ -126,6 +126,41 @@ pub fn open_live2d_folder() -> Result<(), String> {
     open_in_file_manager(&dir)
 }
 
+/// Open the user sounds folder in the OS file manager, creating it (plus a
+/// multilingual README explaining the {state}.{ext} naming convention) on
+/// first use. Sound files are served read-only via GET /api/sounds/:state and
+/// played by the external display when the matching state is entered.
+#[tauri::command]
+pub fn open_sounds_folder() -> Result<(), String> {
+    let dir = models::user_sounds_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
+    let readme = dir.join("README.txt");
+    if !readme.exists() {
+        std::fs::write(&readme, models::SOUNDS_README)
+            .map_err(|e| format!("Failed to write README: {}", e))?;
+    }
+    open_in_file_manager(&dir)
+}
+
+// ===== External display access =====
+
+/// Read the `external_access` flag from config. When true the HTTP server
+/// binds to 0.0.0.0 so other devices on the LAN can read the read-only
+/// `/api/*` routes (external display). Defaults to false (loopback only).
+#[tauri::command]
+pub fn get_external_access() -> Result<bool, String> {
+    Ok(user_config::load().external_access.unwrap_or(false))
+}
+
+/// Persist the `external_access` flag. Takes effect on the next app restart —
+/// a live listener's bind address can't change, so the renderer hints the
+/// user to restart after toggling.
+#[tauri::command]
+pub fn set_external_access(enabled: bool) {
+    user_config::update(|cfg| cfg.external_access = Some(enabled));
+}
+
 /// Open a directory in the OS file manager. Windows `explorer` returns a
 /// non-zero exit code even on success, so spawn-and-forget everywhere.
 #[cfg(windows)]
