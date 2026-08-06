@@ -202,7 +202,10 @@ pub const ALERT_ON_AMBIGUOUS_NOTIFICATION: bool = false;
 pub const SCAN_INTERVAL_ACTIVE_MS: u64 = 4000;
 pub const SCAN_INTERVAL_IDLE_MS: u64 = 15000;
 // Window titles look like "<file> - <project> - Trae CN".
+// Newer Trae builds rebranded the suffix to "TraeCode CN" — both are matched
+// so users on either version are detected. See ide_scanner::parse_title.
 pub const TRAE_TITLE_SUFFIX: &str = " - Trae CN";
+pub const TRAE_CODE_TITLE_SUFFIX: &str = " - TraeCode CN";
 // Qoder window titles look like "<file> - <project> - Qoder".
 pub const QODER_TITLE_SUFFIX: &str = " - Qoder";
 // Cursor (VS Code fork) window titles look like "<file> - <project> - Cursor".

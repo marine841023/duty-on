@@ -23,6 +23,7 @@ fn strip_privilege_suffix(title: &str) -> &str {
     for suffix in [
         config::QODER_TITLE_SUFFIX,
         config::TRAE_TITLE_SUFFIX,
+        config::TRAE_CODE_TITLE_SUFFIX,
         config::CURSOR_AGENTS_TITLE_SUFFIX,
         config::CURSOR_TITLE_SUFFIX,
         config::CURSOR_AGENTS_TITLE,
@@ -48,7 +49,8 @@ fn strip_privilege_suffix(title: &str) -> &str {
 /// Returns None if the title is not a recognized IDE window title or is a
 /// generic title (no project open, e.g. "Trae CN - Trae CN").
 ///
-/// Trae IDE: "<file> - <project> - Trae CN"
+/// Trae IDE: "<file> - <project> - Trae CN" (older builds)
+///           "<file> - <project> - TraeCode CN" (rebranded newer builds)
 /// Qoder:    "<file> - <project> - Qoder"
 /// Cursor:   "<file> - <project> - Cursor"
 ///           "<folder> - Cursor Agents" / "Cursor Agents" (3.x Agents panel —
@@ -64,7 +66,9 @@ fn parse_title(title: &str) -> Option<(&str, IdeKind)> {
     if title == config::CURSOR_AGENTS_TITLE {
         return Some((config::CURSOR_AGENTS_TITLE, IdeKind::Cursor));
     }
-    let ide = if title.ends_with(config::TRAE_TITLE_SUFFIX) {
+    let ide = if title.ends_with(config::TRAE_TITLE_SUFFIX)
+        || title.ends_with(config::TRAE_CODE_TITLE_SUFFIX)
+    {
         IdeKind::Trae
     } else if title.ends_with(config::QODER_TITLE_SUFFIX) {
         IdeKind::Qoder
@@ -83,6 +87,7 @@ fn parse_title(title: &str) -> Option<(&str, IdeKind)> {
     if folder.is_empty()
         || folder == "Trae"
         || folder == "Trae CN"
+        || folder == "TraeCode CN"
         || folder == "Qoder"
         || folder == "Cursor"
     {
@@ -783,6 +788,29 @@ mod tests {
     fn parse_title_elevated_trae_suffix() {
         let result = parse_title("main.rs - MyProject - Trae CN [管理员]");
         assert_eq!(result, Some(("MyProject", IdeKind::Trae)));
+    }
+
+    #[test]
+    fn parse_title_rebranded_traecode() {
+        // Newer Trae builds rebranded the window suffix to "TraeCode CN".
+        // This is the title shape that broke detection when Trae auto-updated.
+        let result = parse_title("renderer.js - traeSprite - TraeCode CN");
+        assert_eq!(result, Some(("traeSprite", IdeKind::Trae)));
+    }
+
+    #[test]
+    fn parse_title_elevated_traecode_suffix() {
+        // Elevated (run-as-admin) rebranded Trae window.
+        let result = parse_title("main.rs - MyProject - TraeCode CN [管理员]");
+        assert_eq!(result, Some(("MyProject", IdeKind::Trae)));
+    }
+
+    #[test]
+    fn parse_title_traecode_generic_no_project() {
+        // "TraeCode CN - TraeCode CN" → folder segment is "TraeCode CN"
+        // → filtered out (no project open), same as "Trae CN - Trae CN".
+        let result = parse_title("TraeCode CN - TraeCode CN");
+        assert_eq!(result, None);
     }
 
     #[test]
