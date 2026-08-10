@@ -399,6 +399,17 @@ pub fn detect_edge_dock(
 /// passes `content_height` in logical px, clamped to sane bounds), vertically
 /// centered on where the window was dropped. Remembers the previous rect and
 /// edge for `exit_edge_dock`.
+///
+/// **Multi-monitor consistency:** The frontend calls `detect_edge_dock` first
+/// and passes the returned edge here. But `detect_edge_dock` and this function
+/// each called `best_monitor` independently — when the window straddles a
+/// boundary near the 50/50 overlap point, a 1 px shift between the two IPC
+/// calls can flip `best_monitor` to the neighbouring screen. Using the stale
+/// edge with the new monitor placed the bar on the WRONG edge of the WRONG
+/// monitor (e.g. the far right of monitor 2 instead of the boundary), making
+/// the window appear to "disappear". Fix: re-run `snap_target` here so the
+/// monitor and edge are always resolved together; fall back to the
+/// frontend-provided edge only if the window has drifted out of threshold.
 #[tauri::command]
 pub fn enter_edge_dock(
     window: WebviewWindow,
@@ -416,18 +427,26 @@ pub fn enter_edge_dock(
 
     let monitors = app.available_monitors().map_err(|e| e.to_string())?;
     let cy = pos.y + size.height as i32 / 2;
-    // Same "most content wins" selection as detect_edge_dock so the bar is
-    // placed on the edge that actually triggered the snap.
-    let mon = best_monitor(&monitors, pos, size)
-        .ok_or_else(|| "no monitors found".to_string())?;
+
+    // Resolve monitor + edge TOGETHER via snap_target so they can never
+    // disagree. If the window drifted out of threshold between detect and
+    // enter (rare), fall back to the frontend-provided edge.
+    let (mon, resolved_edge) = match snap_target(&monitors, pos, size) {
+        Some((m, e)) => (m, e.to_string()),
+        None => {
+            let m = best_monitor(&monitors, pos, size)
+                .ok_or_else(|| "no monitors found".to_string())?;
+            (m, edge.clone())
+        }
+    };
     let mp = mon.position();
     let ms = mon.size();
 
     // Vertically centered on the drop position, clamped inside the monitor.
-    let (x, y, w, h) = dock_bar_rect(mp, ms, &edge, factor, cy, content_height);
+    let (x, y, w, h) = dock_bar_rect(mp, ms, &resolved_edge, factor, cy, content_height);
 
     *state.docked.lock().unwrap() =
-        Some(((pos.x, pos.y, size.width, size.height), edge.clone()));
+        Some(((pos.x, pos.y, size.width, size.height), resolved_edge));
     window
         .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(w, h)))
         .map_err(|e| e.to_string())?;
