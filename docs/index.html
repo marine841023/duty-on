@@ -3,12 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Duty On · 开工啦 — 让喜欢的角色替你盯梢 AI 编程</title>
-<meta name="description" content="开工啦 (Duty On)：让喜欢的角色替你盯梢——AI 在忙什么，一眼就知道。浮在桌面顶层的 Live2D 精灵，随心换角色，实时监控所有 Trae/Qoder/Cursor IDE 里 AI 任务的状态。Tauri 2 + Rust，开源免费。">
+<title>Duty On · 开工啦 — 为中国 Trae 用户量身打造的 AI 编程桌宠</title>
+<meta name="description" content="开工啦 (Duty On)：为中国 Trae 用户量身打造的 Live2D 桌面精灵。实时监控 Trae / Qoder / Cursor / Codex / OpenCode 的 AI 任务状态。Tauri 2 + Rust，内存仅 ~80MB，开源免费。">
 <style>
   :root {
     --bg: #0f1123; --bg2: #171a35; --card: #1e2244; --line: #2c3160;
     --fg: #eef0ff; --dim: #9aa0c7; --accent: #7c6cf8; --teal: #39d0c4; --amber: #ffb347;
+    --trae: #00d56b; --qoder: #ff6b35; --cursor: #5a8bff; --codex: #ff8c42; --opencode: #b388ff;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: var(--bg); color: var(--fg); font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; }
@@ -18,10 +19,12 @@
   /* hero */
   header.hero { position: relative; overflow: hidden; background: radial-gradient(1200px 500px at 70% 20%, #2a2f63 0%, var(--bg) 60%); }
   .hero-inner { display: grid; grid-template-columns: 1.1fr 1fr; gap: 40px; align-items: center; padding: 88px 0 72px; }
-  .badge { display: inline-block; font-size: 13px; color: var(--teal); border: 1px solid var(--line); border-radius: 999px; padding: 4px 14px; background: rgba(57,208,196,.08); margin-bottom: 18px; }
+  .badge { display: inline-block; font-size: 13px; color: var(--teal); border: 1px solid var(--line); border-radius: 999px; padding: 4px 14px; background: rgba(57,208,196,.08); margin-bottom: 12px; }
+  .badge-cn { border-color: rgba(0,213,107,.5); color: var(--trae); background: rgba(0,213,107,.08); }
+  .badge-ver { border-color: rgba(255,179,71,.5); color: var(--amber); background: rgba(255,179,71,.08); }
   h1 { font-size: 52px; line-height: 1.15; letter-spacing: -1px; }
   h1 .zh { display: block; font-size: 26px; color: var(--dim); font-weight: 500; margin-top: 8px; letter-spacing: 2px; }
-  .tagline { margin: 20px 0 30px; color: var(--dim); font-size: 17px; max-width: 46ch; }
+  .tagline { margin: 20px 0 30px; color: var(--dim); font-size: 17px; max-width: 48ch; }
   .cta { display: flex; gap: 14px; flex-wrap: wrap; }
   .btn { display: inline-flex; align-items: center; gap: 8px; padding: 13px 26px; border-radius: 12px; font-size: 15px; font-weight: 600; transition: transform .15s ease, box-shadow .15s ease; }
   .btn:hover { transform: translateY(-2px); }
@@ -42,12 +45,32 @@
   .section-title { text-align: center; font-size: 32px; margin-bottom: 8px; }
   .section-sub { text-align: center; color: var(--dim); margin-bottom: 44px; }
 
+  /* IDE support */
+  .ide-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+  .ide-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 24px 16px; text-align: center; transition: transform .15s ease, border-color .15s ease; }
+  .ide-card:hover { transform: translateY(-4px); }
+  .ide-card .ide-name { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+  .ide-card .ide-badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px; margin-top: 6px; font-weight: 600; }
+  .ide-card .ide-desc { color: var(--dim); font-size: 12.5px; margin-top: 8px; line-height: 1.5; }
+  .ide-card.trae { border-color: rgba(0,213,107,.4); box-shadow: 0 0 0 1px rgba(0,213,107,.1); }
+  .ide-card.trae .ide-name { color: var(--trae); }
+  .ide-card.trae .ide-badge { background: rgba(0,213,107,.15); color: var(--trae); }
+  .ide-card.trae::before { content: "⭐ 首选支持"; display: block; font-size: 11px; color: var(--trae); margin-bottom: 8px; font-weight: 600; }
+
   /* features */
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
   .feat { background: var(--bg2); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
   .feat h4 { font-size: 16px; margin-bottom: 6px; }
   .feat p { color: var(--dim); font-size: 13.5px; }
   .feat .ico { font-size: 22px; }
+
+  /* why */
+  .why-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .why-card { background: var(--bg2); border: 1px solid var(--line); border-radius: 14px; padding: 24px; }
+  .why-card h4 { font-size: 16px; margin-bottom: 8px; }
+  .why-card .why-icon { font-size: 28px; margin-bottom: 8px; display: block; }
+  .why-card p { color: var(--dim); font-size: 13.5px; }
+  .why-card .highlight { color: var(--teal); font-weight: 600; }
 
   /* how */
   .how { background: var(--bg2); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
@@ -70,9 +93,12 @@
   footer { border-top: 1px solid var(--line); padding: 36px 0 48px; color: var(--dim); font-size: 13.5px; text-align: center; }
 
   @media (max-width: 860px) {
-    .hero-inner, .split { grid-template-columns: 1fr; }
-    .states, .grid { grid-template-columns: 1fr; }
+    .hero-inner, .split, .why-grid { grid-template-columns: 1fr; }
+    .states, .grid, .ide-grid { grid-template-columns: 1fr; }
     h1 { font-size: 38px; }
+  }
+  @media (max-width: 600px) {
+    .ide-grid { grid-template-columns: repeat(2, 1fr); }
   }
 </style>
 </head>
@@ -81,16 +107,17 @@
 <header class="hero">
   <div class="wrap hero-inner">
     <div>
+      <span class="badge badge-cn">🇨🇳 为中国 Trae 用户量身打造</span>
       <span class="badge">开源 · Tauri 2 + Rust · 内存仅 ~80MB</span>
-      <span class="badge" style="border-color:rgba(255,179,71,.5);color:var(--amber);background:rgba(255,179,71,.08)">🎉 v1.1.6 外接显示屏幕 + 状态机细化</span>
+      <span class="badge badge-ver">🎉 v1.1.8 Codex 兼容修复 + CLI 会话保活</span>
       <h1>Duty On<span class="zh">开工啦 · 你的 AI 打工监督员</span></h1>
       <p class="tagline">
-        让喜欢的角色替你盯梢——AI 在忙什么，一眼就知道。
-        随心换上你的本命角色，让她浮在桌面替你盯着所有 Trae / Qoder / Cursor / Codex / OpenCode 会话：
-        干活、干完、还是卡在等你确认，再也不用 Alt-Tab 挨个查。
+        专为 <strong>Trae</strong> 设计的 Live2D 桌面精灵——同时监控
+        <strong>Trae / Qoder / Cursor / Codex / OpenCode</strong>
+        的 AI 任务状态。干活、干完、还是卡在等你确认，看一眼桌宠就知道，再也不用 Alt-Tab 挨个查。
       </p>
       <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/marine841023/duty-on/releases/tag/v1.1.6">⬇ 下载 v1.1.6</a>
+        <a class="btn btn-primary" href="https://github.com/marine841023/duty-on/releases/tag/v1.1.8">⬇ 下载 v1.1.8</a>
         <a class="btn btn-ghost" href="#guide">📖 使用指南</a>
         <a class="btn btn-ghost" href="https://github.com/marine841023/duty-on">★ GitHub 仓库</a>
       </div>
@@ -101,6 +128,40 @@
 
 <main class="wrap">
 
+  <!-- 支持的 IDE -->
+  <section>
+    <h2 class="section-title">五大 IDE / CLI 全覆盖</h2>
+    <p class="section-sub">以 Trae 为核心，一个桌宠盯住所有 AI 编程工具</p>
+    <div class="ide-grid">
+      <div class="ide-card trae">
+        <div class="ide-name">Trae</div>
+        <div class="ide-badge">Trae CN · TraeCode CN</div>
+        <div class="ide-desc">原生 Hook 集成，自动识别新旧版窗口标题与多根工作区</div>
+      </div>
+      <div class="ide-card">
+        <div class="ide-name">Qoder</div>
+        <div class="ide-badge" style="background:rgba(255,107,53,.15);color:var(--qoder)">自动检测</div>
+        <div class="ide-desc">~/.qoder/settings.json 合并写入，PostToolUse / PermissionRequest 事件</div>
+      </div>
+      <div class="ide-card">
+        <div class="ide-name">Cursor</div>
+        <div class="ide-badge" style="background:rgba(90,139,255,.15);color:var(--cursor)">Flat Schema</div>
+        <div class="ide-desc">~/.cursor/hooks.json 扁平格式，事件名注入 -HookEvent 参数</div>
+      </div>
+      <div class="ide-card">
+        <div class="ide-name">Codex CLI</div>
+        <div class="ide-badge" style="background:rgba(255,140,66,.15);color:var(--codex)">TUI + Exec</div>
+        <div class="ide-desc">~/.codex/hooks.json，支持 PermissionRequest 待确认提醒</div>
+      </div>
+      <div class="ide-card">
+        <div class="ide-name">OpenCode</div>
+        <div class="ide-badge" style="background:rgba(179,136,255,.15);color:var(--opencode)">JS 插件</div>
+        <div class="ide-desc">~/.config/opencode/plugins/ 事件总线，session.idle / permission.ask 映射</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 三种状态 -->
   <section>
     <div class="states">
       <div class="state"><div class="emoji">💤</div><h3>睡觉</h3><p>所有 IDE 都闲着。她也闭眼打盹，头顶飘 ZZZ——世界安静。</p></div>
@@ -109,12 +170,51 @@
     </div>
   </section>
 
+  <!-- 为什么选 DutyOn -->
+  <section>
+    <h2 class="section-title">为什么选 Duty On？</h2>
+    <p class="section-sub">同类产品对比——轻量、原生、实时、中国优先</p>
+    <div class="why-grid">
+      <div class="why-card">
+        <span class="why-icon">🪶</span>
+        <h4>Tauri 2 + Rust，内存仅 ~80MB</h4>
+        <p>系统 WebView 渲染，<span class="highlight">无捆绑 Chromium</span>。同类 Electron 方案动辄 400MB+，Duty On 只有其五分之一——24fps 固定帧率，后台安静陪伴。</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">🇨🇳</span>
+        <h4>为中国用户量身定制</h4>
+        <p><span class="highlight">Trae CN 优先适配</span>：自动识别 " - Trae CN" 与升级后的 " - TraeCode CN" 窗口标题；剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역）；8 种语言原生支持，简中开箱即用。</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">⚡</span>
+        <h4>Hook 实时驱动，非轮询</h4>
+        <p>通过 IDE 原生 Hook 机制接收<span class="highlight">事件级实时通知</span>（SessionStart / UserPromptSubmit / PreToolUse / Stop / Notification），不是文件轮询或进程猜测——AI 一动，桌宠秒响应。</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">🖥️</span>
+        <h4>Windows 原生，不只 Mac</h4>
+        <p>大多数同类桌宠产品（如 TRAE Pets）仅支持 macOS。<span class="highlight">Duty On 原生支持 Windows</span>，Win32 点击穿透、注册表开机自启、NSIS 安装包——中国开发者的主力平台。</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">🎭</span>
+        <h4>Live2D 精美渲染</h4>
+        <p>不是像素画、不是 LED 灯环——<span class="highlight">Cubism 4 高清 Live2D 角色</span>，21 个内置动作，支持自定义模型。丢进 ~/.dutyon/live2d/ 立刻换皮，超采样 2x 渲染。</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">📡</span>
+        <h4>外接显示屏 + 声音提醒</h4>
+        <p>支持在<span class="highlight">树莓派 / 平板 / 手机</span>等外接设备上实时显示桌宠状态（SSE 推送），每个状态可配独立音效——离开座位也能感知 AI 进度。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 功能特性 -->
   <section>
     <h2 class="section-title">一眼，而不是十一眼</h2>
     <p class="section-sub">多 IDE 状态监控该有的样子</p>
     <div class="grid">
       <div class="feat"><div class="ico">🧭</div><h4>聚合状态</h4><p>提醒 &gt; 忙碌 &gt; 睡觉，一个表情读懂所有 IDE 会话的整体状态。</p></div>
-      <div class="feat"><div class="ico">📋</div><h4>项目状态栏</h4><p>每个 IDE 项目独立列出，T/Q/C 徽章区分 Trae / Qoder / Cursor，点名字直接跳到对应窗口。</p></div>
+      <div class="feat"><div class="ico">📋</div><h4>项目状态栏</h4><p>每个 IDE 项目独立列出，T/Q/C/X/O 徽章区分 5 种 IDE，点名字直接跳到对应窗口。</p></div>
       <div class="feat"><div class="ico">👻</div><h4>真·点击穿透</h4><p>透明无边框悬浮窗，光标只有落在小人儿和菜单上才可点，其余操作直达下层窗口。</p></div>
       <div class="feat"><div class="ico">🤏</div><h4>迷你模式</h4><p>一键缩成 130×210 的角落小伙伴，随时切回完整尺寸。</p></div>
       <div class="feat"><div class="ico">🎭</div><h4>换皮自由</h4><p>把任意 Cubism 4 模型丢进 ~/.dutyon/live2d/ 就能换形象，21 个内置动作开箱即用。</p></div>
@@ -122,6 +222,7 @@
     </div>
   </section>
 
+  <!-- 使用指南 -->
   <section id="guide">
     <h2 class="section-title">使用指南</h2>
     <p class="section-sub">三分钟上手，关键在第 3 步：一定要安装 Hook 集成</p>
@@ -130,7 +231,7 @@
         <div class="step-num">1</div>
         <div>
           <h4>下载安装</h4>
-          <p>到 <a href="https://github.com/marine841023/duty-on/releases">Releases</a> 下载最新版 Windows 安装包，一路下一步装完即可。</p>
+          <p>到 <a href="https://github.com/marine841023/duty-on/releases">Releases</a> 下载最新版 Windows 安装包，一路下一步装完即可。安装时可选择界面语言和开机自启。</p>
         </div>
       </div>
       <div class="step">
@@ -144,14 +245,14 @@
         <div class="step-num">3</div>
         <div>
           <h4>安装 Hook 集成（必做 ⚠️）</h4>
-          <p><strong>右键角色 → 安装 Hook 集成</strong>。一键写入 Trae / Qoder / Cursor 三个 IDE 的 hook 配置，没有这一步宠物收不到任何 AI 状态。</p>
+          <p><strong>右键角色 → 安装 Hook 集成</strong>。一键写入 Trae / Qoder / Cursor / Codex / OpenCode 五个 IDE 的 hook 配置，没有这一步宠物收不到任何 AI 状态。</p>
         </div>
       </div>
       <div class="step">
         <div class="step-num">4</div>
         <div>
           <h4>重启 IDE / 开始新会话</h4>
-          <p>配置写入后，重启正在运行的 IDE（或直接开始一个新的 AI 会话）让 hook 生效。</p>
+          <p>配置写入后，重启正在运行的 IDE（或直接开始一个新的 AI 会话）让 hook 生效。Codex CLI 需要在 TUI 中输入 <code>/hooks</code> 信任配置。</p>
         </div>
       </div>
       <div class="step">
@@ -167,6 +268,7 @@
     </div>
   </section>
 
+  <!-- 工作原理 -->
   <section class="how">
     <div class="wrap">
       <h2 class="section-title">工作原理</h2>
@@ -177,13 +279,14 @@
 │   HTTP Server: 127.0.0.1:17521              │
 └──────────────────┬──────────────────────────┘
                    │ HTTP POST /hook (localhost)
-        ┌──────────┼──────────┐
-     ┌──┴───┐   ┌──┴───┐   ┌──┴───┐
-     │ Trae │   │Qoder │   │Cursor│   ← 每个 IDE 的 AI 生命周期事件
-     └──────┘   └──────┘   └──────┘     (提交/工具调用/通知/停止)</pre>
+   ┌───────┬───────┼───────┬───────┬───────┐
+┌──┴──┐ ┌──┴──┐ ┌──┴──┐ ┌──┴──┐ ┌──┴────┐
+│Trae │ │Qoder│ │Cursor│ │Codex│ │OpenCode│  ← 5 种 IDE 的 AI 生命周期事件
+└─────┘ └─────┘ └─────┘ └─────┘ └───────┘  (提交/工具调用/通知/停止)</pre>
     </div>
   </section>
 
+  <!-- 从源码构建 -->
   <section>
     <div class="split">
       <div>

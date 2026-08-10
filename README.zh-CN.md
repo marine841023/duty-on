@@ -8,33 +8,38 @@
 
 [English](README.md) · **简体中文**
 
-### 🎉 v1.1.6 — 外接显示屏幕 + 状态机细化！
+### 🎉 v1.1.8 — Codex 兼容修复 + CLI 会话保活 + 工作区后缀解析！
 
-> **新增：** 外接显示屏幕 — 在树莓派、平板、手机等设备上实时显示桌宠状态，
-> 支持每个状态对应的声音提醒。状态机细化为 思考中 / 执行中 / 完成 三阶段。
-> 新增 Codex CLI 和 OpenCode 支持。
-> [下载 v1.1.6 →](https://github.com/marine841023/duty-on/releases/tag/v1.1.6)
+> **为中国 Trae 用户量身打造** — 原生 Trae CN / TraeCode CN 窗口标题识别，
+> 自动剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역），
+> 8 种语言、简体中文优先。
+>
+> **v1.1.8 修复：** Codex hooks.json `version` 字段兼容、CLI 进程保活
+> （进程存活时刷新超时计时器）、codex-relay 代理排除、bridge stdin 防卡死。
+> 同时监控 Trae / Qoder / Cursor / Codex / OpenCode 五大 IDE。
+> [下载 v1.1.8 →](https://github.com/marine841023/duty-on/releases/tag/v1.1.8)
 
 </div>
 
 ---
 
 同时开着好几个 IDE 跑 AI 任务，还要不停 Alt-Tab 检查它们是在干活、干完了、还是卡在等你确认？
-「开工啦」是一个透明悬浮的 Live2D 小人儿，把所有 IDE 会话的实时状态浓缩在一个表情上：
+「开工啦」是一个透明悬浮的 Live2D 小人儿，**为中国 Trae 用户量身打造**，
+把所有 **Trae** / Qoder / Cursor / Codex / OpenCode 会话的实时状态浓缩在一个表情上：
 
 - 💤 **睡觉**：所有 IDE 空闲时，精灵闭眼睡觉，飘出 ZZZ
 - ⚡ **忙碌**：有 AI 任务正在执行时，精灵睁眼专注工作
 - 🔔 **提醒**：需要你确认操作时，精灵抖动并弹出感叹号
 
 基于 **Tauri 2.0 + Rust** 构建（系统 WebView，无 Chromium），跨 Windows / macOS / Linux，
-内存占用约 70-90MB。
+内存占用约 80MB——同类 Electron 方案的 1/5。
 
 ## 功能
 
 - **Live2D 精灵**：浮在桌面最顶层的透明无边框窗口，支持拖拽移动、位置记忆
-- **状态栏**：精灵下方显示所有已连接的 IDE 项目及状态，带 T/Q/C 徽章区分 Trae/Qoder/Cursor
+- **状态栏**：精灵下方显示所有已连接的 IDE 项目及状态，带 T/Q/C/X/O 徽章区分 Trae/Qoder/Cursor/Codex/OpenCode
 - **点击跳转**：点击状态栏中的项目名，自动激活对应的 IDE 窗口
-- **多 IDE 支持**：同时监控多个 Trae / Qoder / Cursor 实例，每个实例独立追踪
+- **多 IDE 支持**：同时监控多个 **Trae** / Qoder / Cursor / Codex / OpenCode 实例，5 种 IDE 各有原生 Hook 集成
 - **智能点击穿透**：光标落在模型/菜单上时可点击，其余区域鼠标事件穿透到下层窗口
 - **迷你模式**：一键缩小为 130×210 的桌面角落小伙伴（菜单切换，双向还原）
 - **高清渲染**：超采样渲染（2x 分辨率缓冲），高 DPI 屏幕下边缘锐利
@@ -85,11 +90,10 @@ cargo tauri build    # 打包：产物在 target/release/bundle/
 │  └───────────────────────────────────────┘  │
 └──────────────────┬──────────────────────────┘
                    │ HTTP POST /hook (localhost)
-    ┌──────────────┼──────────────┐
-┌───┴───┐    ┌────┴───┐    ┌────┴───┐
-│ Trae  │    │ Qoder  │    │ Cursor │
-│Proj A │    │Proj B  │    │Proj C  │
-└───────┘    └────────┘    └────────┘
+   ┌───────┬───────┼───────┬───────┬───────┐
+┌──┴──┐ ┌──┴──┐ ┌──┴──┐ ┌──┴──┐ ┌──┴────┐
+│Trae │ │Qoder│ │Cursor│ │Codex│ │OpenCode│
+└─────┘ └─────┘ └─────┘ └─────┘ └───────┘
 ```
 
 ### Hook 事件映射
@@ -103,6 +107,8 @@ cargo tauri build    # 打包：产物在 target/release/bundle/
 | `Stop` | AI 完成任务 | → 空闲 (idle) |
 | `PreToolUse`(AskUserQuestion) _(Qoder)_ | Qoder 弹出问答 | → 提醒 (alert) |
 | `PermissionRequest` _(Qoder)_ | Qoder 请求权限 | → 提醒 (alert) |
+| `PermissionRequest` _(Codex)_ | Codex CLI 请求权限 | → 提醒 (alert) |
+| `permission.ask` _(OpenCode)_ | OpenCode 请求权限 | → 提醒 (alert) |
 
 整体状态优先级：alert > working > sleeping。模糊 `Notification` 默认按"任务完成"处理
 （白名单见 `src-tauri/src/config.rs`）。
@@ -118,7 +124,7 @@ cubism4/pixi 的 XHR 加载器会预检失败，详见[技术说明](docs/techni
 
 ```bash
 cd src-tauri
-cargo test    # 52 个单元测试（状态机/Hook合并/服务器/点击穿透/扫描器）
+cargo test    # 87 个单元测试（状态机/Hook合并/服务器/点击穿透/扫描器）
 ```
 
 端到端回归脚本（需先启动精灵）：`.userdata/test-flow.ps1`、`.userdata/test-notification.ps1`。
@@ -141,7 +147,7 @@ cargo test    # 52 个单元测试（状态机/Hook合并/服务器/点击穿透
 - **Tauri 2.0** — 桌面应用框架（系统 WebView2 / WKWebView / WebKitGTK）
 - **Rust** — tokio + axum（HTTP）、serde、regex；平台层 windows crate / core-graphics / x11rb
 - **PixiJS v7 + pixi-live2d-display + Cubism Core** — Live2D 渲染
-- **Trae / Qoder / Cursor IDE Hooks** — AI 生命周期事件钩子
+- **Trae / Qoder / Cursor / Codex / OpenCode Hooks** — 5 种 IDE 的 AI 生命周期事件钩子
 
 ## 常见问题
 
