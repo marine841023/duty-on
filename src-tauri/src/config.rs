@@ -15,9 +15,11 @@ pub const HOST: &str = "127.0.0.1";
 pub const WINDOW_WIDTH: i32 = 260;
 pub const WINDOW_HEIGHT: i32 = 420;
 pub const WINDOW_MARGIN: i32 = 20; // offset from bottom-right corner
-// Mini mode: half-size window (人物宽高 1/2, status bar half width).
+// Mini mode: half-width window with full-height project list.
+// Canvas is half-size (120×130); the extra height (280−130=150px) gives
+// the status bar enough room to show ~6 project items without scrolling.
 pub const MINI_WINDOW_WIDTH: i32 = 130;
-pub const MINI_WINDOW_HEIGHT: i32 = 210;
+pub const MINI_WINDOW_HEIGHT: i32 = 280;
 // Character canvas sits flush at the top of the window (centered
 // horizontally), so the pet's visible center is at (window_width/2,
 // canvas_height/2) — used to place the character under the cursor when

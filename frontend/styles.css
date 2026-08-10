@@ -629,8 +629,8 @@ body.menu-window #context-menu {
   font-size: 11px;
 }
 
-/* ===== Mini mode (half-size window: 130×210, canvas 120×130) ===== */
-body.mini #pet-container { width: 130px; height: 210px; }
+/* ===== Mini mode (130×280 window, canvas 120×130, status bar ~150px) ===== */
+body.mini #pet-container { width: 130px; height: 280px; }
 body.mini #canvas-wrapper { width: 120px; height: 130px; }
 
 /* Status bar at half width (下方的操作框长度减半). */
