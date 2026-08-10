@@ -161,7 +161,11 @@ fn qoder_shell() -> &'static str {
 /// each hook entry when given (Qoder honors it; Trae ignores the unknown
 /// field, so we only set it for Qoder). `add_version` writes a `version: 1`
 /// top-level field (Trae-style hooks.json and Cursor's schema both use it).
-/// `format` selects the entry shape (see `HookFormat`).
+/// `strip_version` removes any existing top-level `version` field — used for
+/// Codex, whose CLI rejects `version` as an unknown field (`unknown field
+/// \`version\`, expected \`description\` or \`hooks\``); setting it on re-install
+/// also repairs configs written by older DutyOn builds that incorrectly
+/// included it. `format` selects the entry shape (see `HookFormat`).
 ///
 /// Robustness against configs modified by other tools:
 /// - A UTF-8 BOM is tolerated.
@@ -179,6 +183,7 @@ fn merge_hooks_into_file(
     hook_command: &dyn Fn(&str) -> String,
     shell: Option<&str>,
     add_version: bool,
+    strip_version: bool,
     format: HookFormat,
 ) -> Result<Option<String>, String> {
     if let Some(parent) = path.parent() {
@@ -224,7 +229,13 @@ fn merge_hooks_into_file(
         Err(_) => {} // Missing file -> start fresh.
     }
 
-    if add_version && existing.get("version").is_none() {
+    if strip_version {
+        // Codex CLI rejects `version` as an unknown field; remove it so
+        // re-installs also fix configs written by older DutyOn versions.
+        if let Some(o) = existing.as_object_mut() {
+            o.remove("version");
+        }
+    } else if add_version && existing.get("version").is_none() {
         existing["version"] = json!(1);
     }
     if existing.get("hooks").is_some() && !existing["hooks"].is_object() {
@@ -558,6 +569,7 @@ pub fn install(hooks_source_dir: &Path) -> InstallResult {
         &|_| trae_hook_command.clone(),
         None,
         true,
+        false,
         HookFormat::Nested,
     ) {
         Ok(Some(w)) => warnings.push(w),
@@ -580,6 +592,7 @@ pub fn install(hooks_source_dir: &Path) -> InstallResult {
             config::QODER_HOOK_EVENTS,
             &|_| qoder_hook_command.clone(),
             Some(qoder_shell()),
+            false,
             false,
             HookFormat::Nested,
         ) {
@@ -613,6 +626,7 @@ pub fn install(hooks_source_dir: &Path) -> InstallResult {
             &|event| hook_command("cursor", Some(event)),
             None,
             true,
+            false,
             HookFormat::Flat,
         ) {
             Ok(maybe_warning) => {
@@ -633,9 +647,14 @@ pub fn install(hooks_source_dir: &Path) -> InstallResult {
 
     // Merge hooks into Codex CLI's ~/.codex/hooks.json when Codex is installed.
     // Codex uses the same PascalCase event names and nested JSON schema as
-    // Trae (Claude Code style), so no event-name baking is needed. Codex
-    // requires hooks to be trusted via `/hooks` in the CLI after install.
-    // Non-fatal like Qoder/Cursor.
+    // Trae (Claude Code style), so no event-name baking is needed. Unlike
+    // Trae, Codex's CLI does NOT accept a top-level `version` field (codex
+    // 0.147.0 rejects it as `unknown field \`version\``, expecting only
+    // `description` or `hooks`), so we pass add_version=false and
+    // strip_version=true — the latter also repairs configs written by older
+    // DutyOn builds that incorrectly included `version: 1`. Codex requires
+    // hooks to be trusted via `/hooks` in the CLI after install. Non-fatal
+    // like Qoder/Cursor.
     let codex_dir = home.join(".codex");
     let mut codex_hooks_path_str: Option<String> = None;
     if codex_dir.exists() {
@@ -646,6 +665,7 @@ pub fn install(hooks_source_dir: &Path) -> InstallResult {
             config::CODEX_HOOK_EVENTS,
             &|_| codex_hook_command.clone(),
             None,
+            false,
             true,
             HookFormat::Nested,
         ) {
@@ -796,7 +816,7 @@ mod tests {
         fs::write(&path, original).unwrap();
 
         let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#.to_string();
-        merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, &|_| cmd.clone(), Some("powershell"), false, HookFormat::Nested)
+        merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, &|_| cmd.clone(), Some("powershell"), false, false, HookFormat::Nested)
             .unwrap();
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -832,7 +852,7 @@ mod tests {
         fs::write(&path, "{}").unwrap();
 
         let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#.to_string();
-        merge_hooks_into_file(&path, config::HOOK_EVENTS, &|_| cmd.clone(), None, true, HookFormat::Nested).unwrap();
+        merge_hooks_into_file(&path, config::HOOK_EVENTS, &|_| cmd.clone(), None, true, false, HookFormat::Nested).unwrap();
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["version"], 1);
@@ -855,8 +875,8 @@ mod tests {
         fs::write(&path, "{}").unwrap();
 
         let cmd = r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh""#.to_string();
-        merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, &|_| cmd.clone(), Some("bash"), false, HookFormat::Nested).unwrap();
-        merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, &|_| cmd.clone(), Some("bash"), false, HookFormat::Nested).unwrap();
+        merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, &|_| cmd.clone(), Some("bash"), false, false, HookFormat::Nested).unwrap();
+        merge_hooks_into_file(&path, config::QODER_HOOK_EVENTS, &|_| cmd.clone(), Some("bash"), false, false, HookFormat::Nested).unwrap();
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         for ev in config::QODER_HOOK_EVENTS {
@@ -890,7 +910,7 @@ mod tests {
         fs::write(&path, legacy).unwrap();
 
         let cmd = r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh""#.to_string();
-        merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), Some("bash"), false, HookFormat::Nested).unwrap();
+        merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), Some("bash"), false, false, HookFormat::Nested).unwrap();
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let arr = v["hooks"]["Stop"].as_array().unwrap();
@@ -921,7 +941,7 @@ mod tests {
         .unwrap();
 
         let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#.to_string();
-        let warning = merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), None, true, HookFormat::Nested).unwrap();
+        let warning = merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), None, true, false, HookFormat::Nested).unwrap();
         assert!(warning.is_none(), "BOM should not trigger a warning");
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -944,7 +964,7 @@ mod tests {
         fs::write(&path, corrupt).unwrap();
 
         let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#.to_string();
-        let warning = merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), None, true, HookFormat::Nested).unwrap();
+        let warning = merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), None, true, false, HookFormat::Nested).unwrap();
         let warning = warning.expect("corrupt file must produce a warning");
         assert!(warning.contains("backed up"), "warning: {}", warning);
 
@@ -975,7 +995,7 @@ mod tests {
         fs::write(&path, r#"{ "hooks": { "Stop": "echo legacy-string-form" } }"#).unwrap();
 
         let cmd = r#"bash "$HOME/.dutyon/hooks/trae-hook-bridge.sh""#.to_string();
-        let warning = merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), Some("bash"), false, HookFormat::Nested).unwrap();
+        let warning = merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), Some("bash"), false, false, HookFormat::Nested).unwrap();
         assert!(warning.is_some(), "non-array event value must warn");
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -997,7 +1017,7 @@ mod tests {
         fs::write(&path, r#"{ "hooks": "weird" }"#).unwrap();
 
         let cmd = r#"& "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1""#.to_string();
-        let warning = merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), None, true, HookFormat::Nested).unwrap();
+        let warning = merge_hooks_into_file(&path, &["Stop"], &|_| cmd.clone(), None, true, false, HookFormat::Nested).unwrap();
         let warning = warning.expect("wrong-shape hooks must warn");
         assert!(warning.contains("backed up"), "warning: {}", warning);
 
@@ -1045,6 +1065,7 @@ mod tests {
             &cmd,
             None,
             true,
+            false,
             HookFormat::Flat,
         )
         .unwrap();
@@ -1055,6 +1076,7 @@ mod tests {
             &cmd,
             None,
             true,
+            false,
             HookFormat::Flat,
         )
         .unwrap();
@@ -1086,13 +1108,20 @@ mod tests {
     }
 
     /// Codex's ~/.codex/hooks.json uses the same Nested schema as Trae
-    /// (PascalCase events, version key, no shell field, no event baking).
-    /// Merge must be idempotent and preserve third-party entries.
+    /// (PascalCase events, no shell field, no event baking) BUT, unlike Trae,
+    /// must NOT carry a top-level `version` field — the official codex CLI
+    /// (0.147.0+) rejects it as `unknown field \`version\``, expecting only
+    /// `description` or `hooks`. So we pass add_version=false and
+    /// strip_version=true: an existing `version` (e.g. left by an older
+    /// DutyOn build) must be removed on re-install. Merge must be idempotent
+    /// and preserve third-party entries.
     #[test]
     fn codex_nested_merge_shape_and_idempotent() {
         let dir = std::env::temp_dir().join("duty-on-codex-merge-test");
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("hooks.json");
+        // Input carries `version: 1` (as older DutyOn builds wrote it) to
+        // verify that re-install STRIPS it — codex CLI rejects the field.
         let original = r#"{
             "version": 1,
             "hooks": {
@@ -1104,14 +1133,15 @@ mod tests {
         fs::write(&path, original).unwrap();
 
         let cmd = r#"powershell -File "$env:USERPROFILE\.dutyon\hooks\trae-hook-bridge.ps1" -Ide codex"#.to_string();
-        merge_hooks_into_file(&path, config::CODEX_HOOK_EVENTS, &|_| cmd.clone(), None, true, HookFormat::Nested)
+        merge_hooks_into_file(&path, config::CODEX_HOOK_EVENTS, &|_| cmd.clone(), None, false, true, HookFormat::Nested)
             .unwrap();
         // Re-install must not stack duplicates.
-        merge_hooks_into_file(&path, config::CODEX_HOOK_EVENTS, &|_| cmd.clone(), None, true, HookFormat::Nested)
+        merge_hooks_into_file(&path, config::CODEX_HOOK_EVENTS, &|_| cmd.clone(), None, false, true, HookFormat::Nested)
             .unwrap();
 
         let v: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v["version"], 1);
+        // No version field — codex CLI rejects it as an unknown field.
+        assert!(v.get("version").is_none());
         // Third-party nested entry untouched.
         assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "echo other-tool");
         for ev in config::CODEX_HOOK_EVENTS {

@@ -54,7 +54,15 @@ $stdinText = ''
 try {
   $stdIn = [Console]::OpenStandardInput()
   $ms = New-Object System.IO.MemoryStream
-  $stdIn.CopyTo($ms)
+  # Use async copy with a 3s timeout — if the parent process (IDE hook
+  # runner) doesn't close stdin (e.g. Trae IDE bug or orphaned process),
+  # CopyTo would block forever, leaking a powershell process and locking
+  # bridge.log. The timeout ensures we proceed with whatever data arrived.
+  $copyTask = $stdIn.CopyToAsync($ms)
+  if (-not $copyTask.Wait(3000)) {
+    Write-BridgeLog "stdin read timeout (3s), continuing with partial data"
+    try { $stdIn.Close() } catch { }
+  }
   $stdinText = [System.Text.Encoding]::UTF8.GetString($ms.ToArray())
 } catch {
   Write-BridgeLog "binary stdin read failed: $($_.Exception.Message); falling back to text read"

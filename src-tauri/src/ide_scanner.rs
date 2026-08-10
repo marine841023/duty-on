@@ -83,7 +83,20 @@ fn parse_title(title: &str) -> Option<(&str, IdeKind)> {
     if parts.len() < 2 {
         return None;
     }
-    let folder = parts[parts.len() - 2].trim();
+    // Strip the workspace suffix that Trae/VSCode appends in multi-root
+    // workspace mode. The window title becomes "file - project (工作区) -
+    // TraeCode CN" instead of "file - project - TraeCode CN", so without
+    // stripping, the folder name carries the suffix and won't match the
+    // hook-reported project name (derived from cwd) — producing two sessions
+    // for the same project.
+    let raw = parts[parts.len() - 2].trim();
+    let folder = raw
+        .strip_suffix("(工作区)")
+        .or_else(|| raw.strip_suffix("(Workspace)"))
+        .or_else(|| raw.strip_suffix("(ワークスペース)"))
+        .or_else(|| raw.strip_suffix("(작업 영역)"))
+        .unwrap_or(raw)
+        .trim();
     if folder.is_empty()
         || folder == "Trae"
         || folder == "Trae CN"
@@ -171,6 +184,14 @@ pub fn scan_cli_processes() -> CliLiveness {
     let mut opencode_alive = false;
     for process in sys.processes().values() {
         let name = process.name().to_lowercase();
+        // codex-relay is the protocol-conversion proxy (Responses API →
+        // Chat Completions API), NOT the codex CLI itself. Exclude it so a
+        // running relay doesn't falsely keep sessions alive after the TUI
+        // exits — only the actual codex.exe (spawned by codex.js) should
+        // count as liveness.
+        if name.contains("codex") && name.contains("relay") {
+            continue;
+        }
         if name.contains("codex") {
             codex_alive = true;
         }
@@ -185,6 +206,8 @@ pub fn scan_cli_processes() -> CliLiveness {
             .map(|p| p.name().to_string())
             .filter(|n| {
                 let low = n.to_lowercase();
+                // Show relay processes in the log too (for debugging), but
+                // they don't set codex_alive.
                 low.contains("codex") || low.contains("opencode")
             })
             .collect();
@@ -802,6 +825,23 @@ mod tests {
     fn parse_title_elevated_traecode_suffix() {
         // Elevated (run-as-admin) rebranded Trae window.
         let result = parse_title("main.rs - MyProject - TraeCode CN [管理员]");
+        assert_eq!(result, Some(("MyProject", IdeKind::Trae)));
+    }
+
+    #[test]
+    fn parse_title_workspace_suffix_stripped() {
+        // Trae/VSCode multi-root workspace mode appends "(工作区)" to the
+        // folder name in the window title. Without stripping, the scanner
+        // reports "targetEF (工作区)" which doesn't match the hook-reported
+        // "targetEF" (from cwd), producing two sessions for one project.
+        let result = parse_title("MainActivity.kt - targetEF (工作区) - TraeCode CN");
+        assert_eq!(result, Some(("targetEF", IdeKind::Trae)));
+    }
+
+    #[test]
+    fn parse_title_workspace_suffix_english() {
+        // English locale: "(Workspace)" suffix.
+        let result = parse_title("main.py - MyProject (Workspace) - TraeCode CN");
         assert_eq!(result, Some(("MyProject", IdeKind::Trae)));
     }
 

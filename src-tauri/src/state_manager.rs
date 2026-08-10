@@ -780,6 +780,18 @@ impl StateManager {
             };
             if alive {
                 self.cli_miss_counts.remove(&id);
+                // Keep the session alive while the CLI process is running but
+                // idle. After a Stop event the user may read the response for
+                // minutes without triggering new hook events — without this
+                // refresh, cleanup_stale_sessions would prune the session
+                // after SESSION_TIMEOUT (10 min) even though the CLI TUI is
+                // still open. We update last_event_time silently (no `changed`
+                // flag) so the frontend's "last event" display stays truthful
+                // to the last real hook event.
+                let now = self.now_ms();
+                if let Some(session) = self.sessions.get_mut(&id) {
+                    session.last_event_time = now;
+                }
             } else {
                 let misses = self.cli_miss_counts.entry(id.clone()).or_insert(0);
                 *misses += 1;
@@ -1472,5 +1484,30 @@ mod tests {
             });
         }
         assert_eq!(sm.session_count(), 1);
+    }
+
+    /// A CLI session whose process is still alive must survive
+    /// SESSION_TIMEOUT — the user may read the AI's response for minutes
+    /// without triggering new hook events. sync_cli_liveness refreshes
+    /// last_event_time so cleanup_stale_sessions doesn't prune it.
+    #[test]
+    fn cli_session_survives_timeout_when_process_alive() {
+        let (mut sm, t) = make_manager();
+        let mut e = event("s1", "UserPromptSubmit");
+        e.ide = Some(IdeKind::Codex);
+        sm.handle_hook_event(&e);
+        assert_eq!(sm.session_count(), 1);
+        // Advance time past SESSION_TIMEOUT while the CLI process is alive.
+        t.store(1000 + config::SESSION_TIMEOUT + 1, Ordering::SeqCst);
+        sm.sync_cli_liveness(&CliLiveness {
+            codex_alive: true,
+            opencode_alive: false,
+        });
+        sm.cleanup_stale_sessions();
+        assert_eq!(
+            sm.session_count(),
+            1,
+            "CLI session should survive timeout when process is alive"
+        );
     }
 }
