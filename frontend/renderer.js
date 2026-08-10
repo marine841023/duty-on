@@ -1576,12 +1576,26 @@ function relayoutModel() {
  * window already opens at the persisted size.
  */
 function applyMiniMode(enabled, resizeWindow = true) {
+  const prevMode = miniMode;
   miniMode = enabled;
   document.body.classList.toggle('mini', enabled);
   updateMiniMenuCheck();
   if (resizeWindow && window.petAPI && window.petAPI.setMiniMode) {
     Promise.resolve(window.petAPI.setMiniMode(enabled)).catch((e) => {
-      console.warn('[mini] Failed to resize window:', e && e.message);
+      console.warn('[mini] Failed to resize window, rolling back:', e && e.message);
+      // The window wasn't resized — restore the previous CSS class and canvas
+      // so they stay consistent with the actual window size.
+      miniMode = prevMode;
+      document.body.classList.toggle('mini', prevMode);
+      updateMiniMenuCheck();
+      if (pixiApp) {
+        const w = prevMode ? MINI_PIXI_WIDTH : PIXI_WIDTH;
+        const h = prevMode ? MINI_PIXI_HEIGHT : PIXI_HEIGHT;
+        if (pixiApp.screen.width !== w || pixiApp.screen.height !== h) {
+          pixiApp.renderer.resize(w, h);
+        }
+        relayoutModel();
+      }
     });
     // If the menu window is open, re-position it for the new pet size.
     if (menuWindowOpen) {
@@ -1845,8 +1859,20 @@ function setupIPC() {
   // its base logical size and dropped its menu-growth record — mirror that
   // locally: forget the grown space and close the menu if it was open.
   if (window.petAPI && window.petAPI.onDisplayChanged) {
-    window.petAPI.onDisplayChanged(() => {
+    window.petAPI.onDisplayChanged(async () => {
       closeMenu();
+      // Re-sync mini mode: the backend resizes the window on DPI change
+      // based on the persisted config, but the frontend's CSS class and
+      // canvas size might be out of sync if a setMiniMode IPC call failed
+      // earlier or the window was moved between monitors with different DPI.
+      if (window.petAPI && window.petAPI.getAppearance) {
+        try {
+          const { miniMode: m } = await window.petAPI.getAppearance();
+          if (!!m !== miniMode) {
+            applyMiniMode(!!m, false);
+          }
+        } catch (e) { /* cosmetic — best effort */ }
+      }
     });
   }
 
