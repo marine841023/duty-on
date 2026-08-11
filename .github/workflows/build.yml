@@ -40,13 +40,28 @@ jobs:
       - name: Build NSIS installer
         run: cargo tauri build
         working-directory: src-tauri
+      # Package the NSIS installer into a ZIP. Direct .exe downloads trigger
+      # Windows Defender SmartScreen (unsigned + no reputation); a .zip
+      # archive bypasses the download-time warning. Users download the zip,
+      # extract it, then run the installer inside.
+      - name: Package installer into ZIP
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $zip = "src-tauri/target/release/bundle/DutyOn-${{ github.ref_name }}.zip"
+          Compress-Archive -Path $exe.FullName -DestinationPath $zip -Force
+          $sizeMB = [math]::Round((Get-Item $zip).Length / 1MB, 2)
+          Write-Host "Packaged $($exe.Name) -> $zip ($sizeMB MB)"
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: src-tauri/target/release/bundle/nsis/*-setup.exe
+          files: src-tauri/target/release/bundle/DutyOn-*.zip
           generate_release_notes: true
           body: |
             ## v1.1.9 — 多屏吸附修复
+
+            > **安装方式**：下载 `.zip` 压缩包，解压后运行里面的 `DutyOn_1.1.9_x64-setup.exe` 安装。
+            > （改为 zip 分发以避免 Windows SmartScreen 对直接下载 exe 的拦截警告）
 
             ### Bug Fixes
             - **跨屏吸附横跳消失问题**：修复 1 号屏 (DPI 1.25) 与 2 号屏 (DPI 1.0) 边界吸附时窗口在两个屏幕间反复跳动最终消失的故障
