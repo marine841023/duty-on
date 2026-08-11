@@ -8,16 +8,16 @@
 
 [English](README.md) · **简体中文**
 
-### 🎉 v1.1.8 — Codex 兼容修复 + CLI 会话保活 + 工作区后缀解析！
+### 🎉 v1.1.9 — 多屏吸附修复 + ZIP 分发！
 
 > **为中国 Trae 用户量身打造** — 原生 Trae CN / TraeCode CN 窗口标题识别，
 > 自动剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역），
 > 8 种语言、简体中文优先。
 >
-> **v1.1.8 修复：** Codex hooks.json `version` 字段兼容、CLI 进程保活
-> （进程存活时刷新超时计时器）、codex-relay 代理排除、bridge stdin 防卡死。
-> 同时监控 Trae / Qoder / Cursor / Codex / OpenCode 五大 IDE。
-> [下载 v1.1.8 →](https://github.com/marine841023/duty-on/releases/tag/v1.1.8)
+> **v1.1.9 更新：** 修复跨屏边缘吸附时窗口反复横跳最终消失的故障
+> （"最大面积优先" snap_target、内部边界规范化、目标显示器 DPI、active 竞态、20px 滞后防闪）；
+> 新增 Live2D 封面生成器；启动打印显示器信息。改为 **ZIP 分发**，避免 Windows SmartScreen 拦截未签名 exe。
+> [下载 v1.1.9 (.zip) →](https://github.com/marine841023/duty-on/releases/download/v1.1.9/DutyOn-v1.1.9.zip)
 
 </div>
 
@@ -52,8 +52,9 @@
 
 ### 方式一：下载安装包（推荐）
 
-从 [Releases](https://github.com/marine841023/duty-on/releases) 下载 Windows NSIS 安装包
-（当前用户安装，含简/繁中/英/日/韩语言选择）。macOS / Linux 请从源码构建。
+从 [Releases](https://github.com/marine841023/duty-on/releases) 下载 **`.zip`** 压缩包，
+解压后运行里面的 `DutyOn_<版本>_x64-setup.exe` 安装（当前用户安装，含简/繁中/英/日/韩语言选择）。
+采用 ZIP 分发以避免 Windows SmartScreen 拦截未签名 exe。macOS / Linux 请从源码构建。
 
 ### 方式二：从源码构建
 
