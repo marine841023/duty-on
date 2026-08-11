@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>DutyOn Cover Generator</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #fff;
+    /* Layered ambient background */
+    background:
+      radial-gradient(circle at 18% 28%, rgba(99, 102, 241, 0.25), transparent 45%),
+      radial-gradient(circle at 82% 72%, rgba(236, 72, 153, 0.18), transparent 50%),
+      radial-gradient(circle at 50% 50%, rgba(20, 184, 166, 0.10), transparent 60%),
+      linear-gradient(135deg, #0f0f23 0%, #1a1a2e 50%, #16213e 100%);
+  }
+  body {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    position: relative;
+  }
+
+  /* Subtle dot grid overlay */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: radial-gradient(rgba(180, 170, 255, 0.06) 1px, transparent 1px);
+    background-size: 28px 28px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .stage {
+    position: relative;
+    z-index: 1;
+    /* Lock 16:9 aspect, scale to fit viewport */
+    width: min(1600px, calc(100vw - 60px));
+    aspect-ratio: 16 / 9;
+    max-height: calc(100vh - 140px);
+    box-shadow:
+      0 30px 80px rgba(0, 0, 0, 0.6),
+      0 0 0 1px rgba(124, 108, 248, 0.2),
+      0 0 60px rgba(124, 108, 248, 0.15);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  #cover-canvas {
+    display: block;
+    width: 100% !important;
+    height: 100% !important;
+  }
+
+  /* Floating glassmorphism toolbar */
+  .toolbar {
+    position: relative;
+    z-index: 2;
+    margin-top: 18px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 12px;
+    background: rgba(30, 27, 75, 0.55);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid rgba(124, 108, 248, 0.3);
+    border-radius: 999px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  }
+  .toolbar label {
+    font-size: 12px;
+    opacity: 0.6;
+    padding-left: 6px;
+    letter-spacing: 0.5px;
+  }
+  .toolbar .divider {
+    width: 1px;
+    height: 18px;
+    background: rgba(255, 255, 255, 0.12);
+    margin: 0 2px;
+  }
+  button, select {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #fff;
+    padding: 7px 14px;
+    border-radius: 999px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-family: inherit;
+  }
+  button:hover, select:hover {
+    background: rgba(124, 108, 248, 0.3);
+    border-color: rgba(124, 108, 248, 0.6);
+    transform: translateY(-1px);
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+  button.primary {
+    background: linear-gradient(135deg, #7c6cf8, #a855f7);
+    border-color: transparent;
+    font-weight: 600;
+  }
+  button.primary:hover {
+    background: linear-gradient(135deg, #8b7df9, #b065f8);
+    box-shadow: 0 4px 16px rgba(124, 108, 248, 0.5);
+  }
+  select option { background: #1a1a2e; color: #fff; }
+
+  .status {
+    position: fixed;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 11px;
+    opacity: 0.5;
+    z-index: 3;
+    letter-spacing: 0.3px;
+  }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <canvas id="cover-canvas" width="1600" height="900"></canvas>
+  </div>
+  <div class="toolbar">
+    <label>形象</label>
+    <select id="model-select">
+      <option value="nito.model3.json">nito</option>
+      <option value="nico.model3.json">nico</option>
+      <option value="nietzsche.model3.json">nietzsche</option>
+      <option value="nipsilon.model3.json">nipsilon</option>
+      <option value="ni-j.model3.json">ni-j</option>
+    </select>
+    <div class="divider"></div>
+    <button id="flip-btn">翻转</button>
+    <button id="motion-btn">切换动作</button>
+    <div class="divider"></div>
+    <button id="export-btn" class="primary" disabled>导出封面 PNG</button>
+  </div>
+  <div class="status" id="status">正在加载库...</div>
+
+<script>
+const COVER_W = 1600;
+const COVER_H = 900;
+const STATUS = document.getElementById('status');
+const EXPORT_BTN = document.getElementById('export-btn');
+const MODEL_SELECT = document.getElementById('model-select');
+const FLIP_BTN = document.getElementById('flip-btn');
+const MOTION_BTN = document.getElementById('motion-btn');
+
+let pixiApp = null;
+let live2dModel = null;
+let flipHorizontal = false;
+let motionGroups = [];
+let currentMotionIdx = 0;
+
+function setStatus(msg) { STATUS.textContent = msg; console.log(msg); }
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Failed to load ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+async function loadLibs() {
+  setStatus('正在加载 PixiJS...');
+  await loadScript('../frontend/lib/pixi.min.js');
+  setStatus('正在加载 Cubism Core...');
+  await loadScript('../frontend/lib/live2dcubismcore.min.js');
+  setStatus('正在加载 Live2D Display...');
+  await loadScript('../frontend/lib/cubism4.min.js');
+}
+
+function drawBackground(renderer) {
+  const PIXI = window.PIXI;
+  const bgCanvas = document.createElement('canvas');
+  bgCanvas.width = COVER_W;
+  bgCanvas.height = COVER_H;
+  const ctx = bgCanvas.getContext('2d');
+
+  // Deep diagonal gradient
+  const grad = ctx.createLinearGradient(0, 0, COVER_W, COVER_H);
+  grad.addColorStop(0, '#0f0f23');
+  grad.addColorStop(0.35, '#1e1b4b');
+  grad.addColorStop(0.7, '#312e81');
+  grad.addColorStop(1, '#4c1d95');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, COVER_W, COVER_H);
+
+  // Soft ambient orbs (very subtle, breathing space)
+  const orbs = [
+    { x: 0.22, y: 0.30, r: 320, c: 'rgba(99, 102, 241, 0.22)' },
+    { x: 0.78, y: 0.68, r: 380, c: 'rgba(236, 72, 153, 0.14)' },
+    { x: 0.50, y: 0.12, r: 220, c: 'rgba(20, 184, 166, 0.10)' },
+  ];
+  for (const o of orbs) {
+    const rg = ctx.createRadialGradient(o.x * COVER_W, o.y * COVER_H, 0,
+                                        o.x * COVER_W, o.y * COVER_H, o.r);
+    rg.addColorStop(0, o.c);
+    rg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = rg;
+    ctx.fillRect(0, 0, COVER_W, COVER_H);
+  }
+
+  // Fine dot grid (very subtle)
+  ctx.save();
+  for (let y = 0; y < COVER_H; y += 32) {
+    for (let x = 0; x < COVER_W; x += 32) {
+      ctx.fillStyle = 'rgba(180, 170, 255, 0.05)';
+      ctx.beginPath();
+      ctx.arc(x, y, 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+
+  const bgTex = PIXI.Texture.from(bgCanvas);
+  return new PIXI.Sprite(bgTex);
+}
+
+function drawDecorations() {
+  const PIXI = window.PIXI;
+  const cont = new PIXI.Container();
+
+  // ===== Single elegant editor window (upper-left) =====
+  const winX = COVER_W * 0.06;
+  const winY = COVER_H * 0.09;
+  const winW = COVER_W * 0.42;
+  const winH = COVER_H * 0.30;
+
+  // Soft glow behind window (layered translucent rounded rects, no filter)
+  const glow = new PIXI.Graphics();
+  glow.lineStyle(0);
+  glow.beginFill(0x7c6cf8, 0.05);
+  glow.drawRoundedRect(winX - 40, winY - 40, winW + 80, winH + 80, 32);
+  glow.endFill();
+  glow.beginFill(0x7c6cf8, 0.08);
+  glow.drawRoundedRect(winX - 20, winY - 20, winW + 40, winH + 40, 20);
+  glow.endFill();
+  cont.addChild(glow);
+
+  // Window frame
+  const frame = new PIXI.Graphics();
+  frame.lineStyle(2, 0x6366f1, 0.6);
+  frame.beginFill(0x0f172a, 0.82);
+  frame.drawRoundedRect(winX, winY, winW, winH, 14);
+  frame.endFill();
+  cont.addChild(frame);
+
+  // Title bar
+  const titleBar = new PIXI.Graphics();
+  titleBar.lineStyle(0);
+  titleBar.beginFill(0x1e293b, 0.9);
+  titleBar.drawRoundedRect(winX, winY, winW, 40, 14);
+  titleBar.drawRect(winX, winY + 20, winW, 20);
+  titleBar.endFill();
+  cont.addChild(titleBar);
+
+  // Traffic lights
+  const dotColors = [0xef4444, 0xf59e0b, 0x22c55e];
+  for (let j = 0; j < 3; j++) {
+    const dot = new PIXI.Graphics();
+    dot.lineStyle(0);
+    dot.beginFill(dotColors[j], 1);
+    dot.drawCircle(winX + 22 + j * 18, winY + 20, 6);
+    dot.endFill();
+    cont.addChild(dot);
+  }
+
+  // Window title text
+  const wtc = document.createElement('canvas');
+  wtc.width = 500; wtc.height = 40;
+  const wtx = wtc.getContext('2d');
+  wtx.font = '400 18px -apple-system, "Segoe UI", monospace';
+  wtx.fillStyle = 'rgba(148, 163, 184, 0.7)';
+  wtx.textBaseline = 'middle';
+  wtx.fillText('main.rs — DutyOn', 0, 20);
+  const wtSpr = new PIXI.Sprite(PIXI.Texture.from(wtc));
+  wtSpr.x = winX + 100;
+  wtSpr.y = winY + 2;
+  cont.addChild(wtSpr);
+
+  // Code lines (syntax-highlighted style)
+  const codeColors = [0xfb923c, 0x22c55e, 0x3b82f6, 0xec4899, 0xf59e0b, 0x06b6d4, 0xa855f7, 0xe2e8f0];
+  const codeLines = [
+    { indent: 0, len: 0.45, color: 0xfb923c }, // fn
+    { indent: 1, len: 0.62, color: 0x3b82f6 }, // let
+    { indent: 2, len: 0.38, color: 0x22c55e }, // call
+    { indent: 1, len: 0.55, color: 0xa855f7 }, // if
+    { indent: 2, len: 0.48, color: 0xec4899 }, // return
+    { indent: 0, len: 0.30, color: 0xe2e8f0 }, // }
+  ];
+  const codeY0 = winY + 56;
+  const lineH = 22;
+  for (let i = 0; i < codeLines.length; i++) {
+    const cl = codeLines[i];
+    const ly = codeY0 + i * lineH;
+    if (ly > winY + winH - 16) break;
+    // indent block
+    const indSpr = new PIXI.Graphics();
+    indSpr.lineStyle(0);
+    indSpr.beginFill(0x6366f1, 0.15);
+    indSpr.drawRoundedRect(winX + 22 + cl.indent * 18, ly + 6, 3, 12, 1);
+    indSpr.endFill();
+    cont.addChild(indSpr);
+    // code line
+    const line = new PIXI.Graphics();
+    line.lineStyle(0);
+    line.beginFill(cl.color, 0.85);
+    const lx = winX + 22 + cl.indent * 18 + 10;
+    const lw = (winW - 60) * cl.len;
+    line.drawRoundedRect(lx, ly + 6, lw, 6, 3);
+    line.endFill();
+    cont.addChild(line);
+  }
+
+  // Zzz bubble (idle state, top-right of window)
+  const zx = winX + winW - 70;
+  const zy = winY - 36;
+  const zBubble = new PIXI.Graphics();
+  zBubble.lineStyle(0);
+  zBubble.beginFill(0xffffff, 0.96);
+  zBubble.drawRoundedRect(zx - 36, zy - 20, 72, 40, 20);
+  zBubble.endFill();
+  cont.addChild(zBubble);
+  const zTail = new PIXI.Graphics();
+  zTail.lineStyle(0);
+  zTail.beginFill(0xffffff, 0.96);
+  zTail.moveTo(zx + 8, zy + 18);
+  zTail.lineTo(zx + 2, zy + 34);
+  zTail.lineTo(zx + 20, zy + 18);
+  zTail.closePath();
+  zTail.endFill();
+  cont.addChild(zTail);
+  const zc = document.createElement('canvas');
+  zc.width = 100; zc.height = 50;
+  const zctx = zc.getContext('2d');
+  zctx.font = 'bold 30px -apple-system, "Segoe UI", sans-serif';
+  zctx.fillStyle = '#6366f1';
+  zctx.textBaseline = 'middle';
+  zctx.fillText('Zzz', 0, 25);
+  const zt = new PIXI.Sprite(PIXI.Texture.from(zc));
+  zt.anchor.set(0.5);
+  zt.x = zx;
+  zt.y = zy;
+  cont.addChild(zt);
+
+  // ===== Brand title (center-left) =====
+  const titleCanvas = document.createElement('canvas');
+  titleCanvas.width = 1000;
+  titleCanvas.height = 200;
+  const tctx = titleCanvas.getContext('2d');
+
+  // Subtitle
+  tctx.font = '400 30px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+  tctx.fillStyle = 'rgba(196, 181, 253, 0.8)';
+  tctx.fillText('为 Trae · Codex · Qoder · Cursor · OpenCode 打造', 4, 42);
+
+  // Main title with gradient
+  tctx.font = '900 140px -apple-system, "Segoe UI", sans-serif';
+  const titleGrad = tctx.createLinearGradient(0, 60, 0, 180);
+  titleGrad.addColorStop(0, '#ffffff');
+  titleGrad.addColorStop(0.5, '#c4b5fd');
+  titleGrad.addColorStop(1, '#a855f7');
+  tctx.fillStyle = titleGrad;
+  tctx.fillText('DutyOn', 0, 170);
+  // Subtle outline
+  tctx.lineWidth = 2;
+  tctx.strokeStyle = 'rgba(124, 58, 237, 0.4)';
+  tctx.strokeText('DutyOn', 0, 170);
+
+  const titleSpr = new PIXI.Sprite(PIXI.Texture.from(titleCanvas));
+  titleSpr.x = COVER_W * 0.055;
+  titleSpr.y = COVER_H * 0.43;
+  cont.addChild(titleSpr);
+
+  // Tagline (golden, under title)
+  const tagCanvas = document.createElement('canvas');
+  tagCanvas.width = 900;
+  tagCanvas.height = 60;
+  const gctx = tagCanvas.getContext('2d');
+  gctx.font = '500 34px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+  const tagGrad = gctx.createLinearGradient(0, 0, 0, 50);
+  tagGrad.addColorStop(0, '#fde68a');
+  tagGrad.addColorStop(1, '#f59e0b');
+  gctx.fillStyle = tagGrad;
+  gctx.fillText('你的 AI 编程桌宠 · 让每个 Commit 都有陪伴', 4, 40);
+  const tagSpr = new PIXI.Sprite(PIXI.Texture.from(tagCanvas));
+  tagSpr.x = COVER_W * 0.06;
+  tagSpr.y = COVER_H * 0.70;
+  cont.addChild(tagSpr);
+
+  // ===== Feature chips (single row, refined) =====
+  const chips = [
+    { icon: '🔥', text: 'Hooks 集成', color: '#ef4444' },
+    { icon: '💤', text: '空闲监测', color: '#3b82f6' },
+    { icon: '⚠️', text: '确认提醒', color: '#f59e0b' },
+    { icon: '🪟', text: '多屏吸附', color: '#14b8a6' },
+    { icon: '🌐', text: '五国语言', color: '#ec4899' },
+  ];
+  const CHIP_W = 178, CHIP_H = 50, CHIP_GAP = 14;
+  const totalChipsW = chips.length * CHIP_W + (chips.length - 1) * CHIP_GAP;
+  let chipX = COVER_W * 0.06;
+  const chipY = COVER_H * 0.80;
+  for (let i = 0; i < chips.length; i++) {
+    const c = chips[i];
+    const cc = document.createElement('canvas');
+    cc.width = CHIP_W; cc.height = CHIP_H;
+    const cctx = cc.getContext('2d');
+    // Glass background
+    cctx.fillStyle = 'rgba(255,255,255,0.07)';
+    cctx.strokeStyle = c.color + '66';
+    cctx.lineWidth = 1.5;
+    cctx.beginPath();
+    if (cctx.roundRect) {
+      cctx.roundRect(0, 0, CHIP_W - 8, CHIP_H, 25);
+    } else {
+      cctx.moveTo(25, 0);
+      cctx.arcTo(CHIP_W - 8, 0, CHIP_W - 8, CHIP_H, 25);
+      cctx.arcTo(CHIP_W - 8, CHIP_H, 0, CHIP_H, 25);
+      cctx.arcTo(0, CHIP_H, 0, 0, 25);
+      cctx.arcTo(0, 0, CHIP_W - 8, 0, 25);
+      cctx.closePath();
+    }
+    cctx.fill();
+    cctx.stroke();
+    // Icon + text
+    cctx.font = '400 22px -apple-system, "Segoe UI", sans-serif';
+    cctx.fillStyle = '#f8fafc';
+    cctx.textBaseline = 'middle';
+    cctx.fillText(c.icon + '  ' + c.text, 16, CHIP_H / 2);
+    const cs = new PIXI.Sprite(PIXI.Texture.from(cc));
+    cs.x = chipX;
+    cs.y = chipY;
+    cont.addChild(cs);
+    chipX += CHIP_W + CHIP_GAP;
+  }
+
+  // ===== Decorative accents =====
+  // A few floating diamonds (sparingly)
+  const diamonds = [
+    { x: 0.50, y: 0.16, s: 1.0, c: 0x22d3ee },
+    { x: 0.93, y: 0.22, s: 0.8, c: 0xf472b6 },
+    { x: 0.46, y: 0.88, s: 0.9, c: 0xfde68a },
+  ];
+  for (const d of diamonds) {
+    const dg = new PIXI.Graphics();
+    dg.lineStyle(2, d.c, 0.7);
+    const sz = 10 * d.s;
+    dg.moveTo(COVER_W * d.x, COVER_H * d.y - sz);
+    dg.lineTo(COVER_W * d.x + sz, COVER_H * d.y);
+    dg.lineTo(COVER_W * d.x, COVER_H * d.y + sz);
+    dg.lineTo(COVER_W * d.x - sz, COVER_H * d.y);
+    dg.closePath();
+    cont.addChild(dg);
+  }
+
+  return cont;
+}
+
+async function initApp() {
+  setStatus('正在初始化渲染器...');
+  const PIXI = window.PIXI;
+  const canvasEl = document.getElementById('cover-canvas');
+
+  pixiApp = new PIXI.Application({
+    view: canvasEl,
+    width: COVER_W,
+    height: COVER_H,
+    backgroundAlpha: 1,
+    antialias: true,
+    resolution: 1,
+    autoDensity: false,
+    autoStart: true,
+    powerPreference: 'high-performance',
+  });
+  pixiApp.ticker.maxFPS = 24;
+
+  const bg = drawBackground(pixiApp.renderer);
+  pixiApp.stage.addChild(bg);
+
+  const decos = drawDecorations();
+  pixiApp.stage.addChild(decos);
+
+  setStatus('准备就绪，正在加载 Live2D 模型...');
+  await loadModel(MODEL_SELECT.value);
+}
+
+async function loadModel(fileName) {
+  const PIXI = window.PIXI;
+  const { Live2DModel } = PIXI.live2d;
+  setStatus(`正在加载模型 ${fileName}...`);
+
+  if (live2dModel) {
+    pixiApp.stage.removeChild(live2dModel);
+    live2dModel.destroy({ children: true, texture: false, baseTexture: false });
+    live2dModel = null;
+  }
+
+  const url = `../frontend/assets/live2d/${fileName}`;
+  live2dModel = await Live2DModel.from(url);
+
+  // Place model at BOTTOM-RIGHT, floating
+  const targetAreaW = COVER_W * 0.42;
+  const targetAreaH = COVER_H * 0.88;
+  const areaTop = COVER_H * 0.10;
+
+  let scale = Math.min(
+    targetAreaW / live2dModel.width,
+    targetAreaH / live2dModel.height
+  ) * 0.92;
+
+  const unscaledH = live2dModel.height;
+  live2dModel.scale.set(scale);
+  live2dModel.anchor.set(0.5, 1);
+  live2dModel.x = COVER_W * 0.78;
+  live2dModel.y = COVER_H;
+
+  live2dModel._dutyonUnscaledH = unscaledH;
+  live2dModel._dutyonBaseScale = scale;
+  live2dModel._dutyonTarget = { areaTop, targetAreaH, targetAreaW, anchorX: COVER_W * 0.78 };
+
+  // Refine bounds after first frame
+  let tries = 0;
+  const refine = () => {
+    if (!live2dModel || live2dModel.destroyed || ++tries > 60) {
+      pixiApp.ticker.remove(refine);
+      return;
+    }
+    const content = measureContentBounds(live2dModel);
+    if (!content || content.width < 16 || content.height < 16) return;
+    pixiApp.ticker.remove(refine);
+    refineFit(live2dModel, content);
+  };
+  pixiApp.ticker.add(refine);
+
+  applyFlip();
+
+  // Collect motion groups
+  try {
+    const mm = live2dModel.internalModel.motionManager;
+    motionGroups = [];
+    const defs = mm.definitions || {};
+    for (const g of Object.keys(defs)) {
+      if (Array.isArray(defs[g]) && defs[g].length > 0) {
+        motionGroups.push([g, defs[g].length]);
+      }
+    }
+    mm.groups.idle = '__none__';
+    mm.on('motionFinish', () => {
+      setTimeout(() => {
+        if (live2dModel && !live2dModel.destroyed) playCurrentMotion();
+      }, 0);
+    });
+    currentMotionIdx = 0;
+    setTimeout(() => playCurrentMotion(), 200);
+  } catch(e) {
+    console.warn('motion setup error:', e);
+  }
+
+  // Put model on top of decorations
+  pixiApp.stage.addChild(live2dModel);
+
+  EXPORT_BTN.disabled = false;
+  setStatus('✓ 模型加载完成，可以调整或导出封面');
+}
+
+function playCurrentMotion() {
+  if (!live2dModel || motionGroups.length === 0) return;
+  const [g, n] = motionGroups[currentMotionIdx % motionGroups.length];
+  try {
+    const i = Math.floor(Math.random() * n);
+    live2dModel.motion(g, i, 3);
+    setStatus(`播放动作：${g} [${i + 1}/${n}]`);
+  } catch(e) { console.warn(e); }
+}
+
+MOTION_BTN.addEventListener('click', () => {
+  currentMotionIdx = (currentMotionIdx + 1) % Math.max(1, motionGroups.length);
+  setTimeout(() => playCurrentMotion(), 50);
+});
+
+FLIP_BTN.addEventListener('click', () => {
+  flipHorizontal = !flipHorizontal;
+  applyFlip();
+});
+function applyFlip() {
+  if (pixiApp) {
+    pixiApp.view.style.transformOrigin = 'center center';
+    pixiApp.view.style.transform = flipHorizontal ? 'scaleX(-1)' : '';
+  }
+}
+
+MODEL_SELECT.addEventListener('change', () => {
+  EXPORT_BTN.disabled = true;
+  loadModel(MODEL_SELECT.value).catch(e => {
+    setStatus('模型加载失败: ' + e.message);
+    EXPORT_BTN.disabled = false;
+  });
+});
+
+// Export to PNG
+EXPORT_BTN.addEventListener('click', () => {
+  if (!pixiApp) return;
+  setStatus('正在渲染高分辨率图像...');
+  // Reset flip temporarily for export (so exported image is not mirrored unless intended)
+  const prevTransform = pixiApp.view.style.transform;
+  pixiApp.view.style.transform = '';
+  pixiApp.render();
+  try {
+    const dataUrl = pixiApp.renderer.extract.canvas(pixiApp.stage).toDataURL('image/png');
+    const link = document.createElement('a');
+    link.download = `DutyOn-cover-${MODEL_SELECT.value.split('.')[0]}-${Date.now()}.png`;
+    link.href = dataUrl;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setStatus('✓ 封面已导出（PNG）');
+  } catch(e) {
+    setStatus('导出失败: ' + e.message);
+  } finally {
+    pixiApp.view.style.transform = prevTransform;
+  }
+});
+
+// ===== Bounds helpers =====
+function measureContentBounds(model) {
+  try {
+    const im = model.internalModel;
+    const core = im.coreModel;
+    let ppu = im.pixelsPerUnit;
+    if (!ppu || ppu <= 0) {
+      const cw = core.getCanvasWidth ? core.getCanvasWidth() : 0;
+      ppu = cw > 0 ? model.width / cw : 1;
+    }
+    const count = core.getDrawableCount();
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (let d = 0; d < count; d++) {
+      const verts = core.getDrawableVertexPositions(d);
+      if (!verts) continue;
+      const flags = core.getDrawableDrawableFlags(d);
+      const isVisible = flags ? (flags & 1) === 1 : true;
+      if (!isVisible) continue;
+      for (let v = 0; v < verts.length; v += 2) {
+        const px = verts[v] * ppu;
+        const py = verts[v + 1] * ppu;
+        if (px < minX) minX = px;
+        if (py < minY) minY = py;
+        if (px > maxX) maxX = px;
+        if (py > maxY) maxY = py;
+      }
+    }
+    if (!isFinite(minX)) return null;
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  } catch (e) {
+    return null;
+  }
+}
+
+function refineFit(model, content) {
+  const t = model._dutyonTarget;
+  if (!t) return;
+  const unscaledH = model._dutyonUnscaledH || model.height;
+  let scale = Math.min(
+    t.targetAreaW / content.width,
+    t.targetAreaH / content.height
+  );
+  const MAX_SCALE = model._dutyonBaseScale * 1.4;
+  if (scale > MAX_SCALE) scale = MAX_SCALE;
+  model._dutyonBaseScale = scale;
+  model.scale.set(scale);
+  model.anchor.set(0.5, 1);
+  model.x = t.anchorX != null ? t.anchorX : COVER_W * 0.78;
+  const bottomOffset = unscaledH / 2 + content.y;
+  model.y = COVER_H + bottomOffset * scale;
+}
+
+// Boot
+loadLibs()
+  .then(() => initApp())
+  .catch(e => {
+    setStatus('加载失败: ' + e.message);
+    console.error(e);
+  });
+</script>
+</body>
+</html>

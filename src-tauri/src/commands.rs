@@ -310,34 +310,74 @@ fn best_monitor<'a>(
         .or_else(|| monitors.first())
 }
 
-/// Shared snap detection used by `detect_edge_dock` and the drag-time ghost
-/// preview: returns the monitor holding most of the window plus the crossed
-/// edge that would trigger docking. The window must be PAST the edge — either
-/// off-screen (outer edges) or on a neighbouring monitor (internal boundaries
-/// count too) — by more than 20% of its width; nothing else snaps.
+/// Shared snap detection used by `detect_edge_dock`, `enter_edge_dock` and the
+/// drag-time ghost preview: returns the monitor + edge the window should dock
+/// to.
+///
+/// **Algorithm:** "Most area wins" — first pick the monitor that holds the
+/// largest area of the window (`best_monitor`), then check whether the window
+/// extends past that monitor's left/right edge by more than 20% of its width.
+/// This is the STABLE choice across drag positions:
+///
+///   - On OUTER edges (no neighbour): a window mostly on screen A that bleeds
+///     past A's outer edge snaps to that edge — correct.
+///   - On INTERNAL boundaries (A's right touches B's left at x=X): when the
+///     window crosses x=X, `best_monitor` flips to the other side ONLY when
+///     more than half the window is on that side. Before the flip we snap to
+///     the originating edge; after the flip we snap to the new edge — B's
+///     "right" result is then normalised to the neighbour's "left" so both
+///     sides of the same physical boundary resolve to the same `(monitor,
+///     "left")` pair, preventing the bar from jumping between two positions.
+///
+/// **Hysteresis:** pass `hysteresis_px > 0` when the preview/dock is already
+/// active — the threshold is lowered so the bar doesn't flicker on/off when
+/// the window wobbles right at the boundary during a drag.
 fn snap_target<'a>(
     monitors: &'a [tauri::Monitor],
     pos: tauri::PhysicalPosition<i32>,
     size: tauri::PhysicalSize<u32>,
+    hysteresis_px: i64,
 ) -> Option<(&'a tauri::Monitor, &'static str)> {
     let mon = best_monitor(monitors, pos, size)?;
     let mp = mon.position();
     let ms = mon.size();
-    let cross_left = mp.x - pos.x;
-    let cross_right = (pos.x + size.width as i32) - (mp.x + ms.width as i32);
-    let min_cross = (size.width as f64 * 0.2).round() as i32;
+    let threshold = (size.width as f64 * 0.2).round() as i64;
+    let min_cross = if hysteresis_px > 0 {
+        (threshold - hysteresis_px).max(5)
+    } else {
+        threshold
+    };
+    let cross_left = (mp.x - pos.x) as i64;
+    let cross_right = (pos.x + size.width as i32 - (mp.x + ms.width as i32)) as i64;
+
     let edge = match (cross_left > min_cross, cross_right > min_cross) {
         (true, true) => {
-            if cross_left >= cross_right {
-                "left"
-            } else {
-                "right"
-            }
+            if cross_left >= cross_right { "left" } else { "right" }
         }
         (true, false) => "left",
         (false, true) => "right",
         (false, false) => return None,
     };
+
+    // Internal boundary normalisation: if we'd dock to this monitor's RIGHT
+    // edge and another monitor starts exactly there (same y), dock to that
+    // neighbour's LEFT edge instead — the bar sits on the boundary, and both
+    // sides of the boundary resolve to the same (monitor, "left") answer.
+    if edge == "right" {
+        let boundary = mp.x + ms.width as i32;
+        if let Some(neighbour) = monitors.iter().find(|m| {
+            let p = m.position();
+            p.x == boundary && p.y == mp.y
+        }) {
+            return Some((neighbour, "left"));
+        }
+    }
+    // Symmetric: if we'd dock to this monitor's LEFT edge and another monitor
+    // ends exactly there, this is the same internal boundary — return self
+    // as "left" of this monitor (the right-edge-of-neighbour case was already
+    // converted above when the window was on the neighbour). No-op here
+    // because returning (mon, "left") is already the canonical answer.
+
     Some((mon, edge))
 }
 
@@ -391,7 +431,18 @@ pub fn detect_edge_dock(
     let pos = window.outer_position().map_err(|e| e.to_string())?;
     let size = window.outer_size().map_err(|e| e.to_string())?;
     let monitors = app.available_monitors().map_err(|e| e.to_string())?;
-    Ok(snap_target(&monitors, pos, size).map(|(_, edge)| edge.to_string()))
+    let result = snap_target(&monitors, pos, size, 0);
+    log::info!(
+        "[edgeDock] detect: pos=({},{}) size={}x{} monitors={} => {:?}",
+        pos.x, pos.y, size.width, size.height,
+        monitors.len(),
+        result.map(|(m, e)| {
+            let p = m.position();
+            let s = m.size();
+            format!("(mon [{},{} {}x{}], {})", p.x, p.y, s.width, s.height, e)
+        })
+    );
+    Ok(result.map(|(_, edge)| edge.to_string()))
 }
 
 /// Snap the window into a compact bar at the given left/right edge. The bar
@@ -423,37 +474,90 @@ pub fn enter_edge_dock(
     }
     let pos = window.outer_position().map_err(|e| e.to_string())?;
     let size = window.outer_size().map_err(|e| e.to_string())?;
-    let factor = window.scale_factor().unwrap_or(1.0);
 
     let monitors = app.available_monitors().map_err(|e| e.to_string())?;
     let cy = pos.y + size.height as i32 / 2;
 
     // Resolve monitor + edge TOGETHER via snap_target so they can never
-    // disagree. If the window drifted out of threshold between detect and
-    // enter (rare), fall back to the frontend-provided edge.
-    let (mon, resolved_edge) = match snap_target(&monitors, pos, size) {
+    // disagree. If snap_target returns None (the window drifted between
+    // detect and enter, or sits right at a multi-monitor boundary where the
+    // majority flipped to the neighbouring screen), search ALL monitors for
+    // the largest edge crossing and dock there. Blindly pairing best_monitor
+    // with the frontend-provided edge can place the bar on the WRONG
+    // monitor's OUTER edge — e.g. when the window is mostly on the left
+    // screen but the frontend said "left" (meaning the right screen's left
+    // edge), the bar would jump to the left screen's far-left outer edge,
+    // making the window appear to "disappear". If no edge crossing is found
+    // on any monitor, skip the dock entirely (better no snap than a wrong one).
+    let (mon, resolved_edge) = match snap_target(&monitors, pos, size, 0) {
         Some((m, e)) => (m, e.to_string()),
         None => {
-            let m = best_monitor(&monitors, pos, size)
-                .ok_or_else(|| "no monitors found".to_string())?;
-            (m, edge.clone())
+            // Fallback: detect/enter drifted by a few px and we're just below
+            // threshold. Use the same best_monitor logic but with a minimal
+            // threshold (5px) so we don't snap to a completely wrong edge.
+            // The old "max cross over all monitors" search is what caused the
+            // bar to jump between two screens at internal boundaries; using
+            // best_monitor keeps the choice consistent with snap_target.
+            let Some(m) = best_monitor(&monitors, pos, size) else {
+                log::info!(
+                    "[edgeDock] fallback: no monitors at ({},{}) — skipping (fe edge='{}')",
+                    pos.x, pos.y, edge
+                );
+                return Ok(());
+            };
+            let mp = m.position();
+            let ms = m.size();
+            let cl = (mp.x - pos.x) as i64;
+            let cr = (pos.x + size.width as i32 - (mp.x + ms.width as i32)) as i64;
+            let fe = match (cl > 5, cr > 5) {
+                (true, true) => if cl >= cr { "left" } else { "right" },
+                (true, false) => "left",
+                (false, true) => "right",
+                (false, false) => {
+                    log::info!(
+                        "[edgeDock] fallback: no edge crossing at ({},{}) on mon ({},{}) — skipping (fe edge='{}')",
+                        pos.x, pos.y, mp.x, mp.y, edge
+                    );
+                    return Ok(());
+                }
+            };
+            log::info!(
+                "[edgeDock] fallback: win at ({},{}) {}w => mon ({},{}) {}x{} {} (fe edge='{}')",
+                pos.x, pos.y, size.width, mp.x, mp.y, ms.width, ms.height, fe, edge
+            );
+            (m, fe.to_string())
         }
     };
     let mp = mon.position();
     let ms = mon.size();
+    // Use the TARGET monitor's DPI factor, not the window's current one —
+    // the window may still be on a different-DPI screen when this runs.
+    let factor = mon.scale_factor();
 
     // Vertically centered on the drop position, clamped inside the monitor.
     let (x, y, w, h) = dock_bar_rect(mp, ms, &resolved_edge, factor, cy, content_height);
+    log::info!(
+        "[edgeDock] enter: mon=({},{}) {}x{} edge={} => bar=({},{}) {}x{} (fe edge='{}')",
+        mp.x, mp.y, ms.width, ms.height, resolved_edge,
+        x, y, w, h, edge
+    );
 
+    // Set active BEFORE changing window geometry so the Moved/Resized event
+    // handlers (which also run during set_size/set_position) see the docked
+    // state and don't try to re-save or re-clamp the window mid-transition.
+    // The old code set active AFTER set_size/set_position, which left a race
+    // window where the ScaleFactorChanged clamp could restore the window to
+    // full size before the dock completed.
     *state.docked.lock().unwrap() =
-        Some(((pos.x, pos.y, size.width, size.height), resolved_edge));
+        Some(((pos.x, pos.y, size.width, size.height), resolved_edge.clone()));
+    state.active.store(true, Ordering::SeqCst);
+
     window
         .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(w, h)))
         .map_err(|e| e.to_string())?;
     window
         .set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(x, y)))
         .map_err(|e| e.to_string())?;
-    state.active.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -693,15 +797,21 @@ pub fn update_dock_preview(
         .ok_or_else(|| "dock-preview window not found".to_string())?;
     let pos = window.outer_position().map_err(|e| e.to_string())?;
     let size = window.outer_size().map_err(|e| e.to_string())?;
-    let factor = window.scale_factor().unwrap_or(1.0);
     let monitors = app.available_monitors().map_err(|e| e.to_string())?;
 
-    let Some((mon, edge)) = snap_target(&monitors, pos, size) else {
+    // Hysteresis: once the preview is visible, require LESS crossing to keep
+    // it showing (20px physical of "grace") so the bar doesn't flicker on/off
+    // at the exact threshold pixel as the mouse wiggles during a drag.
+    let already_visible = preview.is_visible().unwrap_or(false);
+    let hyst = if already_visible { 20i64 } else { 0 };
+    let Some((mon, edge)) = snap_target(&monitors, pos, size, hyst) else {
         // Back inside the threshold — no snap would happen, drop the ghost.
         let _ = preview.hide();
         return Ok(());
     };
     let cy = pos.y + size.height as i32 / 2;
+    // Use the TARGET monitor's DPI for consistent bar size across screens.
+    let factor = mon.scale_factor();
     let (x, y, w, h) = dock_bar_rect(mon.position(), mon.size(), edge, factor, cy, content_height);
     preview
         .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(w, h)))

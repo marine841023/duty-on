@@ -169,6 +169,20 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         vis, pos.0, pos.1, sw, sh, aot, decor
     );
 
+    // Log all detected monitors so multi-monitor dock bugs are diagnosable.
+    if let Ok(monitors) = app.available_monitors() {
+        log::info!("[monitors] detected {} display(s):", monitors.len());
+        for (i, m) in monitors.iter().enumerate() {
+            let p = m.position();
+            let s = m.size();
+            let sf = m.scale_factor();
+            log::info!(
+                "  #{} pos=({},{}) size={}x{} scale={}",
+                i, p.x, p.y, s.width, s.height, sf
+            );
+        }
+    }
+
     // Open devtools in debug builds so we can inspect the webview console —
     // essential for diagnosing frontend load failures (JS errors, CSP blocks,
     // asset protocol issues that leave the transparent window blank).
