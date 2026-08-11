@@ -11,16 +11,17 @@
 [![Built with Tauri](https://img.shields.io/badge/Tauri-2.0-24C8D8?logo=tauri&logoColor=white)](https://v2.tauri.app)
 [![Release](https://img.shields.io/github/v/release/marine841023/duty-on)](https://github.com/marine841023/duty-on/releases)
 
-### 🎉 v1.1.8 — Codex hooks compat + CLI session keepalive!
+### 🎉 v1.1.9 — Multi-monitor snap fix + ZIP distribution!
 
 > **Made for Chinese Trae users** — native Trae CN / TraeCode CN window-title
 > detection, multi-root workspace suffix stripping (工作区 / Workspace /
 > ワークスペース / 작업 영역), 8 languages with Simplified Chinese first.
 >
-> **New in v1.1.8:** Codex `hooks.json` `version` field fix, CLI session
-> keepalive (process-aware timeout), `codex-relay` exclusion, bridge stdin
-> anti-hang. Monitors Trae / Qoder / Cursor / Codex / OpenCode concurrently.
-> [Download v1.1.8 →](https://github.com/marine841023/duty-on/releases/tag/v1.1.8)
+> **New in v1.1.9:** cross-monitor edge-dock jump/disappear fix (area-wins
+> `snap_target`, internal-boundary normalisation, target-monitor DPI, active
+> race fix, 20px hysteresis), Live2D cover generator, startup monitor log.
+> Distributed as **ZIP** to bypass Windows SmartScreen on unsigned exe.
+> [Download v1.1.9 (.zip) →](https://github.com/marine841023/duty-on/releases/download/v1.1.9/DutyOn-v1.1.9.zip)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -71,9 +72,11 @@ Built with **Tauri 2 + Rust** (system WebView, no bundled Chromium):
 
 ### Download (recommended)
 
-Grab the installer from
-[**Releases**](https://github.com/marine841023/duty-on/releases)
-(Windows NSIS; macOS DMG and Linux AppImage/DEB buildable from source).
+Grab the **`.zip`** from
+[**Releases**](https://github.com/marine841023/duty-on/releases),
+extract it, and run the NSIS installer inside (`DutyOn_<ver>_x64-setup.exe`).
+Distributed as ZIP to bypass Windows SmartScreen on unsigned exe.
+(macOS DMG and Linux AppImage/DEB buildable from source.)
 
 ### Build from source
 
