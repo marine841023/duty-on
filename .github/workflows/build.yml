@@ -58,22 +58,15 @@ jobs:
           files: src-tauri/target/release/bundle/DutyOn-*.zip
           generate_release_notes: true
           body: |
-            ## v1.1.9 — 多屏吸附修复
+            ## v1.2.0 — 系统托盘
 
-            > **安装方式**：下载 `.zip` 压缩包，解压后运行里面的 `DutyOn_1.1.9_x64-setup.exe` 安装。
-            > （改为 zip 分发以避免 Windows SmartScreen 对直接下载 exe 的拦截警告）
-
-            ### Bug Fixes
-            - **跨屏吸附横跳消失问题**：修复 1 号屏 (DPI 1.25) 与 2 号屏 (DPI 1.0) 边界吸附时窗口在两个屏幕间反复跳动最终消失的故障
-              - `snap_target` 改用 "最大面积优先" 算法确定主屏幕，只在窗口过半进入邻屏时才翻转
-              - 内部边界规范化：右侧若有邻接屏幕，自动转换为邻屏的 left edge，确保同一物理边界返回一致结果
-              - DPI 来源从窗口改为目标显示器，避免跨屏 bar 尺寸计算错误
-              - `enter_edge_dock` 先设置 active 状态再调整窗口尺寸/位置，消除竞态
-              - 预览条添加 20px hysteresis，防止阈值附近闪烁
+            > **安装方式**：下载 `.zip` 压缩包，解压后运行里面的 `DutyOn_1.2.0_x64-setup.exe` 安装。
 
             ### Features
-            - **Live2D 封面生成器**：通过 `docs/cover-generator.html` 可利用现有 Live2D 形象导出封面图（1600×900 PNG，约 1.4MB）
-            - 启动时打印所有显示器信息（位置、尺寸、DPI）便于排查多屏问题
+            - **系统托盘图标**：宠物窗口是无边框透明 + 不显示在任务栏，运行时可能被其他窗口遮挡。新增系统托盘图标提供可见锚点：
+              - 左键点击：切换宠物窗口显示/隐藏
+              - 右键菜单：显示宠物 / 隐藏宠物 / 退出 DutyOn
+            - 即使宠物被其他应用盖住，也能通过托盘图标一键唤回
 
   # macOS / Linux matrix — uncomment to enable:
   # release-unix:

@@ -16,7 +16,11 @@ use crate::user_config::WindowPosition;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder,
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
 use tauri_plugin_autostart::MacosLauncher;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -293,6 +297,58 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // ----- IDE window scanner (adaptive interval) -----
     spawn_ide_scanner(sm.clone());
+
+    // ----- System tray -----
+    // The pet window is skipTaskbar + frameless + transparent, so users may
+    // lose track of it on a busy desktop. A tray icon provides a visible
+    // anchor with quick actions (show / hide / quit). Left-click toggles
+    // visibility.
+    let show_item = MenuItem::with_id(app, "tray_show", "显示宠物", true, None::<&str>)?;
+    let hide_item = MenuItem::with_id(app, "tray_hide", "隐藏宠物", true, None::<&str>)?;
+    let sep_item = PredefinedMenuItem::separator(app)?;
+    let quit_item = MenuItem::with_id(app, "tray_quit", "退出 DutyOn", true, None::<&str>)?;
+    let tray_menu = Menu::with_items(app, &[&show_item, &hide_item, &sep_item, &quit_item])?;
+
+    TrayIconBuilder::with_id("main-tray")
+        .icon(app.default_window_icon().unwrap().clone())
+        .menu(&tray_menu)
+        .tooltip("DutyOn")
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "tray_show" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            "tray_hide" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
+            "tray_quit" => {
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                if let Some(w) = app.get_webview_window("main") {
+                    if w.is_visible().unwrap_or(false) {
+                        let _ = w.hide();
+                    } else {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+            }
+        })
+        .build(app)?;
 
     Ok(())
 }
