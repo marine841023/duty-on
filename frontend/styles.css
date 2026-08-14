@@ -60,7 +60,7 @@ body.menu-window #context-menu {
 /* ===== Pet Container ===== */
 #pet-container {
   width: 260px;
-  height: 420px;
+  height: 520px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -83,6 +83,36 @@ body.menu-window #context-menu {
   display: block;
   width: 100% !important;
   height: 100% !important;
+}
+
+#custom-animation {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Must be auto so pointerdown events reach customAnimEl for tap-to-play.
+     Click-through is handled by Rust-side set_ignore_cursor_events based on
+     collectRegions, not by CSS pointer-events. */
+  pointer-events: auto;
+}
+
+#custom-animation video,
+#custom-animation img {
+  max-width: 88%;
+  max-height: 88%;
+  object-fit: contain;
+  /* Disable native drag (image copy/download). Without this, dragging the
+     GIF triggers the browser's HTML5 drag-and-drop, stealing mouse events
+     from the window-drag handler and breaking edge-dock snapping. */
+  -webkit-user-drag: none;
+  user-drag: none;
+  /* Sharper scaling on high-DPI screens — the default bilinear can look
+     slightly soft when a 1024px GIF is displayed in a 240px CSS box. */
+  image-rendering: -webkit-optimize-contrast;
 }
 
 #fallback-canvas {
@@ -460,6 +490,7 @@ body.menu-window #context-menu {
   min-width: 210px;
   max-height: 600px;
   overflow-y: auto;
+  overflow-x: hidden;
   z-index: 1000;
 }
 
@@ -538,7 +569,8 @@ body.menu-window #context-menu {
 #menu-model-view.hidden,
 #menu-motion-view.hidden,
 #menu-settings-view.hidden,
-#menu-language-view.hidden {
+#menu-language-view.hidden,
+#menu-char-edit-view.hidden {
   display: none;
 }
 
@@ -609,8 +641,205 @@ body.menu-window #context-menu {
 
 /* 动作设定 view slides in like the motion submenu. */
 #menu-settings-view:not(.hidden),
-#menu-language-view:not(.hidden) {
+#menu-language-view:not(.hidden),
+#menu-model-view:not(.hidden),
+#menu-char-edit-view:not(.hidden) {
   animation: submenu-slide-in 0.18s ease-out;
+}
+
+/* ===== Character switch grid (切换形象 menu, enlarged with thumbnails) =====
+   The model-switch view is wider than the regular menu so the thumbnail
+   cards have room to breathe. The grid is a 2-column layout; each card
+   shows a square thumbnail (animation first frame or initial letter for
+   Live2D models) plus the character name and an edit button. */
+#menu-model-view { min-width: 280px; }
+
+#character-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  padding: 6px 4px;
+}
+
+.char-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 6px 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.char-card:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.char-card:active {
+  transform: scale(0.97);
+}
+
+.char-card.active {
+  background: rgba(100, 150, 255, 0.16);
+  border-color: rgba(100, 150, 255, 0.6);
+}
+
+.char-card.active::after {
+  content: '✓';
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  font-size: 11px;
+  color: #6496ff;
+  font-weight: 700;
+}
+
+.char-thumb {
+  width: 64px;
+  height: 64px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06) center/cover no-repeat;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.55);
+  margin-bottom: 6px;
+  overflow: hidden;
+}
+
+.char-thumb img,
+.char-thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.char-name {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.85);
+  text-align: center;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.char-edit-btn {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 11px;
+  line-height: 20px;
+  text-align: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.char-card:hover .char-edit-btn {
+  opacity: 1;
+}
+
+.char-edit-btn:hover {
+  background: rgba(100, 150, 255, 0.5);
+  color: #fff;
+}
+
+/* Active card never hides the edit button (so users see it's editable). */
+.char-card.active .char-edit-btn {
+  opacity: 1;
+}
+
+/* "+ 新建形象" row gets an accent look to draw attention. */
+#menu-new-character {
+  color: #6496ff;
+  font-weight: 600;
+  text-align: center;
+}
+
+#menu-new-character:hover {
+  background: rgba(100, 150, 255, 0.15);
+}
+
+/* Inline name-input row that expands below "+ 新建形象". */
+#char-create-inline {
+  padding: 4px 8px;
+}
+#char-create-inline.hidden {
+  display: none;
+}
+.char-inline-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#char-create-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+#char-create-input::placeholder {
+  color: rgba(255, 255, 255, 0.3);
+}
+#char-create-input:focus {
+  border-color: rgba(120, 160, 255, 0.7);
+}
+.char-inline-btn {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s ease;
+}
+.char-inline-btn.ok {
+  color: rgba(100, 255, 150, 0.9);
+}
+.char-inline-btn.ok:hover {
+  background: rgba(100, 255, 150, 0.15);
+}
+.char-inline-btn.cancel {
+  color: rgba(255, 100, 100, 0.8);
+}
+.char-inline-btn.cancel:hover {
+  background: rgba(255, 100, 100, 0.15);
+}
+
+/* Edit-view state rows: uploaded status (green) + re-upload action (blue). */
+#menu-char-edit-view .menu-item .menu-hint {
+  font-size: 10px;
+}
+.char-uploaded-tag {
+  color: rgba(100, 255, 150, 0.9);
+  font-weight: 600;
+  margin-right: 6px;
+}
+.char-reupload-tag {
+  color: rgba(120, 160, 255, 0.85);
+  font-weight: 500;
 }
 
 /* State rows in 动作设定: label left, current motion name + arrow right. */

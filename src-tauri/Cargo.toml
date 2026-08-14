@@ -1,6 +1,6 @@
 [package]
 name = "duty-on"
-version = "1.2.0"
+version = "1.3.0"
 description = "Live2D desktop pet for monitoring Trae IDE AI task status"
 authors = ["DutyOn"]
 edition = "2021"
@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "macos-private-api", "protocol-asset"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
@@ -29,6 +30,12 @@ regex = "1"
 log = "0.4"
 env_logger = "0.11"
 sys-locale = "0.3"
+# Image resizing for uploaded custom-character animations (GIF/PNG/JPG/WebP).
+# GIF decode/encode preserves animation by processing each frame.
+image = { version = "0.25", default-features = false, features = ["gif", "png", "jpeg", "webp"] }
+# Base64 decoding for Live2D model thumbnail snapshots (PNG captured by
+# the main window, sent as base64 via IPC, saved to ~/.dutyon/thumbnails/).
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

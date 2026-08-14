@@ -11,17 +11,18 @@
 [![Built with Tauri](https://img.shields.io/badge/Tauri-2.0-24C8D8?logo=tauri&logoColor=white)](https://v2.tauri.app)
 [![Release](https://img.shields.io/github/v/release/marine841023/duty-on)](https://github.com/marine841023/duty-on/releases)
 
-### 🎉 v1.1.9 — Multi-monitor snap fix + ZIP distribution!
+### 🎉 v1.3.0 — Custom GIF characters!
 
 > **Made for Chinese Trae users** — native Trae CN / TraeCode CN window-title
 > detection, multi-root workspace suffix stripping (工作区 / Workspace /
 > ワークスペース / 작업 영역), 8 languages with Simplified Chinese first.
 >
-> **New in v1.1.9:** cross-monitor edge-dock jump/disappear fix (area-wins
-> `snap_target`, internal-boundary normalisation, target-monitor DPI, active
-> race fix, 20px hysteresis), Live2D cover generator, startup monitor log.
-> Distributed as **ZIP** to bypass Windows SmartScreen on unsigned exe.
-> [Download v1.1.9 (.zip) →](https://github.com/marine841023/duty-on/releases/download/v1.1.9/DutyOn-v1.1.9.zip)
+> **New in v1.3.0:** Create your own desktop pet from any **GIF / PNG / MP4**!
+> Upload custom animations for each state (💤 sleeping / ⚡ working / 🔔 alert),
+> re-upload to replace at any time. No Live2D model required — just pick a GIF
+> and your pet comes alive. Large GIFs auto-resized; cache-busting ensures
+> re-uploads always show the new animation.
+> [Download v1.3.0 (.zip) →](https://github.com/marine841023/duty-on/releases/download/v1.3.0/DutyOn-v1.3.0.zip)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -51,6 +52,12 @@ Built with **Tauri 2 + Rust** (system WebView, no bundled Chromium):
 
 ## Features
 
+- **🎬 Custom GIF characters** — create your own desktop pet from any **GIF /
+  PNG / JPG / WebP / MP4 / WebM** file! Upload separate animations for each
+  state (💤 sleeping / ⚡ working / 🔔 alert). Re-upload to replace anytime.
+  No Live2D model needed — just pick a GIF and your pet comes alive.
+  Large images auto-resized (max 1024px); cache-busting ensures re-uploads
+  always show the new animation.
 - **Live status at a glance** — one character reflects the aggregate state of
   all connected IDE sessions (alert > working > sleeping)
 - **Per-project status bar** — every IDE project listed under the pet with a
@@ -133,6 +140,22 @@ on Windows), then restart your IDE or start a new AI session.
 
 Ambiguous `Notification` events default to "task complete" (no alert); the
 whitelist lives in [`src-tauri/src/config.rs`](src-tauri/src/config.rs).
+
+## Custom GIF characters (v1.3.0+)
+
+Don't have a Live2D model? No problem! Create a custom pet from any **GIF / PNG /
+MP4** file:
+
+1. Right-click the pet → **切换形象** → **+ 新建形象**
+2. Enter a name, then upload an animation for each state:
+   - 💤 **Sleeping** (idle) — shown when no AI task is running
+   - ⚡ **Working** — shown when an AI task is active
+   - 🔔 **Alert** — shown when confirmation is needed
+3. Click **✎** on any custom character to re-upload animations
+
+Supported formats: GIF (animated), PNG/JPG/WebP (static), MP4/WebM/MOV (video).
+Large images are auto-resized to max 1024px to keep things lightweight.
+Files are stored in `~/.dutyon/animations/<character_id>/`.
 
 ## Custom Live2D models
 

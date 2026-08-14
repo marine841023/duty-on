@@ -76,4 +76,10 @@ fn main() {
     // keeps embedding the STALE cached icon into the exe (observed: two
     // repacks after `cargo tauri icon` still shipped the original icon).
     println!("cargo:rerun-if-changed=icons/icon.ico");
+    // Re-run when any frontend source file changes — without this, Cargo
+    // doesn't detect JS/CSS/HTML edits (no .rs files changed) and ships a
+    // binary with the STALE frontend embedded via generate_context!().
+    for f in ["index.html", "styles.css", "i18n.js", "tauri-bridge.js", "renderer.js", "preview.html"] {
+        println!("cargo:rerun-if-changed=../frontend/{}", f);
+    }
 }

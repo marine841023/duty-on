@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Duty On</title>
-  <link rel="stylesheet" href="styles.css">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <link rel="stylesheet" href="styles.css?v=2">
 </head>
 <body>
   <!-- Early diagnostic forwarder: POSTs JS errors to our HTTP server's /log
@@ -84,7 +85,7 @@
         <span data-i18n="menu.language">语言</span><span class="submenu-arrow">▶</span>
       </div>
       <div class="menu-divider"></div>
-      <div class="menu-item" id="menu-install-hooks" data-i18n="menu.installHooks">安装 Hook 集成</div>
+      <div class="menu-item" id="menu-install-hooks" data-i18n="menu.installHooks">安装 IDE 集成</div>
       <div class="menu-item" id="menu-hook-status"><span data-i18n="menu.hookStatus">Hook 状态</span><span class="menu-hint" id="hook-status-hint">未检查</span></div>
       <div class="menu-divider"></div>
       <div class="menu-item danger" id="menu-quit" data-i18n="menu.quit">退出</div>
@@ -95,7 +96,16 @@
         <span class="submenu-arrow back">◀</span><span data-i18n="menu.back">返回</span>
       </div>
       <div class="menu-label" data-i18n="menu.switchModel">切换形象</div>
-      <div id="model-list"><!-- model items populated dynamically --></div>
+      <div class="menu-item" id="menu-new-character" data-i18n="menu.newCharacter">+ 新建形象</div>
+      <div id="char-create-inline" class="hidden">
+        <div class="char-inline-row">
+          <input type="text" id="char-create-input" maxlength="20" placeholder="请输入名称" autocomplete="off" />
+          <span class="char-inline-btn ok" id="char-create-ok">✓</span>
+          <span class="char-inline-btn cancel" id="char-create-cancel">✕</span>
+        </div>
+      </div>
+      <div class="menu-divider"></div>
+      <div id="character-grid"><!-- character cards populated dynamically --></div>
     </div>
     <!-- 播放动作 submenu -->
     <div id="menu-motion-view" class="hidden">
@@ -129,6 +139,27 @@
       <div class="menu-divider"></div>
       <div class="menu-item" id="menu-test-alert" data-i18n="menu.previewAlert">预览提醒效果</div>
     </div>
+    <!-- 编辑形象 submenu -->
+    <div id="menu-char-edit-view" class="hidden">
+      <div class="menu-item submenu-back" id="menu-char-edit-back">
+        <span class="submenu-arrow back">◀</span><span data-i18n="menu.back">返回</span>
+      </div>
+      <div class="menu-label" id="char-edit-title" data-i18n="menu.editCharacter">编辑形象</div>
+      <div class="menu-item" id="char-edit-sleeping">
+        <span data-i18n="settings.sleeping">空闲中</span>
+        <span class="menu-hint" id="char-edit-sleeping-hint">上传</span>
+      </div>
+      <div class="menu-item" id="char-edit-working">
+        <span data-i18n="settings.working">忙碌中</span>
+        <span class="menu-hint" id="char-edit-working-hint">上传</span>
+      </div>
+      <div class="menu-item" id="char-edit-alert">
+        <span data-i18n="settings.alert">需要确认</span>
+        <span class="menu-hint" id="char-edit-alert-hint">上传</span>
+      </div>
+      <div class="menu-divider"></div>
+      <div class="menu-item danger" id="char-edit-delete" data-i18n="menu.deleteCharacter">删除形象</div>
+    </div>
     <!-- 语言 submenu -->
     <div id="menu-language-view" class="hidden">
       <div class="menu-item submenu-back" id="menu-language-back">
@@ -138,8 +169,6 @@
       <div id="language-list"><!-- language items populated dynamically --></div>
     </div>
   </div>
-
-  <!-- Load libraries -->
   <!-- Try local first, fallback to CDN -->
   <script>
     // Dynamic script loader with fallback
@@ -204,11 +233,11 @@
   </script>
 
   <!-- i18n module (must load before renderer.js so window.i18n is available) -->
-  <script src="i18n.js"></script>
+  <script src="i18n.js?v=2"></script>
   <!-- Tauri bridge: implements window.petAPI via the Tauri global API.
        Must load before renderer.js (which uses window.petAPI at init). -->
-  <script src="tauri-bridge.js"></script>
+  <script src="tauri-bridge.js?v=2"></script>
   <!-- Main renderer script -->
-  <script src="renderer.js"></script>
+  <script src="renderer.js?v=2"></script>
 </body>
 </html>

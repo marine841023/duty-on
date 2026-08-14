@@ -18,6 +18,7 @@ let effectsTimer = null;
 let hooksInstalled = false;    // cached hook install status (for hint refresh)
 let oneShotPlaying = false;    // a tap-triggered motion is playing; state motion resumes when it ends
 let motionPreview = null;      // [group, idx] looped while hovering the 播放动作 menu
+let customOneShotTimer = null; // restore timer for custom-animation one-shots (GIF/MP4 have no motionFinish)
 let availableModels = [];      // catalog from main process
 let currentModelUrl = null;    // persisted/loaded model URL
 let motionPickerMode = 'play'; // 'play' = tap-to-play, 'assign' = pick for a state
@@ -30,6 +31,10 @@ let edgeDockDragEndAt = 0;    // last dock-bar drag end (suppresses stray clicks
 let headEffectEl = null;        // #head-effect container, positioned at head-top anchor
 let isDragging = false;         // shared with setupDrag so click-through can stay off while dragging
 let currentMotionGroups = [];   // [name, count] pairs scanned from the loaded model's motion defs
+let activeCharacter = null;    // { id, name, type: 'live2d'|'animation', animations?: {...} }
+let customAnimEl = null;       // #custom-animation container div (video/img inside)
+let charactersData = null;     // { builtin: [], custom: [], active: 'id' } from get_characters
+let editingCharId = null;      // character ID currently being edited in the edit view
 
 // Model URLs to try (in order)
 const MODEL_URLS = [
@@ -93,6 +98,7 @@ function applyTranslations() {
   buildMotionMenu(motionPickerMode, motionPickerTarget);
   buildSettingsMenu();
   buildLanguageMenu();
+  buildCharEditMenu();
   loadAutoLaunchState();
   loadExternalAccessState();
   updateHookStatusHint(hooksInstalled, currentSnapshot);
@@ -222,15 +228,17 @@ async function init() {
   setupDrag();
   // setupClickThrough() is called from initPixiApp() once pixiApp exists (it
   // registers a PixiJS ticker callback).
-  buildMotionMenu('play');
 
   // Fetch available models + persisted choice, per-state motion assignments,
   // and appearance settings in parallel — they have no inter-dependencies.
   await Promise.all([
-    loadModelCatalog(),
     loadStateMotions(),
     loadAppearance(),
+    loadCharacters(),
   ]);
+  // Select the animation backend based on the active character's type so
+  // buildSettingsMenu and all motion-related calls use the right backend.
+  selectAnimBackend();
   buildSettingsMenu();
   updateFlipMenuCheck();
 
@@ -241,8 +249,17 @@ async function init() {
     await initLive2D();
   }
 
-  if (!live2dModel) {
-    // Fallback to canvas animation
+  // After the main model loads, generate thumbnails for all other Live2D
+  // models in the background (hidden PIXI app). Cached on disk, so this only
+  // runs once per model. Delayed 3s so it doesn't compete with startup.
+  if (live2dModel) {
+    setTimeout(() => generateMissingThumbnails(), 3000);
+  }
+
+  if (!live2dModel && !(activeCharacter && activeCharacter.type === 'animation')) {
+    // Fallback to canvas animation — only when there's no Live2D model AND
+    // no custom GIF/MP4 character active (otherwise the fallback canvas would
+    // stack on top of the custom animation).
     initFallbackCanvas();
     setPetState('sleeping');
   }
@@ -338,7 +355,7 @@ async function initMenuMode() {
   };
 
   // ---- Override build functions BEFORE applyTranslations/data loading ----
-  // applyTranslations() and loadModelCatalog() call buildModelMenu /
+  // applyTranslations() and loadCharacters() call buildCharacterGrid /
   // buildLanguageMenu / buildMotionMenu / buildSettingsMenu. The overrides
   // must be in place first so these calls produce items with menu-window
   // event handlers (emit to main) instead of main-window handlers.
@@ -363,25 +380,50 @@ async function initMenuMode() {
     }
   };
 
-  buildModelMenu = function () {
-    const container = document.getElementById('model-list');
-    if (!container) return;
+  buildCharacterGrid = function () {
+    const container = document.getElementById('character-grid');
+    if (!container || !charactersData) return;
     container.innerHTML = '';
-    for (const model of availableModels) {
-      const item = document.createElement('div');
-      item.className = 'menu-item';
-      item.dataset.url = model.url;
-      item.textContent = model.name;
-      if (model.url === currentModelUrl) item.classList.add('active');
-      item.addEventListener('click', () => {
-        if (model.url === currentModelUrl) return;
-        currentModelUrl = model.url;
-        container.querySelectorAll('.menu-item').forEach((el) => el.classList.remove('active'));
-        item.classList.add('active');
-        sendAction('switchModel', { url: model.url });
-        closeSelf();
+    const all = [...(charactersData.builtin || []), ...(charactersData.custom || [])];
+    for (const char of all) {
+      const card = document.createElement('div');
+      card.className = 'char-card';
+      if (char.id === charactersData.active) card.classList.add('active');
+      // Thumbnail
+      const thumb = document.createElement('div');
+      thumb.className = 'char-thumb';
+      if (char.type === 'animation' && char.animations && char.animations.sleeping) {
+        const url = animAssetUrl(char.animations.sleeping, char.versions && char.versions.sleeping);
+        thumb.style.backgroundImage = `url("${url}")`;
+      } else if (char.thumbnail) {
+        const url = window.__TAURI__.core.convertFileSrc(char.thumbnail);
+        thumb.style.backgroundImage = `url("${url}")`;
+      } else {
+        thumb.textContent = char.name.charAt(0).toUpperCase();
+      }
+      card.appendChild(thumb);
+      // Name
+      const name = document.createElement('div');
+      name.className = 'char-name';
+      name.textContent = char.name;
+      card.appendChild(name);
+      // Edit button for custom characters
+      if (char.type === 'animation') {
+        const editBtn = document.createElement('div');
+        editBtn.className = 'char-edit-btn';
+        editBtn.textContent = '✎';
+        editBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          showEditCharacterView(char.id);
+        });
+        card.appendChild(editBtn);
+      }
+      // Click to switch
+      card.addEventListener('click', () => {
+        if (char.id === charactersData.active) { closeSelf(); return; }
+        handleSwitchCharacter(char.id);
       });
-      container.appendChild(item);
+      container.appendChild(card);
     }
   };
 
@@ -395,7 +437,8 @@ async function initMenuMode() {
         ? i18n.t('menu.actionSettings') + ' → ' + i18n.t('settings.' + targetState)
         : i18n.t('menu.playMotion');
     }
-    if (!currentMotionGroups || currentMotionGroups.length === 0) {
+    const list = animBackend ? animBackend.getMotionList() : [];
+    if (!list.length) {
       const empty = document.createElement('div');
       empty.className = 'menu-item';
       empty.style.color = 'rgba(255,255,255,0.35)';
@@ -404,26 +447,30 @@ async function initMenuMode() {
       container.appendChild(empty);
       return;
     }
-    for (const [name, count] of currentMotionGroups) {
-      for (let i = 0; i < count; i++) {
+    const desiredCurrent = (mode === 'assign' && targetState) ? STATE_MOTIONS[targetState] : null;
+    const resolvedCurrent = desiredCurrent
+      ? resolveAvailableMotion(desiredCurrent[0], desiredCurrent[1])
+      : null;
+    for (const [group, count] of list) {
+      for (let idx = 0; idx < count; idx++) {
         const item = document.createElement('div');
         item.className = 'menu-item';
-        // Use motionDisplayName (translated label, e.g. 发呆/开心/哈欠) so the
-        // separate menu window matches the main window — raw group names like
-        // "Idle #1" / "Tap #2" looked like every motion had been renamed.
-        item.textContent = motionDisplayName(name, i);
+        item.textContent = animBackend.getMotionName(group, idx);
+        if (resolvedCurrent && resolvedCurrent[0] === group && resolvedCurrent[1] === idx) {
+          item.classList.add('active');
+        }
         item.addEventListener('mouseenter', () => {
-          sendAction('previewMotion', { group: name, idx: i });
+          sendAction('previewMotion', { group, idx });
         });
         item.addEventListener('mouseleave', () => {
           sendAction('stopPreview', {});
         });
         item.addEventListener('click', () => {
           if (mode === 'assign') {
-            sendAction('assignMotion', { state: targetState, group: name, idx: i });
+            sendAction('assignMotion', { state: targetState, group, idx });
             showView('menu-settings-view');
           } else {
-            sendAction('playMotion', { group: name, idx: i });
+            sendAction('playMotion', { group, idx });
             closeSelf();
           }
         });
@@ -439,13 +486,23 @@ async function initMenuMode() {
   // ---- Mark body as menu-window + show context menu ----
   document.body.classList.add('menu-window');
   document.getElementById('context-menu').classList.remove('hidden');
+  // Fit the window to the main menu content immediately (before async data
+  // loads) so the initial open doesn't flash the wrong height.
+  fitMenuWindow();
 
   // ---- Load data from Tauri commands ----
-  await Promise.all([
-    loadModelCatalog(),
-    loadStateMotions(),
-    loadAppearance(),
-  ]);
+  try {
+    await Promise.all([
+      loadCharacters(),
+      loadStateMotions(),
+      loadAppearance(),
+    ]);
+  } catch (err) {
+    if (window.__petSendLog) window.__petSendLog('error', '[menu] initMenuMode data load failed: ' + (err && err.message ? err.message : String(err)));
+  }
+  // Select the animation backend based on the active character's type so
+  // buildMotionMenu / buildSettingsMenu work uniformly in the menu window.
+  selectAnimBackend();
   loadAutoLaunchState();
   loadExternalAccessState();
 
@@ -480,6 +537,7 @@ async function initMenuMode() {
   });
 
   // ---- Static event listeners (submenu navigation + actions) ----
+  if (window.__petSendLog) window.__petSendLog('info', '[menu] Setting up static event listeners');
   document.getElementById('menu-models-trigger').addEventListener('click', () => {
     showView('menu-model-view');
   });
@@ -513,6 +571,74 @@ async function initMenuMode() {
   });
   document.getElementById('menu-settings-back').addEventListener('click', () => {
     showView('menu-main-view');
+  });
+
+  // New character: toggle inline name input below the button
+  document.getElementById('menu-new-character').addEventListener('click', (e) => {
+    e.stopPropagation();
+    handleCreateCharacter();
+  });
+  // Inline input: confirm / cancel / Enter key
+  document.getElementById('char-create-ok').addEventListener('click', (e) => {
+    e.stopPropagation();
+    confirmCreateCharacter();
+  });
+  document.getElementById('char-create-cancel').addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.getElementById('char-create-inline').classList.add('hidden');
+    fitMenuWindow();
+  });
+  document.getElementById('char-create-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); confirmCreateCharacter(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); document.getElementById('char-create-inline').classList.add('hidden'); fitMenuWindow(); }
+  });
+  // Character edit view back button
+  document.getElementById('menu-char-edit-back').addEventListener('click', () => {
+    showView('menu-model-view');
+  });
+  // Character edit: upload buttons for each state
+  for (const state of ['sleeping', 'working', 'alert']) {
+    document.getElementById('char-edit-' + state).addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (window.petAPI && window.petAPI.debugLog) window.petAPI.debugLog('[char-edit] click state=' + state + ' editingCharId=' + editingCharId);
+      if (!editingCharId || !window.petAPI || !window.petAPI.pickCharacterAnimation) return;
+      const hint = document.getElementById(`char-edit-${state}-hint`);
+      window.__PICKING_FILE__ = true;
+      try {
+        const result = await window.petAPI.pickCharacterAnimation(editingCharId, state);
+        if (window.petAPI && window.petAPI.debugLog) window.petAPI.debugLog('[char-edit] result=' + JSON.stringify(result));
+        if (result && result.success) {
+          // Show a brief "upload succeeded" flash before the hint settles
+          // into the "已上传 / 重新上传" steady state.
+          if (hint) {
+            hint.innerHTML = '<span style="color: rgba(100, 220, 120, 0.95); font-weight: 600;">'
+              + (i18n.t('menu.uploadSuccess') || '上传成功') + '</span>';
+          }
+          await loadCharacters();
+          if (editingCharId === (activeCharacter && activeCharacter.id)) {
+            refreshActiveCharacter();
+          }
+          setTimeout(() => { if (editingCharId) buildCharEditMenu(); }, 1200);
+        }
+      } catch (err) {
+        const msg = err && err.message ? err.message : String(err);
+        if (window.petAPI && window.petAPI.debugLog) window.petAPI.debugLog('[char-edit] Upload failed: ' + msg);
+        if (hint) {
+          hint.innerHTML = '<span style="color: rgba(255, 100, 100, 0.9);">' + (i18n.t('menu.uploadFailed') || '上传失败') + '</span>';
+          setTimeout(() => { if (editingCharId) buildCharEditMenu(); }, 2500);
+        }
+      } finally {
+        window.__PICKING_FILE__ = false;
+      }
+    });
+  }
+  // Character edit: delete button
+  document.getElementById('char-edit-delete').addEventListener('click', async () => {
+    if (!editingCharId || !window.petAPI || !window.petAPI.deleteCharacter) return;
+    await window.petAPI.deleteCharacter(editingCharId);
+    editingCharId = null;
+    await loadCharacters();
+    showView('menu-model-view');
   });
 
   // Toggle actions (optimistic update + emit to main)
@@ -578,49 +704,106 @@ async function initMenuMode() {
 }
 
 /**
- * Fetch the model catalog and persisted choice from the main process, then
+ * Fetch the character catalog and active choice from the main process, then
  * populate the "切换形象" menu.
  */
-async function loadModelCatalog() {
-  if (!window.petAPI || !window.petAPI.getModels) return;
+async function loadCharacters() {
+  if (!window.petAPI || !window.petAPI.getCharacters) return;
   try {
-    const { models, currentModelUrl: saved } = await window.petAPI.getModels();
-    availableModels = Array.isArray(models) ? models : [];
-    // Normalize old Electron paths (../../assets/...) to Tauri's flat (assets/...)
-    // The persisted config from the Electron era uses ../../ prefix which is
-    // wrong under Tauri's http://tauri.localhost/ origin.
-    let url = saved || (availableModels[0] && availableModels[0].url) || null;
-    if (url && url.startsWith('../../')) {
-      url = url.replace(/^(\.\.\/)+/, '');
-      // Persist the corrected URL so it doesn't re-trigger every launch.
-      if (window.petAPI.switchModel) window.petAPI.switchModel(url);
+    charactersData = await window.petAPI.getCharacters();
+    // Determine active character object
+    const all = [...(charactersData.builtin || []), ...(charactersData.custom || [])];
+    activeCharacter = all.find(c => c.id === charactersData.active) || all[0] || null;
+    if (activeCharacter && activeCharacter.type === 'live2d') {
+      currentModelUrl = resolveLive2DUrl(activeCharacter);
     }
-    currentModelUrl = url;
-    buildModelMenu();
+    buildCharacterGrid();
+    // In menu mode, refit the window after the character grid rebuilds
+    // (e.g. after creating/deleting a character while the menu is open).
+    fitMenuWindow();
   } catch (err) {
-    console.warn('[models] Failed to load catalog:', err.message);
+    console.warn('[characters] Failed to load:', err.message);
   }
 }
 
 /**
- * Build the model-switching menu items from `availableModels`.
+ * Resolve a Live2D character's URL for use with Live2DModel.from().
+ * Built-in models use relative URLs (assets/live2d/...). User-uploaded
+ * models have absolute filesystem paths that must be converted to HTTP
+ * server URLs (http://localhost:17521/live2d/...). We use "localhost"
+ * instead of "127.0.0.1" because WebView2 may block fetch() to raw IP
+ * loopback addresses. The HTTP server is needed (not convertFileSrc)
+ * because pixi-live2d-display resolves relative paths (moc3, textures)
+ * against the model3.json URL, and the asset protocol doesn't handle
+ * relative path resolution correctly.
  */
-function buildModelMenu() {
-  const container = document.getElementById('model-list');
-  if (!container) return;
+function resolveLive2DUrl(char) {
+  if (!char || !char.url) return null;
+  // getCharacters (tauri-bridge.js) already converts user-uploaded model
+  // paths to HTTP server URLs, so char.url is ready to use as-is.
+  return char.url;
+}
+
+/**
+ * Async URL resolver for Live2D models. Built-in models return their
+ * relative URL directly. User-uploaded models have their URL already
+ * converted to an HTTP server URL (http://localhost:17521/live2d/...) by
+ * getCharacters in tauri-bridge.js, so we just return it as-is.
+ *
+ * Returns a URL suitable for `Live2DModel.from()`.
+ */
+async function resolveLive2DUrlAsync(char) {
+  if (!char || !char.url) return null;
+  return char.url;
+}
+
+/**
+ * Build the character-switching grid from `charactersData`.
+ */
+function buildCharacterGrid() {
+  const container = document.getElementById('character-grid');
+  if (!container || !charactersData) return;
   container.innerHTML = '';
-  for (const model of availableModels) {
-    const item = document.createElement('div');
-    item.className = 'menu-item';
-    item.dataset.url = model.url;
-    item.textContent = model.name;
-    if (model.url === currentModelUrl) item.classList.add('active');
-    item.addEventListener('click', () => {
-      if (model.url === currentModelUrl) return;
-      switchModel(model.url);
-      closeMenu();
+  const all = [...(charactersData.builtin || []), ...(charactersData.custom || [])];
+  for (const char of all) {
+    const card = document.createElement('div');
+    card.className = 'char-card';
+    if (char.id === charactersData.active) card.classList.add('active');
+    // Thumbnail
+    const thumb = document.createElement('div');
+    thumb.className = 'char-thumb';
+    if (char.type === 'animation' && char.animations && char.animations.sleeping) {
+      const url = animAssetUrl(char.animations.sleeping, char.versions && char.versions.sleeping);
+      thumb.style.backgroundImage = `url("${url}")`;
+    } else if (char.thumbnail) {
+      const url = window.__TAURI__.core.convertFileSrc(char.thumbnail);
+      thumb.style.backgroundImage = `url("${url}")`;
+    } else {
+      thumb.textContent = char.name.charAt(0).toUpperCase();
+    }
+    card.appendChild(thumb);
+    // Name
+    const name = document.createElement('div');
+    name.className = 'char-name';
+    name.textContent = char.name;
+    card.appendChild(name);
+    // Edit button for custom characters
+    if (char.type === 'animation') {
+      const editBtn = document.createElement('div');
+      editBtn.className = 'char-edit-btn';
+      editBtn.textContent = '✎';
+      editBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showEditCharacterView(char.id);
+      });
+      card.appendChild(editBtn);
+    }
+    // Click to switch
+    card.addEventListener('click', () => {
+      if (char.id === charactersData.active) { closeMenu(); return; }
+      handleSwitchCharacter(char.id);
     });
-    container.appendChild(item);
+    container.appendChild(card);
   }
 }
 
@@ -628,10 +811,8 @@ function buildModelMenu() {
  * Highlight the active model in the menu.
  */
 function updateModelMenuActive(url) {
-  const items = document.querySelectorAll('#model-list .menu-item');
-  items.forEach((el) => {
-    el.classList.toggle('active', el.dataset.url === url);
-  });
+  // Refresh from backend after model switch
+  loadCharacters();
 }
 
 /**
@@ -649,12 +830,288 @@ function waitForLibs() {
   });
 }
 
+// ===== Animation Backend =====
+// Unified animation interface. Upper-layer functions (playStateMotion,
+// playMotionOnce, buildMotionMenu, updateHeadEffectAnchor, …) call animBackend
+// methods ONLY — no `if (type === 'animation')` branches in call sites.
+// Live2D vs custom-animation (GIF/MP4) differences are encapsulated here.
+
+let animBackend = null;
+
+/** Unified one-shot finish handler — called by whichever backend drives the
+ *  restore (Live2D: motionFinish event; custom: setTimeout). Only clears the
+ *  one-shot flag and restores the head effect; the caller resumes the state
+ *  motion (Live2D needs a setTimeout deferral, custom does not). */
+function onOneShotFinished() {
+  if (!oneShotPlaying) return;
+  oneShotPlaying = false;
+  setHeadEffectVisible(true);
+}
+
+/** Reset all motion-playback state so switching characters / states / modes
+ *  doesn't leave stale timers, flags, or hidden head effects.
+ *  Always call this before re-initializing the animation layer. */
+function resetMotionPlaybackState() {
+  if (animBackend) animBackend.cancelPendingOneShot();
+  oneShotPlaying = false;
+  motionPreview = null;
+  setHeadEffectVisible(true);
+}
+
+const live2dBackend = {
+  type: 'live2d',
+
+  play(group, idx, priority) {
+    if (!live2dModel) return false;
+    try {
+      const r = live2dModel.motion(group, idx, priority);
+      return r !== false && r !== undefined;
+    } catch (e) { return false; }
+  },
+
+  playOneShot(group, idx) {
+    // Restore is driven by the motionFinish event registered in attachModel.
+    return this.play(group, idx, MOTION_PRIORITY_FORCE);
+  },
+
+  cancelPendingOneShot() { /* no-op: Live2D restore is event-driven */ },
+
+  getMotionList() { return currentMotionGroups; },
+
+  getMotionName(group, idx) { return motionDisplayName(group, idx); },
+
+  getBounds() {
+    if (!live2dModel || !pixiApp) return null;
+    try {
+      const b = live2dModel.getBounds();
+      const r = pixiApp.view.getBoundingClientRect();
+      return { x: b.x + r.left, y: b.y + r.top, width: b.width, height: b.height };
+    } catch (e) { return null; }
+  },
+
+  isPlaying() {
+    if (!live2dModel) return false;
+    return live2dModel.internalModel.motionManager.playing;
+  },
+
+  onClick(cb) {
+    if (live2dModel) live2dModel.on('pointerdown', cb);
+  },
+
+  setupHeadEffectTracking() {
+    // Clean up the OTHER backend's tracking mechanism to prevent double registration.
+    if (setupHeadEffect._timer) { clearInterval(setupHeadEffect._timer); setupHeadEffect._timer = null; }
+    if (window.PIXI && pixiApp) {
+      pixiApp.ticker.remove(updateHeadEffectAnchor);
+      pixiApp.ticker.add(updateHeadEffectAnchor);
+    }
+  },
+};
+
+const customAnimBackend = {
+  type: 'animation',
+
+  play(group, idx, priority) {
+    // group IS the state name for custom characters.
+    updateCustomAnimation(group);
+    return true;
+  },
+
+  playOneShot(group, idx) {
+    const anims = (activeCharacter && activeCharacter.animations) || {};
+    if (!anims[group]) return false;
+    updateCustomAnimation(group);
+    this.cancelPendingOneShot();
+    customOneShotTimer = setTimeout(() => {
+      customOneShotTimer = null;
+      onOneShotFinished();
+      playStateMotion(MOTION_PRIORITY_FORCE);
+    }, 3000);
+    return true;
+  },
+
+  cancelPendingOneShot() {
+    if (customOneShotTimer) { clearTimeout(customOneShotTimer); customOneShotTimer = null; }
+  },
+
+  getMotionList() {
+    if (!activeCharacter || !activeCharacter.animations) return [];
+    return ['sleeping', 'working', 'alert']
+      .filter(s => activeCharacter.animations[s])
+      .map(s => [s, 1]);
+  },
+
+  getMotionName(group, idx) { return i18n.t('state.' + group) || group; },
+
+  getBounds() {
+    const el = customAnimEl || document.getElementById('canvas-wrapper');
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.left, y: r.top, width: r.width, height: r.height };
+  },
+
+  isPlaying() { return true; }, // GIF/MP4 loop on their own
+
+  onClick(cb) {
+    // Use 'click' instead of 'pointerdown' so the callback only fires on a
+    // genuine tap (mousedown + mouseup without significant movement). This
+    // prevents playRandomOneShot() from modifying the DOM (swapping the GIF)
+    // during a drag-start, which could interfere with the mousedown → drag
+    // event chain and break edge-dock snapping.
+    if (customAnimEl) customAnimEl.addEventListener('click', cb);
+  },
+
+  setupHeadEffectTracking() {
+    // Clean up the OTHER backend's tracking mechanism to prevent double registration.
+    if (window.PIXI && pixiApp) pixiApp.ticker.remove(updateHeadEffectAnchor);
+    if (setupHeadEffect._timer) clearInterval(setupHeadEffect._timer);
+    setupHeadEffect._timer = setInterval(updateHeadEffectAnchor, 120);
+  },
+};
+
+function selectAnimBackend() {
+  if (activeCharacter && activeCharacter.type === 'animation') {
+    animBackend = customAnimBackend;
+    // Custom characters: the state name IS the motion group name.
+    STATE_MOTIONS = {
+      sleeping: ['sleeping', 0],
+      working:  ['working', 0],
+      alert:    ['alert', 0],
+    };
+  } else {
+    animBackend = live2dBackend;
+  }
+  if (window.__petSendLog) window.__petSendLog('info',
+    `[backend] selectAnimBackend: type=${activeCharacter ? activeCharacter.type : 'null'} → ${animBackend.type}, motions=${JSON.stringify(animBackend.getMotionList())}`);
+}
+
+// ===== Custom Animations (GIF/MP4 replacing Live2D) =====
+
+/**
+ * Build an asset-protocol URL for an animation file, appending a
+ * cache-busting `?v=<mtime>` query. Re-uploading a GIF overwrites the file
+ * in place (same filename), so without a versioned URL the browser serves
+ * the stale cached image. The Tauri asset protocol ignores the query string
+ * when resolving the file. `version` is the file mtime from `char.versions`.
+ */
+function animAssetUrl(path, version) {
+  const base = window.__TAURI__.core.convertFileSrc(path);
+  return version ? `${base}?v=${version}` : base;
+}
+
+function initCustomAnimation() {
+  const container = document.getElementById('live2d-canvas');
+  if (!container) return;
+  customAnimEl = document.createElement('div');
+  customAnimEl.id = 'custom-animation';
+  // Block native HTML5 drag-and-drop on the entire custom animation container.
+  // Without this, mousedown+drag on the img/video triggers the browser's
+  // native file drag (image copy/download), which steals the mouse events
+  // from our window-drag handler and breaks edge-dock snapping.
+  customAnimEl.addEventListener('dragstart', (e) => e.preventDefault());
+  container.appendChild(customAnimEl);
+  if (pixiApp && pixiApp.view) {
+    // Use opacity:0 instead of display:none so the PixiJS ticker keeps
+    // running (rAF pauses when the canvas is display:none). This keeps
+    // click-through region reporting alive AND preserves the WebGL context
+    // for when the user switches back to a Live2D character.
+    pixiApp.view.style.opacity = '0';
+    pixiApp.view.style.pointerEvents = 'none';
+  }
+  // Hide the fallback canvas (shown when a Live2D model failed to load) so it
+  // doesn't stack on top of the custom animation.
+  const fb = document.getElementById('fallback-canvas');
+  if (fb) fb.style.display = 'none';
+  selectAnimBackend();
+  updateCustomAnimation(currentState);
+  // Apply the persisted horizontal-flip setting to the custom animation element
+  // (initPixiApp normally does this, but GIF mode skips initPixiApp entirely).
+  applyFlipCSS();
+  // Set up the head-top effects (ZZZ / working dots / !) — same as attachModel
+  // does for Live2D. setupHeadEffect uses setInterval when there's no pixiApp.
+  setupHeadEffect();
+  // Tap the pet -> play a random motion (unified via animBackend.onClick).
+  animBackend.onClick(() => playRandomOneShot());
+  // Register click-through regions (uses setInterval fallback when pixiApp is null).
+  setupClickThrough();
+}
+
+function updateCustomAnimation(state) {
+  if (!activeCharacter || activeCharacter.type !== 'animation' || !customAnimEl) return;
+  const anims = activeCharacter.animations || {};
+  const path = anims[state];
+  if (!path) return;
+  const versions = activeCharacter.versions || {};
+  const url = animAssetUrl(path, versions[state]);
+  const ext = path.split('.').pop().toLowerCase();
+  const isVideo = ['mp4', 'webm', 'mov'].includes(ext);
+  // Clear previous content.
+  while (customAnimEl.firstChild) customAnimEl.removeChild(customAnimEl.firstChild);
+  if (isVideo) {
+    const video = document.createElement('video');
+    video.src = url;
+    video.autoplay = true;
+    video.loop = true;
+    video.muted = true;
+    video.playsInline = true;
+    // Disable native drag — otherwise dragging the video triggers a file
+    // drag-and-drop operation that interferes with window dragging.
+    video.draggable = false;
+    customAnimEl.appendChild(video);
+  } else {
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = state;
+    // Disable native drag — otherwise dragging the image triggers a file
+    // drag-and-drop operation (image copy/download) that interferes with
+    // window dragging and breaks edge-dock snapping.
+    img.draggable = false;
+    customAnimEl.appendChild(img);
+  }
+}
+
+async function refreshActiveCharacter() {
+  await loadCharacters();
+  if (window.__MENU_MODE__) {
+    // Menu window: forward to the main window so it refreshes rendering
+    // (e.g., after re-uploading a GIF for the active character).
+    if (window.__TAURI__ && window.__TAURI__.event) {
+      window.__TAURI__.event.emit('menu-action', { action: 'refreshCharacter' });
+    }
+    return;
+  }
+  // Cancel any in-flight one-shot when the active character changes.
+  resetMotionPlaybackState();
+  if (activeCharacter && activeCharacter.type === 'animation') {
+    if (!customAnimEl) initCustomAnimation();
+    else { selectAnimBackend(); updateCustomAnimation(currentState); }
+  } else if (customAnimEl) {
+    customAnimEl.remove();
+    customAnimEl = null;
+    if (pixiApp && pixiApp.view) {
+      pixiApp.view.style.opacity = '';
+      pixiApp.view.style.pointerEvents = '';
+    }
+    // Always re-select backend and load the correct model when switching
+    // from custom animation to Live2D — the previous model may belong to
+    // a different character.
+    selectAnimBackend();
+    if (!live2dModel) initLive2D();
+    else await switchModel(activeCharacter ? resolveLive2DUrl(activeCharacter) : null);
+  }
+}
+
 // ===== Live2D Initialization =====
 /**
  * Create the PixiJS application (once) and load the initial model.
  * The model URL order is: persisted choice → built-in MODEL_URLS fallbacks.
  */
 async function initLive2D() {
+  // If active character is animation-based, use custom animation instead of Live2D.
+  if (activeCharacter && activeCharacter.type === 'animation') {
+    initCustomAnimation();
+    return;
+  }
   try {
     initPixiApp();
     await loadInitialModel();
@@ -675,6 +1132,11 @@ function initPixiApp() {
     height: miniMode ? MINI_PIXI_HEIGHT : PIXI_HEIGHT,
     backgroundAlpha: 0,
     antialias: true,
+    // preserveDrawingBuffer allows canvas.toDataURL() to capture the rendered
+    // frame for model thumbnails (without this, WebGL clears the buffer after
+    // compositing and toDataURL returns a blank image). The perf cost is
+    // negligible at 24fps on a small canvas.
+    preserveDrawingBuffer: true,
     // Render at >=2x device pixels so edges stay crisp (the CSS display size
     // is unchanged — autoDensity keeps the canvas element at logical pixels).
     // NOTE: with resolution>1, pixiApp.view.width is the BACKING STORE size;
@@ -784,6 +1246,120 @@ function measureContentBounds(model) {
 }
 
 /**
+ * Capture a 128×128 PNG snapshot of the current Live2D model and save it to
+ * ~/.dutyon/thumbnails/<name>.png via IPC, so the switch-character menu can
+ * show a real preview instead of a letter avatar. Runs once per model name
+ * per session (tracked in `capturedThumbnails`). Non-critical: any error is
+ * silently swallowed — the menu just falls back to the letter avatar.
+ */
+const capturedThumbnails = new Set();
+function captureThumbnail(model) {
+  if (!activeCharacter || activeCharacter.type !== 'live2d') return;
+  const name = activeCharacter.name;
+  if (!name || capturedThumbnails.has(name)) return;
+  if (!pixiApp || !pixiApp.view) return;
+  if (!window.petAPI || !window.petAPI.saveModelThumbnail) return;
+  try {
+    // Force a render so the buffer is current (preserveDrawingBuffer keeps it).
+    pixiApp.render();
+    const src = pixiApp.view;
+    // Downscale to 128×128 — the source may be high-DPI (backing store is
+    // resolution×logical). drawImage handles the scaling.
+    const thumb = document.createElement('canvas');
+    thumb.width = 128;
+    thumb.height = 128;
+    const ctx = thumb.getContext('2d');
+    ctx.drawImage(src, 0, 0, src.width, src.height, 0, 0, 128, 128);
+    const dataUrl = thumb.toDataURL('image/png');
+    capturedThumbnails.add(name);
+    window.petAPI.saveModelThumbnail(name, dataUrl).catch(() => {});
+  } catch (e) {
+    // Non-critical — thumbnail is a nice-to-have.
+  }
+}
+
+/**
+ * Generate thumbnails for Live2D models that don't have one yet.
+ *
+ * Uses the main PIXI renderer's RenderTexture to render each model off-screen,
+ * without adding it to the stage or hiding the current model. This avoids:
+ * 1. Creating a second WebGL context (causes GPU driver to reclaim main context)
+ * 2. Interfering with the current model's rendering (causes character switching
+ *    issues when the user clicks during generation)
+ *
+ * The model is loaded, positioned, and rendered to a 128×128 RenderTexture
+ * via `pixiApp.renderer.render(model, { renderTexture })`. The current pet
+ * stays fully visible and interactive throughout.
+ */
+async function generateMissingThumbnails() {
+  if (!charactersData || !window.PIXI || !window.PIXI.live2d || !pixiApp) return;
+  const PIXI = window.PIXI;
+
+  // Collect Live2D models that still need thumbnails.
+  const allChars = [...(charactersData.builtin || []), ...(charactersData.custom || [])];
+  const missing = allChars.filter(
+    (c) => c.type === 'live2d' && !capturedThumbnails.has(c.name) && !c.thumbnail
+  );
+  if (missing.length === 0) return;
+
+  const { Live2DModel } = PIXI.live2d;
+  const dbg = (msg) => { if (window.petAPI && window.petAPI.debugLog) window.petAPI.debugLog(msg); };
+
+  // Create a single 128×128 RenderTexture for all thumbnails.
+  const rt = PIXI.RenderTexture.create({ width: 128, height: 128 });
+
+  dbg('[thumb] Starting generation for ' + missing.length + ' models');
+  for (const char of missing) {
+    let model = null;
+    try {
+      dbg('[thumb] Loading ' + char.name);
+      const modelUrl = await resolveLive2DUrlAsync(char);
+      model = await Live2DModel.from(modelUrl || char.url);
+      dbg('[thumb] Loaded ' + char.name + ' w=' + model.width + ' h=' + model.height);
+
+      // Fit the model into 128×128 (same 0.72 factor as attachModel).
+      const scale = Math.min(128 / model.width, 128 / model.height) * 0.72;
+      model.scale.set(scale);
+      model.anchor.set(0.5, 1);
+      model.x = 64;
+      model.y = 128;
+
+      // Wait for the model's core to initialize (vertex data is invalid
+      // until the first few updates). 600ms ≈ 14 frames at 24fps.
+      await new Promise((r) => setTimeout(r, 600));
+
+      // Render the model to the RenderTexture (off-screen, doesn't affect
+      // the main canvas or the current pet display).
+      pixiApp.renderer.render(model, { renderTexture: rt, clear: true });
+
+      // Extract as data URL.
+      const canvas = pixiApp.renderer.extract.canvas(rt);
+      const dataUrl = canvas.toDataURL('image/png');
+      dbg('[thumb] Captured ' + char.name + ', dataUrl length=' + dataUrl.length);
+      capturedThumbnails.add(char.name);
+      if (window.petAPI && window.petAPI.saveModelThumbnail) {
+        window.petAPI.saveModelThumbnail(char.name, dataUrl).catch(() => {});
+      }
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e);
+      dbg('[thumb] FAILED ' + char.name + ': ' + msg);
+    } finally {
+      // Do NOT call model.destroy() — pixi-live2d-display may cache the
+      // model's Moc internally, and destroying it corrupts the cache. When
+      // switchModel() later tries to load the same model via
+      // Live2DModel.from(url), it gets the destroyed Moc and fails, causing
+      // loadInitialModel() to fall back to nito (the "quickly switches back"
+      // bug). Instead, just let the GC clean up the model object.
+      model = null;
+    }
+  }
+  dbg('[thumb] Generation complete');
+
+  // Clean up the render texture.
+  try { rt.destroy(true); } catch (e) { /* ignore */ }
+}
+
+/**
  * Scale, position, and wire up interaction/parameter hooks for a model.
  */
 function attachModel(model) {
@@ -829,6 +1405,10 @@ function attachModel(model) {
     if (!content || content.width < 16 || content.height < 16) return;
     pixiApp.ticker.remove(refine);
     refineContentFit(model, content);
+    // After the fit is applied, capture a thumbnail for the switch-character
+    // menu (one snapshot per model name per session). Deferred one frame so
+    // the new scale/position is rendered before capture.
+    setTimeout(() => captureThumbnail(model), 200);
   };
   pixiApp.ticker.add(refine);
 
@@ -874,9 +1454,7 @@ function attachModel(model) {
       return;
     }
     if (oneShotPlaying) {
-      oneShotPlaying = false;
-      // One-shot finished -> restore the head-top effect (ZZZ / dots / !).
-      setHeadEffectVisible(true);
+      onOneShotFinished();
     }
     setTimeout(() => {
       if (!oneShotPlaying && !mm.destroyed) playStateMotion();
@@ -884,10 +1462,9 @@ function attachModel(model) {
   });
 
   // Tap the pet -> play a different motion once; the state motion resumes when
-  // it finishes.
-  model.on('pointerdown', () => {
-    playRandomOneShot();
-  });
+  // it finishes. Registered via the unified backend (same as custom animation).
+  selectAnimBackend();
+  animBackend.onClick(() => playRandomOneShot());
 
   // Set up the head-top effect (ZZZ / working dots / !) for the current state.
   setupHeadEffect();
@@ -932,24 +1509,24 @@ function refineContentFit(model, content) {
 
 /**
  * Per-frame: track the model's bounds and move #head-effect to the head-top
- * anchor. Registered on the PixiJS ticker in setupHeadEffect. getBounds()
- * accounts for scale/anchor/animation, so the effect stays glued to the head
- * as the model breathes/moves.
+ * anchor. Registered via animBackend.setupHeadEffectTracking (PixiJS ticker
+ * for Live2D, setInterval for custom animation). getBounds() accounts for
+ * scale/anchor/animation, so the effect stays glued to the head as the
+ * model breathes/moves.
  *
- * Both the downward inset and the effect size are derived from the model's
- * bounds height, so characters of very different proportions (small bundled
- * models vs large user-supplied ones) get the effect placed over the head
- * instead of buried in the body or floating in mid-air.
+ * Both the downward inset and the effect size are derived from the bounds
+ * height, so characters of very different proportions (small bundled models
+ * vs large user-supplied ones) get the effect placed over the head instead
+ * of buried in the body or floating in mid-air.
  */
 function updateHeadEffectAnchor() {
-  if (!live2dModel || !headEffectEl) return;
-  // Throttle: getBounds() computes the full vertex bounding box and is
-  // relatively expensive. The CSS head-effect doesn't need pixel-exact
-  // per-frame tracking, so update every 3rd frame (~20fps at 60fps ticker).
+  if (!headEffectEl) return;
+  // Throttle: update every 3rd call (~20fps at 60fps ticker / 8fps at 120ms interval).
   updateHeadEffectAnchor._skip = ((updateHeadEffectAnchor._skip || 0) + 1) % 3;
   if (updateHeadEffectAnchor._skip !== 0) return;
-  const b = live2dModel.getBounds();
-  if (b.height <= 0) return;
+
+  const b = animBackend ? animBackend.getBounds() : null;
+  if (!b || b.height <= 0) return;
   const topX = b.x + b.width / 2;
   // Pick the anchor by body archetype, detected via the bounds aspect ratio:
   //  - Q-version chibi characters (aspect >= 0.8, head fills the top half of
@@ -987,13 +1564,10 @@ function setupHeadEffect() {
   // Reset the smoothed scale so a freshly loaded model snaps to its own size
   // instead of lerping from the previous model's scale.
   updateHeadEffectAnchor._k = 0;
-  // Register per-frame anchor tracking so the effect follows the model.
-  // Re-register on model switch to avoid stacking listeners.
-  const PIXI = window.PIXI;
-  if (PIXI && pixiApp) {
-    pixiApp.ticker.remove(updateHeadEffectAnchor);
-    pixiApp.ticker.add(updateHeadEffectAnchor);
-  }
+  // Register per-frame anchor tracking via the backend (PixiJS ticker for
+  // Live2D, setInterval for custom animation). Re-register on model switch
+  // to avoid stacking listeners.
+  if (animBackend) animBackend.setupHeadEffectTracking();
 }
 
 /**
@@ -1039,6 +1613,7 @@ function setHeadEffectVisible(visible) {
 async function switchModel(url) {
   if (!window.PIXI || !window.PIXI.live2d) return;
   const { Live2DModel } = window.PIXI.live2d;
+  if (window.petAPI && window.petAPI.debugLog) window.petAPI.debugLog('[switch] switchModel START url=' + url);
 
   // Show immediate feedback so the user knows the click registered.
   const stateText = document.getElementById('pet-state-text');
@@ -1057,13 +1632,22 @@ async function switchModel(url) {
   try {
     live2dModel = await Live2DModel.from(url);
     currentModelUrl = url;
+    if (window.petAPI && window.petAPI.debugLog) window.petAPI.debugLog('[switch] Model loaded OK, attaching...');
     attachModel(live2dModel);
     // State hasn't changed (setPetState would no-op), so replay the state
     // motion on the new model directly.
     oneShotPlaying = false;
     playStateMotion(MOTION_PRIORITY_FORCE);
     updateModelMenuActive(url);
-    if (window.petAPI && window.petAPI.switchModel) {
+    // Persist the model choice — but only for built-in models (relative URLs).
+    // User-uploaded models are loaded via HTTP server URLs (converted by
+    // tauri-bridge.js); persisting that converted URL would overwrite the
+    // original filesystem path that switchCharacter() already saved.
+    // Skip persistence for HTTP-server / asset-protocol URLs.
+    if (window.petAPI && window.petAPI.switchModel
+        && !url.startsWith('http://asset.localhost/')
+        && !url.startsWith('http://127.0.0.1:17521/')
+        && !url.startsWith('http://localhost:17521/')) {
       window.petAPI.switchModel(url);
     }
   } catch (err) {
@@ -1080,6 +1664,7 @@ async function switchModel(url) {
       if (window.__petSendLog) window.__petSendLog('error', '[live2d] probe threw: ' + ((probeErr && probeErr.message) || probeErr));
     }
     // Restore the previous model if the new one failed to load
+    if (window.petAPI && window.petAPI.debugLog) window.petAPI.debugLog('[switch] FAILED, calling loadInitialModel as fallback');
     await loadInitialModel();
     stateText.textContent = i18n.t('model.switchFailed');
     setTimeout(() => { stateText.textContent = prevText; }, 2000);
@@ -1159,7 +1744,8 @@ function refreshMotionGroups() {
 
 /** Count of playable motions in a group of the loaded model (0 if absent). */
 function motionGroupCount(group) {
-  const found = currentMotionGroups.find(([n]) => n === group);
+  const list = animBackend ? animBackend.getMotionList() : [];
+  const found = list.find(([n]) => n === group);
   return found ? found[1] : 0;
 }
 
@@ -1171,22 +1757,23 @@ function motionDisplayName(group, idx) {
 }
 
 /**
- * Resolve a desired motion to one the loaded model can actually play:
- *   1. exact (group, idx) when the model has it — same-name priority;
+ * Resolve a desired motion to one the loaded backend can actually play:
+ *   1. exact (group, idx) when the backend has it — same-name priority;
  *   2. same group, index 0 (the group exists but the index doesn't);
  *   3. any group that contains the desired one as a substring (Tap vs Tap2);
- *   4. the first available motion of the model.
- * Returns [group, idx] or null when the model has no motions at all.
+ *   4. the first available motion of the backend.
+ * Returns [group, idx] or null when the backend has no motions at all.
  */
 function resolveAvailableMotion(group, idx) {
-  if (!currentMotionGroups.length) return null;
+  const list = animBackend ? animBackend.getMotionList() : [];
+  if (!list.length) return null;
   const count = motionGroupCount(group);
   if (count > 0) {
     return [group, idx < count ? idx : 0];
   }
-  const partial = currentMotionGroups.find(([n]) => n.includes(group) || group.includes(n));
+  const partial = list.find(([n]) => n.includes(group) || group.includes(n));
   if (partial) return [partial[0], 0];
-  return [currentMotionGroups[0][0], 0];
+  return [list[0][0], 0];
 }
 
 /**
@@ -1201,40 +1788,33 @@ function* fallbackMotionCandidates(group) {
   for (const [g, i] of ALL_MOTIONS) {
     if (g !== group && motionGroupCount(g) > i) yield [g, i];
   }
-  for (const [n, c] of currentMotionGroups) {
+  const list = animBackend ? animBackend.getMotionList() : [];
+  for (const [n, c] of list) {
     if (n !== group) yield [n, 0];
   }
 }
 
 /**
  * Play the current state's motion so it loops. The desired motion comes from
- * STATE_MOTIONS (user-assignable) but is resolved against the loaded model's
- * own motion set; missing motions degrade to similar available ones.
- * `motionFinish` (registered in attachModel) re-triggers this on each finish
+ * STATE_MOTIONS (user-assignable) but is resolved against the backend's own
+ * motion set; missing motions degrade to similar available ones.
+ * `motionFinish` (Live2D) or `playOneShot` timeout (custom) re-triggers this
  * for seamless looping; it's also called directly on state changes and as a
  * periodic safety net.
  */
 function playStateMotion(priority = MOTION_PRIORITY_NORMAL) {
-  if (!live2dModel) return;
+  if (!animBackend) return;
   const desired = STATE_MOTIONS[currentState] || STATE_MOTIONS.sleeping;
   const target = resolveAvailableMotion(desired[0], desired[1]);
   if (!target) return;
-  try {
-    const result = live2dModel.motion(target[0], target[1], priority);
-    // pixi-live2d-display returns false/undefined when the motion is missing
-    // or can't be reserved; any other value (incl. slot 0) means accepted.
-    if (result !== false && result !== undefined) return;
-  } catch (e) { /* fall through to candidates */ }
-  // Playback failed (e.g. empty motion file) — try fallbacks.
+  if (animBackend.play(target[0], target[1], priority)) return;
+  // Playback failed — try fallbacks.
   for (const [g, i] of fallbackMotionCandidates(target[0])) {
-    try {
-      const result = live2dModel.motion(g, i, priority);
-      if (result !== false && result !== undefined) {
-        if (window.__petSendLog) window.__petSendLog('warn',
-          `[motions] ${desired[0]}[${desired[1]}] failed, fell back to ${g}[${i}]`);
-        return;
-      }
-    } catch (e) { /* try next */ }
+    if (animBackend.play(g, i, priority)) {
+      if (window.__petSendLog) window.__petSendLog('warn',
+        `[motions] ${desired[0]}[${desired[1]}] failed, fell back to ${g}[${i}]`);
+      return;
+    }
   }
 }
 
@@ -1243,52 +1823,41 @@ function playStateMotion(priority = MOTION_PRIORITY_NORMAL) {
  * was missed), replay the state motion. Skipped while a one-shot runs.
  */
 function triggerPeriodicMotion() {
-  if (!live2dModel) return;
+  if (!animBackend) return;
   if (oneShotPlaying) return;
-  const mm = live2dModel.internalModel.motionManager;
-  if (mm.playing) return; // let the current motion finish; motionFinish loops it
+  if (animBackend.isPlaying()) return;
   playStateMotion();
 }
 
 /**
  * Play a specific motion as a one-shot at FORCE priority (overrides the
- * looping state motion). Resolved against the loaded model's motion set
- * first so menu/assignment entries never point at motions the current
- * character lacks. When it finishes, the motionFinish handler resumes the
- * state motion.
+ * looping state motion). Resolved against the backend's motion set first so
+ * menu/assignment entries never point at motions the current character lacks.
+ * When it finishes, the backend's finish handler (motionFinish / timeout)
+ * resumes the state motion.
  */
 function playMotionOnce(group, idx) {
-  if (!live2dModel) return;
+  if (!animBackend) return;
   const target = resolveAvailableMotion(group, idx) || [group, idx];
   oneShotPlaying = true;
-  // Hide the head-top effect while the one-shot plays; motionFinish restores it.
   setHeadEffectVisible(false);
-  try {
-    live2dModel.motion(target[0], target[1], MOTION_PRIORITY_FORCE);
-  } catch (e) {
-    oneShotPlaying = false;
-    setHeadEffectVisible(true); // playback failed -> restore immediately
-  }
+  animBackend.cancelPendingOneShot();
+  animBackend.playOneShot(target[0], target[1]);
 }
 
 /**
  * Start looping a motion as the hover preview of the 播放动作 menu. It plays
- * at FORCE priority and replays itself on every finish (motionFinish) until
- * stopMotionPreview() is called (menu closed / list left).
+ * at FORCE priority and replays itself on every finish until stopMotionPreview()
+ * is called (menu closed / list left).
  */
 function startMotionPreview(group, idx) {
-  if (!live2dModel) return;
+  if (!animBackend) return;
+  animBackend.cancelPendingOneShot();
   const target = resolveAvailableMotion(group, idx) || [group, idx];
   motionPreview = target;
   oneShotPlaying = true; // blocks the state-motion safety net while previewing
   setHeadEffectVisible(false);
-  try {
-    live2dModel.motion(target[0], target[1], MOTION_PRIORITY_FORCE);
-  } catch (e) {
-    motionPreview = null;
-    oneShotPlaying = false;
-    setHeadEffectVisible(true);
-  }
+  animBackend.play(target[0], target[1], MOTION_PRIORITY_FORCE);
 }
 
 /**
@@ -1304,14 +1873,14 @@ function stopMotionPreview() {
 
 /**
  * Play a random motion different from the current state's (used on tap).
- * Picks from the loaded model's own motion set, not a global list.
+ * Picks from the backend's own motion set, not a global list.
  */
 function playRandomOneShot() {
-  if (!live2dModel) return;
+  if (!animBackend) return;
   const desired = STATE_MOTIONS[currentState] || STATE_MOTIONS.sleeping;
   const stateMotion = resolveAvailableMotion(desired[0], desired[1]);
   const choices = [];
-  for (const [name, count] of currentMotionGroups) {
+  for (const [name, count] of animBackend.getMotionList()) {
     for (let i = 0; i < count; i++) {
       if (stateMotion && name === stateMotion[0] && i === stateMotion[1]) continue;
       choices.push([name, i]);
@@ -1323,8 +1892,8 @@ function playRandomOneShot() {
 }
 
 /**
- * Build the motion list in the menu from the LOADED MODEL's motions
- * (currentMotionGroups), so each character only shows what it can play.
+ * Build the motion list in the menu from the backend's motion set, so each
+ * character only shows what it can play.
  * - mode 'play'   : hovering (or clicking) an item loops that motion as a
  *                   live preview; the menu stays open — only the back button
  *                   or clicking outside closes it.
@@ -1337,20 +1906,22 @@ function buildMotionMenu(mode = 'play', targetState = null) {
   const container = document.getElementById('motion-list');
   if (!container) return;
   container.innerHTML = '';
+
+  const list = animBackend ? animBackend.getMotionList() : [];
   const desiredCurrent = (mode === 'assign' && targetState) ? STATE_MOTIONS[targetState] : null;
   const resolvedCurrent = desiredCurrent
     ? resolveAvailableMotion(desiredCurrent[0], desiredCurrent[1])
     : null;
-  for (const [group, count] of currentMotionGroups) {
+  for (const [group, count] of list) {
     for (let idx = 0; idx < count; idx++) {
       const item = document.createElement('div');
       item.className = 'menu-item';
-      item.textContent = motionDisplayName(group, idx);
+      item.textContent = animBackend.getMotionName(group, idx);
       if (resolvedCurrent && resolvedCurrent[0] === group && resolvedCurrent[1] === idx) {
         item.classList.add('active');
       }
       // Both modes share the hover preview: moving the cursor onto an item
-      // instantly loops that motion (see startMotionPreview / motionFinish).
+      // instantly loops that motion (see startMotionPreview).
       item.addEventListener('mouseenter', () => startMotionPreview(group, idx));
       if (mode === 'assign' && targetState) {
         // Click commits the assignment and returns to the 动作设定 view
@@ -1472,14 +2043,128 @@ function saveCurrentStateMotions() {
  */
 function buildSettingsMenu() {
   for (const state of ['sleeping', 'working', 'alert']) {
+    const el = document.getElementById(`settings-${state}-name`);
+    if (!el) continue;
     const desired = STATE_MOTIONS[state] || STATE_MOTIONS.sleeping;
     const resolved = resolveAvailableMotion(desired[0], desired[1]);
-    const name = resolved
-      ? motionDisplayName(resolved[0], resolved[1])
+    el.textContent = resolved
+      ? animBackend.getMotionName(resolved[0], resolved[1])
       : `${desired[0]}[${desired[1]}]`;
-    const el = document.getElementById(`settings-${state}-name`);
-    if (el) el.textContent = name;
   }
+}
+
+function buildCharEditMenu() {
+  if (!editingCharId || !charactersData) return;
+  const char = [...(charactersData.builtin || []), ...(charactersData.custom || [])]
+    .find(c => c.id === editingCharId);
+  if (!char) return;
+  const title = document.getElementById('char-edit-title');
+  if (title) title.textContent = char.name;
+  for (const state of ['sleeping', 'working', 'alert']) {
+    const hint = document.getElementById(`char-edit-${state}-hint`);
+    if (!hint) continue;
+    const hasAnim = char.animations && char.animations[state];
+    if (hasAnim) {
+      hint.innerHTML =
+        '<span class="char-uploaded-tag">' + (i18n.t('menu.uploaded') || '已上传') + '</span>' +
+        '<span class="char-reupload-tag">' + (i18n.t('menu.reupload') || '重新上传') + '</span>';
+    } else {
+      hint.textContent = i18n.t('menu.upload') || '上传';
+    }
+  }
+}
+
+function showEditCharacterView(id) {
+  editingCharId = id;
+  buildCharEditMenu();
+  showView('menu-char-edit-view');
+}
+
+/** Show the inline name-input row below "+ 新建形象". */
+function handleCreateCharacter() {
+  const inline = document.getElementById('char-create-inline');
+  if (!inline) return;
+  const input = document.getElementById('char-create-input');
+  if (input) input.value = '';
+  inline.classList.remove('hidden');
+  if (input) setTimeout(() => input.focus(), 30);
+  fitMenuWindow();
+}
+
+/** Confirm character creation from the inline input. */
+async function confirmCreateCharacter() {
+  const input = document.getElementById('char-create-input');
+  const name = input ? input.value.trim() : '';
+  if (!name) return;
+  if (!window.petAPI || !window.petAPI.createCharacter) return;
+  const result = await window.petAPI.createCharacter(name);
+  // Always hide the inline input after confirming (success or failure).
+  const inline = document.getElementById('char-create-inline');
+  if (inline) inline.classList.add('hidden');
+  if (result && result.id) {
+    await loadCharacters();
+    showEditCharacterView(result.id);
+  }
+}
+
+async function handleSwitchCharacter(id) {
+  if (!window.petAPI || !window.petAPI.switchCharacter) return;
+  if (window.petAPI && window.petAPI.debugLog) window.petAPI.debugLog('[switch] handleSwitchCharacter id=' + id + ' menuMode=' + !!window.__MENU_MODE__);
+  await window.petAPI.switchCharacter(id);
+  await loadCharacters();
+  // IMPORTANT: loadCharacters() reads the config from disk. If the config
+  // write failed (e.g., sandbox blocking file access, read-only directory),
+  // activeCharacter would be the OLD character, not the one the user clicked.
+  // Override with the character matching the clicked id so switchModel loads
+  // the correct model regardless of config persistence state.
+  const allChars = [...(charactersData.builtin || []), ...(charactersData.custom || [])];
+  const clicked = allChars.find(c => c.id === id);
+  if (clicked) {
+    activeCharacter = clicked;
+    if (clicked.type === 'live2d') {
+      currentModelUrl = resolveLive2DUrl(clicked);
+    }
+  }
+  if (window.petAPI && window.petAPI.debugLog) window.petAPI.debugLog('[switch] activeCharacter=' + (activeCharacter ? activeCharacter.name : 'null') + ' url=' + (activeCharacter ? activeCharacter.url : 'null'));
+  // Menu window: forward to main window for rendering, then close.
+  if (window.__MENU_MODE__) {
+    const { emit } = window.__TAURI__.event;
+    emit('menu-action', { action: 'switchCharacter', params: { id } });
+    emit('menu-close', {});
+    if (window.petAPI && window.petAPI.hideMenuWindow) window.petAPI.hideMenuWindow();
+    return;
+  }
+  // Reset any in-flight one-shot / preview from the OLD character so stale
+  // timers and flags don't leak into the new character.
+  resetMotionPlaybackState();
+  // Re-init rendering
+  if (activeCharacter && activeCharacter.type === 'animation') {
+    if (!customAnimEl) initCustomAnimation();
+    else { selectAnimBackend(); updateCustomAnimation(currentState); }
+  } else {
+    // Switching from GIF/custom to Live2D: tear down custom animation DOM,
+    // restore pixiApp visibility (if it exists), and load the Live2D model.
+    if (customAnimEl) {
+      customAnimEl.remove();
+      customAnimEl = null;
+    }
+    if (pixiApp && pixiApp.view) {
+      pixiApp.view.style.opacity = '';
+      pixiApp.view.style.pointerEvents = '';
+    }
+    // CRITICAL: switch animBackend back to live2dBackend BEFORE any motion
+    // calls. Without this, animBackend stays as customAnimBackend and all
+    // state/motion functions route to the wrong backend.
+    selectAnimBackend();
+    // If pixiApp was never created (app started in GIF mode), initLive2D()
+    // creates it AND loads the model. Otherwise, switch to the new model.
+    if (!pixiApp || !live2dModel) {
+      await initLive2D();
+    } else {
+      await switchModel(activeCharacter ? resolveLive2DUrl(activeCharacter) : null);
+    }
+  }
+  closeMenu();
 }
 
 /**
@@ -1521,8 +2206,9 @@ async function loadAppearance() {
  * in its wrapper, so scaleX(-1) mirrors in place with no position jump.
  */
 function applyFlipCSS() {
-  if (!pixiApp || !pixiApp.view) return;
-  pixiApp.view.style.transform = flipHorizontal ? 'scaleX(-1)' : '';
+  const transform = flipHorizontal ? 'scaleX(-1)' : '';
+  if (pixiApp && pixiApp.view) pixiApp.view.style.transform = transform;
+  if (customAnimEl) customAnimEl.style.transform = transform;
 }
 
 /**
@@ -1578,7 +2264,12 @@ function relayoutModel() {
 function applyMiniMode(enabled, resizeWindow = true) {
   const prevMode = miniMode;
   miniMode = enabled;
-  document.body.classList.toggle('mini', enabled);
+  // The menu window is a separate popup — it should always render at full
+  // size regardless of the pet's mini mode. Only apply the CSS class + canvas
+  // resize in the main pet window.
+  if (!window.__MENU_MODE__) {
+    document.body.classList.toggle('mini', enabled);
+  }
   updateMiniMenuCheck();
   if (resizeWindow && window.petAPI && window.petAPI.setMiniMode) {
     Promise.resolve(window.petAPI.setMiniMode(enabled)).catch((e) => {
@@ -1714,9 +2405,10 @@ function setPetState(state) {
   if (currentState === state) return;
   currentState = state;
 
-  // Cancel any in-flight one-shot and immediately play the new state's motion
-  // at FORCE priority so it overrides whatever was playing.
-  oneShotPlaying = false;
+  // Cancel any in-flight one-shot / preview and immediately play the new
+  // state's motion at FORCE priority so it overrides whatever was playing.
+  // Unified via animBackend — works for Live2D and custom.
+  resetMotionPlaybackState();
   playStateMotion(MOTION_PRIORITY_FORCE);
 
   // Update UI
@@ -1742,8 +2434,10 @@ function updateStateUI(state) {
 
   stateText.textContent = getStateLabel(state);
 
-  // Shake on alert
-  if (state === 'alert') {
+  // Shake on alert — only for Live2D models. For GIF/MP4 custom animations,
+  // shaking the canvas-wrapper shakes the entire image which looks bad;
+  // the head-top "!" already has its own bounce animation.
+  if (state === 'alert' && !(activeCharacter && activeCharacter.type === 'animation')) {
     canvasWrapper.classList.add('shake');
   }
 }
@@ -1889,6 +2583,7 @@ function setupIPC() {
   const { listen } = window.__TAURI__.event;
   listen('menu-action', (e) => {
     const { action, params } = e.payload || {};
+    if (window.petAPI && window.petAPI.debugLog) window.petAPI.debugLog('[menu-action] received action=' + action);
     switch (action) {
       case 'toggleFlip': toggleFlip(); break;
       case 'toggleMiniMode': toggleMiniMode(); break;
@@ -1897,6 +2592,11 @@ function setupIPC() {
       case 'switchModel':
         if (params && params.url) {
           switchModel(params.url);
+        }
+        break;
+      case 'switchCharacter':
+        if (params && params.id) {
+          handleSwitchCharacter(params.id);
         }
         break;
       case 'switchLanguage':
@@ -1934,6 +2634,9 @@ function setupIPC() {
           showHookStatusDialog(status);
         })();
         break;
+      case 'refreshCharacter':
+        refreshActiveCharacter();
+        break;
       default:
         console.warn('[menu] Unknown action from menu window:', action);
     }
@@ -1966,7 +2669,7 @@ function flashWindowAttention() {
 // always hidden now — the menu lives in its own Tauri window).
 let menuWindowOpen = false;
 // Menu width (210 CSS) plus a small gap — the horizontal space to grow.
-const MENU_SIDE_WIDTH = 218;
+const MENU_SIDE_WIDTH = 300;
 
 /** Bottom edge (logical CSS px) of the status bar — the menu's lower bound. */
 function statusBarBottom() {
@@ -2012,8 +2715,13 @@ async function positionMenu() {
   const petY = window.screenTop ?? window.screenY;
   const petW = window.innerWidth;
   const petH = window.innerHeight;
-  const menuW = 230;
-  const menuH = Math.min(petH, 500);
+  const menuW = 300;
+  // Start taller than the pet so taller views (character grid with 5+ cards)
+  // aren't clipped before fitMenuWindow() fine-tunes to the exact content
+  // height. Capped to available screen space below the pet's top edge.
+  const screenTop = petY ?? 0;
+  const maxScreenH = (window.screen.availHeight || 720) - screenTop - 8;
+  const menuH = Math.min(Math.max(petH + 160, 500), maxScreenH);
   const menuX = side === 'right'
     ? petX + petW + 4
     : petX - menuW - 4;
@@ -2054,14 +2762,55 @@ function repositionMenu() {
 }
 
 /**
+ * Resize the menu window to fit the currently-visible view's content height.
+ * Called after view switches (showView) and after dynamic content loads
+ * (loadCharacters). The menu window is otherwise a fixed size set by
+ * positionMenu; without this, taller views (e.g. the character grid with 5+
+ * cards) clip the bottom card. Caps at the available screen height below the
+ * window's top edge; if content is taller, #context-menu's overflow-y:auto
+ * handles scrolling.
+ */
+function fitMenuWindow() {
+  if (!window.__MENU_MODE__) return;
+  const cm = document.getElementById('context-menu');
+  if (!cm) return;
+  // Temporarily lift max-height so offsetHeight reflects the TRUE content
+  // height. With max-height:100vh still applied, scrollHeight/offsetHeight
+  // can return the clamped height (not the full content) on WebView2, leaving
+  // the bottom card clipped. This synchronous toggle causes no visual flash
+  // (the browser doesn't paint between style change + offsetHeight read +
+  // style restore).
+  const prevMaxHeight = cm.style.maxHeight;
+  cm.style.maxHeight = 'none';
+  const contentH = cm.offsetHeight;
+  cm.style.maxHeight = prevMaxHeight;
+  // Cap to available screen space below the window's top edge so the menu
+  // never extends past the bottom of the screen.
+  const screenTop = window.screenTop ?? window.screenY ?? 0;
+  const availH = window.screen.availHeight || 720;
+  const maxH = availH - screenTop - 8;
+  const h = Math.max(200, Math.min(contentH + 4, maxH));
+  if (window.petAPI && window.petAPI.resizeMenuWindow) {
+    window.petAPI.resizeMenuWindow(300, h);
+  }
+}
+
+/**
  * Show one of the three menu views (main / model / motion), hiding the others.
  */
 function showView(viewId) {
-  for (const id of ['menu-main-view', 'menu-model-view', 'menu-motion-view', 'menu-settings-view', 'menu-language-view']) {
+  for (const id of ['menu-main-view', 'menu-model-view', 'menu-motion-view', 'menu-settings-view', 'menu-language-view', 'menu-char-edit-view']) {
     document.getElementById(id).classList.toggle('hidden', id !== viewId);
   }
+  // Reset the inline character-creation input whenever switching views.
+  // Without this, the input box stays visible after the user clicks
+  // "+ 新建形象" and then navigates away and back to the model view.
+  const charInline = document.getElementById('char-create-inline');
+  if (charInline) charInline.classList.add('hidden');
   // Leaving the motion list ends the hover preview loop.
   if (viewId !== 'menu-motion-view') stopMotionPreview();
+  // Fit the menu window height to the newly-visible view's content.
+  fitMenuWindow();
 }
 
 /** Hide the menu window and reset menu state. */
@@ -2114,12 +2863,15 @@ function setupContextMenu() {
   });
 
   // Window losing focus (user clicked another app) also closes the menu.
-  window.addEventListener('blur', closeMenu);
+  // Skip when a file picker is open (set by upload button handler).
+  window.addEventListener('blur', () => {
+    if (!window.__PICKING_FILE__) closeMenu();
+  });
 
   // Secondary menus: 切换形象 / 播放动作 / 动作设定  ->  pop out the list
   document.getElementById('menu-models-trigger').addEventListener('click', () => {
     // Rescan on every open so freshly uploaded user models appear.
-    loadModelCatalog();
+    loadCharacters();
     showView('menu-model-view');
   });
 
@@ -2641,7 +3393,14 @@ function setupDrag() {
  * the desktop.
  */
 function isPointOnModel(clientX, clientY) {
-  if (!live2dModel || !pixiApp) return false;
+  // No Live2D model (custom animation / GIF mode): check canvas-wrapper bounds.
+  if (!live2dModel || !pixiApp) {
+    const wrapper = document.getElementById('canvas-wrapper');
+    if (!wrapper) return false;
+    const rect = wrapper.getBoundingClientRect();
+    return clientX >= rect.left && clientX <= rect.right &&
+           clientY >= rect.top && clientY <= rect.bottom;
+  }
   const canvas = pixiApp.view;
   const rect = canvas.getBoundingClientRect();
   const x = clientX - rect.left;
@@ -2711,6 +3470,11 @@ function setupClickThrough() {
           height: Math.round(b.height * dpr),
         });
       } catch (e) { /* model not ready yet */ }
+    } else {
+      // No Live2D model (custom animation / GIF mode): use the canvas wrapper
+      // as the clickable region so the pet remains interactive.
+      const wrapper = document.getElementById('canvas-wrapper');
+      if (wrapper) rects.push(toPhys(wrapper.getBoundingClientRect()));
     }
     const sb = document.getElementById('status-bar');
     if (sb) rects.push(toPhys(sb.getBoundingClientRect()));
@@ -2719,23 +3483,32 @@ function setupClickThrough() {
     return rects;
   }
 
-  // Report regions on the PixiJS ticker (rAF — keeps running even while the
-  // window is click-through, unlike mousemove). Throttle to every 3rd frame
-  // (~8Hz): getBounds() is relatively expensive and the CSS rects barely move.
+  // Report regions periodically. Uses PixiJS ticker if available (Live2D mode),
+  // otherwise falls back to setInterval (GIF/MP4 mode where pixiApp is null).
+  // Throttle to ~8Hz: getBounds() is relatively expensive and CSS rects barely move.
   // Dirty check: only send the IPC when the JSON of regions changed since the
-  // last frame, so idle frames don't spam update_click_regions.
-  let frameSkip = 0;
+  // last report, so idle frames don't spam update_click_regions.
   let lastRegionsJson = '';
-  pixiApp.ticker.add(() => {
-    frameSkip = (frameSkip + 1) % 3;
-    if (frameSkip !== 0) return;
+  const reportRegions = () => {
     const regions = collectRegions();
     const json = JSON.stringify(regions);
     if (json !== lastRegionsJson) {
       lastRegionsJson = json;
       window.petAPI.updateClickRegions(regions);
     }
-  });
+  };
+
+  if (pixiApp && pixiApp.ticker) {
+    let frameSkip = 0;
+    pixiApp.ticker.add(() => {
+      frameSkip = (frameSkip + 1) % 3;
+      if (frameSkip !== 0) return;
+      reportRegions();
+    });
+  } else {
+    // No pixiApp (GIF/MP4 mode): use setInterval instead of PixiJS ticker.
+    setInterval(reportRegions, 120);
+  }
 
   // Seed regions immediately so the Rust polling thread (30ms) has data before
   // the first ticker fire (~125ms) — otherwise transparent areas would block

@@ -259,6 +259,518 @@ pub fn set_mini_mode(window: tauri::Window, enabled: bool) -> Result<(), String>
     Ok(())
 }
 
+// ===== Custom characters =====
+
+const ANIMATION_EXTS: &[&str] = &["gif", "png", "jpg", "jpeg", "webp", "mp4", "webm", "mov"];
+
+/// Max edge length (px) for uploaded animation images. Source images larger
+/// than this are downscaled (preserving aspect ratio) so giant GIFs don't
+/// bloat ~/.dutyon/animations/ or stall the renderer. Videos are not resized.
+/// 512px keeps GIFs crisp on 2x-DPI screens (the Live2D canvas renders at
+/// resolution>=2, so a 240px logical display needs ~480px backing pixels).
+const MAX_ANIM_DIM: u32 = 1024;
+
+/// Copy `source` to `dest`, resizing first if it's a still image or animated
+/// GIF. Videos (mp4/webm/mov) are copied verbatim — re-encoding requires
+/// ffmpeg which we don't bundle. Returns Ok(()) on success.
+fn resize_or_copy_animation(source: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    let ext = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    let is_video = matches!(ext.as_str(), "mp4" | "webm" | "mov");
+    if is_video {
+        std::fs::copy(source, dest).map_err(|e| format!("Failed to copy video: {}", e))?;
+        return Ok(());
+    }
+
+    match ext.as_str() {
+        "gif" => resize_animated_gif(source, dest),
+        "png" | "jpg" | "jpeg" | "webp" => resize_static_image(source, dest),
+        _ => {
+            // Unknown image type — copy verbatim as a fallback.
+            std::fs::copy(source, dest).map_err(|e| format!("Failed to copy file: {}", e))?;
+            Ok(())
+        }
+    }
+}
+
+/// Resize an animated GIF to fit within MAX_ANIM_DIM×MAX_ANIM_DIM (preserving
+/// aspect ratio and animation: every frame is resized and re-encoded).
+fn resize_animated_gif(source: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    use image::codecs::gif::{GifDecoder, GifEncoder, Repeat};
+    use image::AnimationDecoder;
+    use std::fs::File;
+    use std::io::BufReader;
+
+    // First check the GIF's dimensions — skip the expensive frame-by-frame
+    // re-encode if it's already small enough.
+    let probe = image::ImageReader::open(source)
+        .map_err(|e| format!("Failed to open GIF: {}", e))?
+        .with_guessed_format()
+        .map_err(|e| format!("Failed to read GIF: {}", e))?;
+    let probe_dims = probe
+        .into_dimensions()
+        .map_err(|e| format!("Failed to read GIF dimensions: {}", e))?;
+    if probe_dims.0 <= MAX_ANIM_DIM && probe_dims.1 <= MAX_ANIM_DIM {
+        std::fs::copy(source, dest).map_err(|e| format!("Failed to copy GIF: {}", e))?;
+        return Ok(());
+    }
+
+    let file = File::open(source).map_err(|e| format!("Failed to open GIF: {}", e))?;
+    let decoder =
+        GifDecoder::new(BufReader::new(file)).map_err(|e| format!("Failed to decode GIF: {}", e))?;
+    let frames = decoder.into_frames();
+
+    let dest_file = File::create(dest).map_err(|e| format!("Failed to create dest GIF: {}", e))?;
+    let mut encoder = GifEncoder::new(dest_file);
+    // Preserve infinite looping (the re-encode drops the source's Netscape
+    // loop extension by default, which makes the GIF play only once).
+    encoder
+        .set_repeat(Repeat::Infinite)
+        .map_err(|e| format!("Failed to set GIF loop: {}", e))?;
+
+    // Resource limit: cap total pixels decoded to prevent "GIF bomb" OOM.
+    // MAX_ANIM_DIM * 4 (RGBA bytes) * MAX_FRAMES (500) = 2GB max for 1024px.
+    const MAX_FRAMES: usize = 500;
+    let mut frame_count = 0;
+    for frame_result in frames {
+        if frame_count >= MAX_FRAMES {
+            return Err(format!("GIF has too many frames (max {})", MAX_FRAMES));
+        }
+        let frame = frame_result.map_err(|e| format!("Failed to decode GIF frame: {}", e))?;
+        frame_count += 1;
+        let buf = frame.buffer();
+        // Additional per-frame pixel limit: 2048x2048 = 16MB per frame.
+        if buf.width() > 2048 || buf.height() > 2048 {
+            return Err(format!("GIF frame too large: {}x{}", buf.width(), buf.height()));
+        }
+        let (w, h) = (buf.width(), buf.height());
+        let (nw, nh) = scaled_dims(w, h);
+        // Triangle filter gives smooth downscale for sprite-style art.
+        let resized = image::imageops::resize(buf, nw, nh, image::imageops::FilterType::Triangle);
+        let new_frame =
+            image::Frame::from_parts(resized, frame.left(), frame.top(), frame.delay());
+        encoder
+            .encode_frame(new_frame)
+            .map_err(|e| format!("Failed to encode GIF frame: {}", e))?;
+    }
+    Ok(())
+}
+
+/// Resize a static image (png/jpg/webp) to fit within MAX_ANIM_DIM×MAX_ANIM_DIM.
+fn resize_static_image(source: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    let img = image::open(source).map_err(|e| format!("Failed to open image: {}", e))?;
+    let (w, h) = (img.width(), img.height());
+    if w <= MAX_ANIM_DIM && h <= MAX_ANIM_DIM {
+        img.save(dest)
+            .map_err(|e| format!("Failed to save image: {}", e))?;
+        return Ok(());
+    }
+    let (nw, nh) = scaled_dims(w, h);
+    let resized = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
+    resized
+        .save(dest)
+        .map_err(|e| format!("Failed to save resized image: {}", e))?;
+    Ok(())
+}
+
+/// Compute new dimensions that fit within MAX_ANIM_DIM×MAX_ANIM_DIM while
+/// preserving aspect ratio. Returns (new_w, new_h).
+fn scaled_dims(w: u32, h: u32) -> (u32, u32) {
+    if w == 0 || h == 0 {
+        return (MAX_ANIM_DIM.min(w), MAX_ANIM_DIM.min(h));
+    }
+    let max = w.max(h);
+    if max <= MAX_ANIM_DIM {
+        return (w, h);
+    }
+    let scale = MAX_ANIM_DIM as f64 / max as f64;
+    let nw = (w as f64 * scale).round() as u32;
+    let nh = (h as f64 * scale).round() as u32;
+    // Guard against zero after rounding.
+    (nw.max(1), nh.max(1))
+}
+
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// Return all characters: built-in Live2D models + user-created animation
+/// characters, plus the active character ID.
+#[tauri::command]
+pub fn get_characters() -> Result<Value, String> {
+    let cfg = user_config::load();
+    let (models_list, _) = models::get_models();
+
+    let builtins: Vec<Value> = models_list
+        .iter()
+        .map(|m| {
+            // Thumbnail path (if a cached PNG snapshot exists). The frontend
+            // converts the absolute path via convertFileSrc (asset protocol).
+            let thumb = models::thumbnail_path(&m.name)
+                .map(|p| p.to_string_lossy().replace('\\', "/"));
+            json!({
+                "id": m.url,
+                "name": m.name,
+                "type": "live2d",
+                "url": m.url,
+                "userUploaded": m.user_uploaded,
+                "thumbnail": thumb,
+            })
+        })
+        .collect();
+
+    let dir = models::animations_dir();
+    let dir_str = dir.to_string_lossy().replace('\\', "/");
+    let customs: Vec<Value> = cfg
+        .custom_characters
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|c| {
+            let anim = |f: &Option<String>| f.as_ref().map(|s| format!("{}/{}", dir_str, s));
+            // mtime (ms) of each animation file — used by the frontend as a
+            // cache-busting query (?v=<mtime>) so re-uploading a GIF (same
+            // filename, new content) produces a new URL and the browser
+            // re-fetches instead of serving the stale cached image.
+            let ver = |f: &Option<String>| -> u64 {
+                f.as_ref()
+                    .and_then(|s| {
+                        std::fs::metadata(dir.join(s))
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis() as u64)
+                    })
+                    .unwrap_or(0)
+            };
+            json!({
+                "id": c.id,
+                "name": c.name,
+                "type": "animation",
+                "animations": {
+                    "sleeping": anim(&c.sleeping),
+                    "working": anim(&c.working),
+                    "alert": anim(&c.alert),
+                },
+                "versions": {
+                    "sleeping": ver(&c.sleeping),
+                    "working": ver(&c.working),
+                    "alert": ver(&c.alert),
+                }
+            })
+        })
+        .collect();
+
+    let active = cfg
+        .active_character_id
+        .or_else(|| cfg.model_url.clone())
+        .or_else(|| builtins.first().and_then(|m| m["id"].as_str().map(|s| s.to_string())));
+
+    Ok(json!({ "builtin": builtins, "custom": customs, "active": active }))
+}
+
+/// Create a new custom character with the given name.
+#[tauri::command]
+pub fn create_character(name: String) -> Result<Value, String> {
+    let id = format!("char_{}", now_millis());
+    user_config::update(|cfg| {
+        let list = cfg.custom_characters.get_or_insert_with(Vec::new);
+        list.push(user_config::CustomCharacter {
+            id: id.clone(),
+            name: name.clone(),
+            ..Default::default()
+        });
+        cfg.active_character_id = Some(id.clone());
+    });
+    Ok(json!({ "id": id, "name": name }))
+}
+
+/// Delete a custom character and its animation files.
+#[tauri::command]
+pub fn delete_character(id: String) -> Result<(), String> {
+    user_config::update(|cfg| {
+        if let Some(list) = &mut cfg.custom_characters {
+            list.retain(|c| c.id != id);
+        }
+        if cfg.active_character_id.as_deref() == Some(&id) {
+            cfg.active_character_id = None;
+        }
+    });
+    let dir = models::animations_dir();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with(&format!("{}_", id)) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Save a Live2D model thumbnail (base64 PNG) captured by the main window
+/// after a model loads, so the switch-character menu can show a preview.
+/// `name` is the model display name (sanitized to a safe filename).
+#[tauri::command]
+pub fn save_model_thumbnail(name: String, data: String) -> Result<(), String> {
+    let dir = models::thumbnails_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create thumbnails dir: {}", e))?;
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        .collect();
+    let path = dir.join(format!("{}.png", safe));
+    // Strip the "data:image/png;base64," prefix if present.
+    let b64 = data
+        .strip_prefix("data:image/png;base64,")
+        .unwrap_or(&data);
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("Failed to decode base64: {}", e))?;
+    std::fs::write(&path, bytes).map_err(|e| format!("Failed to write thumbnail: {}", e))?;
+    Ok(())
+}
+
+/// Read a Live2D model3.json and all referenced files (moc3, textures,
+/// physics, display info) and return them as base64-encoded data URLs.
+/// The frontend creates blob URLs from these and loads the model without
+/// needing HTTP or asset-protocol access (both of which have limitations
+/// in the Tauri webview).
+#[tauri::command]
+pub fn read_live2d_bundle(model_path: String) -> Result<Value, String> {
+    let path = PathBuf::from(&model_path);
+    let dir = path.parent().ok_or("Invalid model path")?;
+
+    // Read and parse model3.json
+    let json_str = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read model3.json: {}", e))?;
+    let settings: Value = serde_json::from_str(&json_str)
+        .map_err(|e| format!("Failed to parse model3.json: {}", e))?;
+
+    // Collect all referenced files from FileReferences
+    use base64::Engine;
+    let mut files = serde_json::Map::new();
+    let base64_engine = base64::engine::general_purpose::STANDARD;
+
+    let read_file_b64 = |rel: &str| -> Result<String, String> {
+        let file_path = dir.join(rel);
+        let bytes = std::fs::read(&file_path)
+            .map_err(|e| format!("Failed to read {}: {}", rel, e))?;
+        Ok(base64_engine.encode(&bytes))
+    };
+
+    // Helper to add a file to the bundle
+    let add_file = |rel: &str, files: &mut serde_json::Map<String, Value>| {
+        if let Ok(b64) = read_file_b64(rel) {
+            // Determine MIME type from extension
+            let mime = if rel.ends_with(".png") {
+                "image/png"
+            } else if rel.ends_with(".json") {
+                "application/json"
+            } else {
+                "application/octet-stream"
+            };
+            files.insert(
+                rel.to_string(),
+                json!({ "data": b64, "mime": mime }),
+            );
+        }
+    };
+
+    // Moc
+    if let Some(moc) = settings
+        .get("FileReferences")
+        .and_then(|f| f.get("Moc"))
+        .and_then(|m| m.as_str())
+    {
+        add_file(moc, &mut files);
+    }
+    // Textures
+    if let Some(textures) = settings
+        .get("FileReferences")
+        .and_then(|f| f.get("Textures"))
+        .and_then(|t| t.as_array())
+    {
+        for tex in textures {
+            if let Some(tex_path) = tex.as_str() {
+                add_file(tex_path, &mut files);
+            }
+        }
+    }
+    // Physics (optional)
+    if let Some(phys) = settings
+        .get("FileReferences")
+        .and_then(|f| f.get("Physics"))
+        .and_then(|p| p.as_str())
+    {
+        add_file(phys, &mut files);
+    }
+    // DisplayInfo (optional)
+    if let Some(di) = settings
+        .get("FileReferences")
+        .and_then(|f| f.get("DisplayInfo"))
+        .and_then(|d| d.as_str())
+    {
+        add_file(di, &mut files);
+    }
+    // Motions (optional) — each group is an array of {File: "...motion3.json"}
+    if let Some(motions) = settings
+        .get("FileReferences")
+        .and_then(|f| f.get("Motions"))
+        .and_then(|m| m.as_object())
+    {
+        for group in motions.values() {
+            if let Some(arr) = group.as_array() {
+                for motion in arr {
+                    if let Some(file) = motion.get("File").and_then(|f| f.as_str()) {
+                        add_file(file, &mut files);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(json!({
+        "settings": settings,
+        "files": files,
+    }))
+}
+
+/// Open a file picker and save the chosen animation for a character's state.
+#[tauri::command]
+pub async fn pick_character_animation(
+    id: String,
+    state: String,
+    app: AppHandle,
+) -> Result<Value, String> {
+    use tauri_plugin_dialog::DialogExt;
+    use tokio::sync::oneshot;
+
+    // Security: validate id and state BEFORE opening the file picker or
+    // touching the filesystem. Prevents path traversal via crafted id/state.
+    if !matches!(state.as_str(), "sleeping" | "working" | "alert") {
+        return Err(format!("Invalid state '{}': must be sleeping/working/alert", state));
+    }
+    if !id.starts_with("char_") || id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(format!("Invalid character id '{}'", id));
+    }
+
+    // Set flag so menu window blur handler doesn't hide the menu while
+    // the native file picker dialog is open (it steals window focus).
+    crate::IS_PICKING_FILE.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let (tx, rx) = oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Animations", ANIMATION_EXTS)
+        .pick_file(move |result| {
+            let _ = tx.send(result);
+        });
+
+    let file_path = rx.await.map_err(|e| {
+        crate::IS_PICKING_FILE.store(false, std::sync::atomic::Ordering::SeqCst);
+        format!("channel error: {}", e)
+    })?;
+
+    // File picker closed — clear the flag.
+    crate::IS_PICKING_FILE.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let Some(file_path) = file_path else {
+        return Ok(json!({ "success": false, "reason": "cancelled" }));
+    };
+
+    let source = file_path
+        .into_path()
+        .map_err(|e| format!("Failed to resolve file path: {}", e))?;
+    let dir = models::animations_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create animations dir: {}", e))?;
+
+    let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("gif");
+    let dest_filename = format!("{}_{}.{}", id, state, ext);
+    let dest = dir.join(&dest_filename);
+
+    // Remove old files for this character+state (different extensions)
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with(&format!("{}_{}.", id, state)) && name != &dest_filename {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    // Copy + auto-resize images/GIFs to MAX_ANIM_DIM; videos pass through.
+    resize_or_copy_animation(&source, &dest)?;
+
+    user_config::update(|cfg| {
+        if let Some(list) = &mut cfg.custom_characters {
+            if let Some(c) = list.iter_mut().find(|c| c.id == id) {
+                match state.as_str() {
+                    "sleeping" => c.sleeping = Some(dest_filename.clone()),
+                    "working" => c.working = Some(dest_filename.clone()),
+                    "alert" => c.alert = Some(dest_filename.clone()),
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let dest_path = dest.to_string_lossy().replace('\\', "/");
+    Ok(json!({ "success": true, "path": dest_path, "id": id, "state": state }))
+}
+
+/// Clear a character's animation for a specific state.
+#[tauri::command]
+pub fn clear_character_animation(id: String, state: String) -> Result<(), String> {
+    user_config::update(|cfg| {
+        if let Some(list) = &mut cfg.custom_characters {
+            if let Some(c) = list.iter_mut().find(|c| c.id == id) {
+                match state.as_str() {
+                    "sleeping" => c.sleeping = None,
+                    "working" => c.working = None,
+                    "alert" => c.alert = None,
+                    _ => {}
+                }
+            }
+        }
+    });
+    let dir = models::animations_dir();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with(&format!("{}_{}.", id, state)) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Switch to a character by ID (built-in model URL or custom character ID).
+#[tauri::command]
+pub fn switch_character(id: String) {
+    user_config::update(|cfg| {
+        cfg.active_character_id = Some(id.clone());
+        if id.starts_with("char_") {
+            cfg.model_url = None;
+        } else {
+            cfg.model_url = Some(id.clone());
+        }
+    });
+}
+
 // ===== Edge dock (screen-edge snap) =====
 
 /// While docked: the pre-snap window rect (physical px) plus the docked
@@ -984,6 +1496,16 @@ pub fn show_menu_window(
     let Some(menu_win) = app.get_webview_window("menu") else {
         return Err("menu window not found".into());
     };
+    let mut y = y;
+    // If the menu would extend past the bottom of the screen, shift it up
+    // so the full height is visible.
+    if let Ok(Some(monitor)) = menu_win.current_monitor() {
+        let scale = monitor.scale_factor();
+        let screen_h = monitor.size().height as f64 / scale;
+        if y + h + 8.0 > screen_h {
+            y = (screen_h - h - 8.0).max(0.0);
+        }
+    }
     menu_win
         .set_size(tauri::Size::Logical(tauri::LogicalSize::new(w, h)))
         .map_err(|e| e.to_string())?;
@@ -1003,6 +1525,21 @@ pub fn hide_menu_window(app: AppHandle) -> Result<(), String> {
         return Ok(());
     };
     let _ = menu_win.hide();
+    Ok(())
+}
+
+/// Resize the menu window without repositioning or focusing it. Called by the
+/// menu window itself to fit its height to the current view's content after
+/// switching submenus or loading dynamic items (e.g. the character grid with
+/// 5+ cards needs more height than the main menu).
+#[tauri::command]
+pub fn resize_menu_window(app: AppHandle, w: f64, h: f64) -> Result<(), String> {
+    let Some(menu_win) = app.get_webview_window("menu") else {
+        return Ok(());
+    };
+    menu_win
+        .set_size(tauri::Size::Logical(tauri::LogicalSize::new(w, h)))
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

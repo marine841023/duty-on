@@ -17,6 +17,19 @@
     listen(event, (e) => cb(e.payload));
   }
 
+  // User-uploaded Live2D models are served by the local hook server
+  // (GET /live2d/*). We use "localhost" instead of "127.0.0.1" because
+  // WebView2 on some Windows configs blocks fetch() to raw IP loopback
+  // addresses while allowing "localhost".
+  const LIVE2D_URL_BASE = 'http://localhost:17521/live2d/';
+  const LIVE2D_ROOT_MARKER = '/.dutyon/live2d/';
+  function toLive2DServerUrl(absPath) {
+    const normalized = String(absPath).replace(/\\/g, '/');
+    const idx = normalized.indexOf(LIVE2D_ROOT_MARKER);
+    const rel = idx >= 0 ? normalized.slice(idx + LIVE2D_ROOT_MARKER.length) : normalized;
+    return LIVE2D_URL_BASE + rel.split('/').map(encodeURIComponent).join('/');
+  }
+
   window.petAPI = {
     // ===== Events (renderer → main, main → renderer) =====
     onStateUpdate: (cb) => on('state-update', cb),
@@ -39,24 +52,10 @@
     // ===== Models =====
     getModels: async () => {
       const res = await invoke('get_models');
-      // User-uploaded models are served by the local hook server
-      // (GET /live2d/*) instead of the Tauri asset protocol: asset-protocol
-      // responses carry no CORS headers, so the cubism4/pixi XHR loaders fail
-      // preflight with an opaque "Network error" (plain fetch probes return
-      // 200 because simple requests skip preflight). The URL path is the
-      // model file path relative to ~/.dutyon/live2d/.
-      const LIVE2D_URL_BASE = 'http://127.0.0.1:17521/live2d/';
-      const LIVE2D_ROOT_MARKER = '/.dutyon/live2d/';
-      const toServerUrl = (absPath) => {
-        const normalized = String(absPath).replace(/\\/g, '/');
-        const idx = normalized.indexOf(LIVE2D_ROOT_MARKER);
-        const rel = idx >= 0 ? normalized.slice(idx + LIVE2D_ROOT_MARKER.length) : normalized;
-        return LIVE2D_URL_BASE + rel.split('/').map(encodeURIComponent).join('/');
-      };
       if (res && Array.isArray(res.models)) {
         res.models = res.models.map((m) =>
           m.userUploaded
-            ? { ...m, url: toServerUrl(m.url) }
+            ? { ...m, url: toLive2DServerUrl(m.url) }
             : m
         );
       }
@@ -80,6 +79,34 @@
     getAppearance: () => invoke('get_appearance'),
     setFlipHorizontal: (enabled) => invoke('set_flip_horizontal', { enabled }),
     setMiniMode: (enabled) => invoke('set_mini_mode', { enabled }),
+
+    // ===== Custom characters (GIF/MP4 replacing Live2D) =====
+    getCharacters: async () => {
+      const res = await invoke('get_characters');
+      // Convert user-uploaded model paths to HTTP server URLs, same as getModels.
+      // pixi-live2d-display resolves relative resource paths (moc3, textures)
+      // against the model3.json URL via @pixi/utils url.resolve — HTTP URLs
+      // work correctly; blob: URLs cause url.resolve to drop the colon after
+      // the inner scheme (e.g. blob:http:// → blob:http//).
+      const convert = (arr) => {
+        if (!Array.isArray(arr)) return arr;
+        return arr.map((c) =>
+          c && c.userUploaded && c.url ? { ...c, url: toLive2DServerUrl(c.url) } : c
+        );
+      };
+      if (res) {
+        if (Array.isArray(res.builtin)) res.builtin = convert(res.builtin);
+        if (Array.isArray(res.custom)) res.custom = convert(res.custom);
+      }
+      return res;
+    },
+    createCharacter: (name) => invoke('create_character', { name }),
+    deleteCharacter: (id) => invoke('delete_character', { id }),
+    pickCharacterAnimation: (id, state) => invoke('pick_character_animation', { id, state }),
+    clearCharacterAnimation: (id, state) => invoke('clear_character_animation', { id, state }),
+    switchCharacter: (id) => invoke('switch_character', { id }),
+    saveModelThumbnail: (name, data) => invoke('save_model_thumbnail', { name, data }),
+    readLive2DBundle: (modelPath) => invoke('read_live2d_bundle', { modelPath }),
 
     // ===== Edge dock (screen-edge snap, left/right only) =====
     // detectEdgeDock: returns null or "left"/"right" when the window sits
@@ -120,6 +147,7 @@
     // beside the pet. The pet window never resizes → no layout lag.
     showMenuWindow: (x, y, w, h) => invoke('show_menu_window', { x, y, w, h }),
     hideMenuWindow: () => invoke('hide_menu_window'),
+    resizeMenuWindow: (w, h) => invoke('resize_menu_window', { w, h }),
     // Click-through (Tauri has no {forward:true} mode, so the Rust polling
     // thread owns set_ignore_cursor_events; the renderer reports the clickable
     // rectangles and a force-clickable flag for drag / menu-open states).

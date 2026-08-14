@@ -61,6 +61,56 @@ pub fn user_models_dir() -> PathBuf {
         .join("live2d")
 }
 
+/// Directory for user-uploaded custom animation files (GIF, MP4, etc.).
+/// One file per pet state (sleeping, working, alert). Created on demand by
+/// the "custom animation" menu command.
+/// Falls back to a temp dir if ~/.dutyon/ is not writable (sandbox/restricted env).
+pub fn animations_dir() -> PathBuf {
+    let primary = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".dutyon")
+        .join("animations");
+    // If the dir already exists, use it; otherwise try to create it.
+    // If creation fails (sandbox/permissions), fall back to temp dir.
+    if primary.exists() {
+        return primary;
+    }
+    match std::fs::create_dir_all(&primary) {
+        Ok(_) => primary,
+        Err(_) => {
+            let fallback = std::env::temp_dir().join("dutyon").join("animations");
+            let _ = std::fs::create_dir_all(&fallback);
+            fallback
+        }
+    }
+}
+
+/// Directory for cached Live2D model thumbnails (PNG snapshots captured by
+/// the main window after a model loads, so the menu can show a preview
+/// instead of a plain letter avatar).
+pub fn thumbnails_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".dutyon")
+        .join("thumbnails")
+}
+
+/// Return the thumbnail path for a Live2D model if a cached PNG exists.
+/// `model_name` is sanitized to a filesystem-safe filename (non-alphanumeric
+/// chars replaced with `_`). Returns None if no thumbnail has been captured.
+pub fn thumbnail_path(model_name: &str) -> Option<PathBuf> {
+    let safe: String = model_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        .collect();
+    let path = thumbnails_dir().join(format!("{}.png", safe));
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 /// Directory where users drop optional per-state sound clips for the external
 /// display. Created on demand by the "open sounds folder" menu command. Files
 /// are named `{state}.{mp3,wav,ogg}` where state is one of

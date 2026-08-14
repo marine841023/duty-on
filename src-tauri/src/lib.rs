@@ -13,7 +13,7 @@ mod user_config;
 
 use crate::state_manager::{current_millis, SharedStateManager, StateManager};
 use crate::user_config::WindowPosition;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{
@@ -23,6 +23,10 @@ use tauri::{
 };
 use tauri_plugin_autostart::MacosLauncher;
 use tokio::sync::broadcast::error::RecvError;
+
+/// Set to true while a file picker dialog is open, so the menu window's
+/// blur handler doesn't hide the menu when the dialog steals focus.
+pub static IS_PICKING_FILE: AtomicBool = AtomicBool::new(false);
 
 /// Entry point used by `main.rs` and the mobile/desktop lib targets.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -43,6 +47,7 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
+        .plugin(tauri_plugin_dialog::init())
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
             commands::install_hooks,
@@ -77,12 +82,21 @@ pub fn run() {
             commands::close_menu_space,
             commands::show_menu_window,
             commands::hide_menu_window,
+            commands::resize_menu_window,
             commands::update_click_regions,
             commands::set_force_clickable,
             commands::bring_to_front,
             commands::flash_attention,
             commands::quit,
             commands::uninstall_app,
+            commands::get_characters,
+            commands::create_character,
+            commands::delete_character,
+            commands::pick_character_animation,
+            commands::clear_character_animation,
+            commands::switch_character,
+            commands::save_model_thumbnail,
+            commands::read_live2d_bundle,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -102,10 +116,43 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let menu_space = commands::MenuSpaceState::default();
     app.manage(menu_space.clone());
 
-    // ----- Window: position + show -----
-    let window = app
-        .get_webview_window("main")
-        .ok_or("main window not found")?;
+    // ----- Click-through state (must be managed BEFORE window.show(),
+    // otherwise the frontend's PIXI ticker may call update_click_regions
+    // before the state is registered, causing a "state not managed" error) -----
+    let ct_state = click_through::ClickThroughState::new();
+    app.manage(ct_state.clone());
+
+    // ----- Window: create main window with custom WebView2 data directory -----
+    // The main window is created in code (not in tauri.conf.json) so we can
+    // set a custom WebView2 data_directory. This avoids WebView2 ERROR_BUSY
+    // (0x800700AA) when the default LOCALAPPDATA cache is locked by a
+    // previous instance that didn't fully release its resources.
+    let webview_data_dir = std::env::temp_dir().join("dutyon_webview");
+    // Clear stale WebView2 cache from a previous version. Without this,
+    // WebView2 serves the old JS/CSS from cache even after a reinstall
+    // (the data dir is in %TEMP% and persists across installs). The
+    // cache-busting ?v= query params on script tags handle this going
+    // forward, but this one-time purge clears any pre-existing cache.
+    {
+        let cache_dir = webview_data_dir.join("Default").join("Cache");
+        if cache_dir.exists() {
+            let _ = std::fs::remove_dir_all(&cache_dir);
+        }
+    }
+    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("Duty On")
+        .transparent(true)
+        .decorations(false)
+        .always_on_top(true)
+        .resizable(false)
+        .maximizable(false)
+        .minimizable(false)
+        .skip_taskbar(true)
+        .shadow(false)
+        .visible(false)
+        .inner_size(260.0, 520.0)
+        .data_directory(webview_data_dir.clone())
+        .build()?;
     position_window(app, &window)?;
     let _ = window.set_always_on_top(true);
     let _ = window.show();
@@ -122,6 +169,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .skip_taskbar(true)
         .visible(false)
         .inner_size(config::EDGE_DOCK_THICKNESS as f64, 200.0)
+        .data_directory(webview_data_dir.clone())
         .build()?;
     let _ = preview.set_ignore_cursor_events(true);
 
@@ -148,17 +196,21 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     .visible(false)
     .inner_size(230.0, 500.0)
     .initialization_script("window.__MENU_MODE__ = true;")
+    .data_directory(webview_data_dir.clone())
     .build()?;
 
     // Hide the menu window when it loses focus (user clicks elsewhere,
     // Alt-Tab, etc.). Emit an event so the main window can reset its menu
-    // state.
+    // state. Skipped while a file picker is open (pick_character_animation
+    // sets the flag so the dialog doesn't trigger menu close).
     let menu_win_for_blur = menu_win.clone();
     let app_for_blur = app.handle().clone();
     menu_win.on_window_event(move |event| {
         if let tauri::WindowEvent::Focused(false) = event {
-            let _ = menu_win_for_blur.hide();
-            let _ = app_for_blur.emit("menu-closed", ());
+            if !crate::IS_PICKING_FILE.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = menu_win_for_blur.hide();
+                let _ = app_for_blur.emit("menu-closed", ());
+            }
         }
     });
 
@@ -278,8 +330,6 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // events once ignore=true). A Rust thread polls Win32 GetCursorPos and
     // toggles ignore based on regions the frontend reports via the PixiJS
     // ticker (which keeps running while click-through). See click_through.rs.
-    let ct_state = click_through::ClickThroughState::new();
-    app.manage(ct_state.clone());
     let window_ct = window.clone();
     std::thread::spawn(move || click_through::run_polling_loop(window_ct, ct_state));
 

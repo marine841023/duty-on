@@ -13,7 +13,7 @@ pub const HOST: &str = "127.0.0.1";
 
 // ===== Window =====
 pub const WINDOW_WIDTH: i32 = 260;
-pub const WINDOW_HEIGHT: i32 = 420;
+pub const WINDOW_HEIGHT: i32 = 520;
 pub const WINDOW_MARGIN: i32 = 20; // offset from bottom-right corner
 // Mini mode: half-width window with full-height project list.
 // Canvas is half-size (120×130); the extra height (280−130=150px) gives
