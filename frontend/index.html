@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Duty On</title>
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-  <link rel="stylesheet" href="styles.css?v=2">
+  <link rel="stylesheet" href="styles.css?v=6">
 </head>
 <body>
   <!-- Early diagnostic forwarder: POSTs JS errors to our HTTP server's /log
@@ -48,7 +48,7 @@
       <div id="head-effect" class="head-effect"></div>
     </div>
 
-    <!-- Status bar -->
+    <!-- Status bar (项目列表) -->
     <div id="status-bar">
       <div id="status-header">
         <span id="pet-state-text" data-i18n="status.initializing">初始化中...</span>
@@ -56,6 +56,44 @@
       </div>
       <div id="project-list">
         <div class="project-item empty">等待 Trae IDE 连接...</div>
+      </div>
+    </div>
+
+    <!-- 系统监控抽屉 (大菜单): CPU / 内存 / 显卡 / 网络 / 自身占用。
+         位于状态栏下方；窗口高度随面板内容向上生长（底边固定）。 -->
+    <div id="monitor-panel" class="hidden">
+      <div id="monitor-header">
+        <span id="monitor-title" data-i18n="monitor.title">系统监控</span>
+        <span class="monitor-header-btn" id="monitor-reset" data-i18n-title="monitor.reset" title="恢复默认显示">↺</span>
+        <span class="monitor-header-btn" id="monitor-collapse" title="收起">▾</span>
+      </div>
+      <!-- 紧凑行: 彩色短标签 + 数值 + 迷你趋势线。
+           完整说明通过 data-tip 悬停提示显示（CSS tooltip，由 JS 填充）。 -->
+      <div id="monitor-items">
+        <div class="monitor-row" id="monitor-cpu-row">
+          <span class="m-txt txt-cpu" data-i18n="monitor.cpu">CPU</span>
+          <span class="monitor-value" id="monitor-cpu-value">—</span>
+          <canvas class="monitor-spark" id="monitor-cpu-spark" width="160" height="12"></canvas>
+        </div>
+        <div class="monitor-row" id="monitor-ram-row">
+          <span class="m-txt txt-ram" data-i18n="monitor.ram">内存</span>
+          <span class="monitor-value" id="monitor-ram-value">—</span>
+          <canvas class="monitor-spark" id="monitor-ram-spark" width="160" height="12"></canvas>
+        </div>
+        <div class="monitor-row" id="monitor-gpu-row">
+          <span class="m-txt txt-gpu" data-i18n="monitor.gpu">显卡</span>
+          <span class="monitor-value" id="monitor-gpu-value">—</span>
+          <canvas class="monitor-spark" id="monitor-gpu-spark" width="160" height="12"></canvas>
+        </div>
+        <div class="monitor-row" id="monitor-net-row">
+          <span class="m-txt txt-net" data-i18n="monitor.net">网络</span>
+          <span class="monitor-value" id="monitor-net-value">—</span>
+          <canvas class="monitor-spark" id="monitor-net-spark" width="160" height="12"></canvas>
+        </div>
+        <div class="monitor-row" id="monitor-self-row">
+          <span class="m-txt txt-self" data-i18n="monitor.self">自身</span>
+          <span class="monitor-value" id="monitor-self-value">—</span>
+        </div>
       </div>
     </div>
   </div>
@@ -76,6 +114,9 @@
       </div>
       <div class="menu-item" id="menu-flip" data-i18n="menu.flipHorizontal">左右翻转</div>
       <div class="menu-item" id="menu-mini-mode" data-i18n="menu.miniMode">迷你模式</div>
+      <div class="menu-item submenu-trigger" id="menu-visibility-trigger">
+        <span data-i18n="menu.visibility">显示隐藏</span><span class="submenu-arrow">▶</span>
+      </div>
       <div class="menu-item" id="menu-auto-launch" data-i18n="menu.autoLaunch">开机自启动</div>
       <!-- 外接显示屏功能暂时隐藏（允许外部访问 + 打开声音文件夹）；
            恢复时去掉下面两项的 hidden 属性即可，JS 逻辑无需改动。 -->
@@ -168,6 +209,22 @@
       <div class="menu-label" data-i18n="menu.language">语言</div>
       <div id="language-list"><!-- language items populated dynamically --></div>
     </div>
+    <!-- 显示隐藏 submenu: 系统监控抽屉 / 各指标行 / 项目列表 -->
+    <div id="menu-visibility-view" class="hidden">
+      <div class="menu-item submenu-back" id="menu-visibility-back">
+        <span class="submenu-arrow back">◀</span><span data-i18n="menu.back">返回</span>
+      </div>
+      <div class="menu-label" data-i18n="menu.visibility">显示隐藏</div>
+      <div class="menu-item" id="menu-vis-monitor" data-i18n="menu.systemMonitor">系统监控</div>
+      <div class="menu-divider"></div>
+      <div class="menu-item" id="menu-vis-cpu">CPU</div>
+      <div class="menu-item" id="menu-vis-ram" data-i18n="monitor.ram">内存</div>
+      <div class="menu-item" id="menu-vis-gpu" data-i18n="monitor.gpu">显卡</div>
+      <div class="menu-item" id="menu-vis-net" data-i18n="monitor.net">网络</div>
+      <div class="menu-item" id="menu-vis-self" data-i18n="monitor.self">自身</div>
+      <div class="menu-divider"></div>
+      <div class="menu-item" id="menu-vis-projectlist" data-i18n="monitor.projectList">项目列表</div>
+    </div>
   </div>
   <!-- Try local first, fallback to CDN -->
   <script>
@@ -233,11 +290,11 @@
   </script>
 
   <!-- i18n module (must load before renderer.js so window.i18n is available) -->
-  <script src="i18n.js?v=2"></script>
+  <script src="i18n.js?v=3"></script>
   <!-- Tauri bridge: implements window.petAPI via the Tauri global API.
        Must load before renderer.js (which uses window.petAPI at init). -->
-  <script src="tauri-bridge.js?v=2"></script>
+  <script src="tauri-bridge.js?v=3"></script>
   <!-- Main renderer script -->
-  <script src="renderer.js?v=2"></script>
+  <script src="renderer.js?v=6"></script>
 </body>
 </html>

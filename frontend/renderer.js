@@ -241,6 +241,10 @@ async function init() {
   selectAnimBackend();
   buildSettingsMenu();
   updateFlipMenuCheck();
+  // Monitor drawer: apply persisted visibility + subscribe to sys-metrics.
+  // After it applies the config it re-syncs the window height (grows upward
+  // if the drawer was left open last session).
+  initMonitorPanel();
 
   // Wait for libraries to load
   const libsReady = await waitForLibs();
@@ -344,6 +348,23 @@ async function init() {
  */
 async function initMenuMode() {
   const { emit } = window.__TAURI__.event;
+
+  // ---- Diagnostics: surface any JS error in this hidden window to the
+  // shared frontend.log. Without this, a crash during listener binding
+  // silently kills every menu item below the crash point. ----
+  window.addEventListener('error', (e) => {
+    if (window.__petSendLog) {
+      window.__petSendLog('error', '[menu] JS error: ' + e.message +
+        ' @' + (e.filename || '?') + ':' + (e.lineno || '?'));
+    }
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    if (window.__petSendLog) {
+      const r = e.reason;
+      window.__petSendLog('error', '[menu] unhandled rejection: ' +
+        ((r && r.message) ? r.message : String(r)));
+    }
+  });
 
   // ---- Helpers (must be defined before build function overrides) ----
   const sendAction = (action, params) => {
@@ -505,6 +526,16 @@ async function initMenuMode() {
   selectAnimBackend();
   loadAutoLaunchState();
   loadExternalAccessState();
+  // Load the monitor config so the 系统监控 ✓ renders correctly even before
+  // the first menu-data event arrives (this window has no drawer UI).
+  if (window.petAPI && window.petAPI.getMonitorConfig) {
+    window.petAPI.getMonitorConfig()
+      .then((c) => {
+        monitorCfg = c;
+        updateMonitorMenuCheck();
+      })
+      .catch(() => {});
+  }
 
   // ---- Listen for live data from the main window ----
   window.__TAURI__.event.listen('menu-data', (e) => {
@@ -518,6 +549,15 @@ async function initMenuMode() {
       miniMode = data.miniMode;
       const item = document.getElementById('menu-mini-mode');
       if (item) item.classList.toggle('active', miniMode);
+    }
+    if (data.monitorCfg) {
+      // Full config from the main window — freshest source while open.
+      monitorCfg = data.monitorCfg;
+      updateMonitorMenuCheck();
+    } else if (data.monitorEnabled !== undefined) {
+      if (!monitorCfg) monitorCfg = { enabled: false };
+      monitorCfg.enabled = data.monitorEnabled;
+      updateMonitorMenuCheck();
     }
     if (data.hooksInstalled !== undefined) {
       hooksInstalled = data.hooksInstalled;
@@ -652,6 +692,35 @@ async function initMenuMode() {
     document.getElementById('menu-mini-mode').classList.toggle('active', miniMode);
     sendAction('toggleMiniMode');
   });
+  // 显示隐藏 submenu: optimistic local update + emit to main window.
+  document.getElementById('menu-visibility-trigger').addEventListener('click', () => {
+    updateMonitorMenuCheck();
+    showView('menu-visibility-view');
+  });
+  document.getElementById('menu-visibility-back').addEventListener('click', () => {
+    showView('menu-main-view');
+  });
+  document.getElementById('menu-vis-monitor').addEventListener('click', () => {
+    if (!monitorCfg) return;
+    monitorCfg.enabled = !monitorCfg.enabled;
+    updateMonitorMenuCheck();
+    sendAction('toggleMonitor');
+  });
+  for (const [id, key] of [
+    ['menu-vis-cpu', 'showCpu'],
+    ['menu-vis-ram', 'showRam'],
+    ['menu-vis-gpu', 'showGpu'],
+    ['menu-vis-net', 'showNet'],
+    ['menu-vis-self', 'showSelf'],
+    ['menu-vis-projectlist', 'showProjectList'],
+  ]) {
+    document.getElementById(id).addEventListener('click', () => {
+      if (!monitorCfg) return;
+      monitorCfg[key] = !monitorCfg[key];
+      updateMonitorMenuCheck();
+      sendAction('toggleMonitorVis', { key });
+    });
+  }
   document.getElementById('menu-auto-launch').addEventListener('click', () => {
     const item = document.getElementById('menu-auto-launch');
     const newState = !item.classList.contains('active');
@@ -664,6 +733,10 @@ async function initMenuMode() {
     item.classList.toggle('active', newState);
     sendAction('toggleExternalAccess');
   });
+  // Marker: everything above bound without throwing. If frontend.log shows
+  // "[menu] Setting up..." but NOT this line, a binding crashed midway and
+  // every item after the crash point is dead.
+  if (window.__petSendLog) window.__petSendLog('info', '[menu] static listeners bound OK');
 
   // Actions that close the menu
   document.getElementById('menu-upload-live2d').addEventListener('click', () => {
@@ -1039,14 +1112,37 @@ function initCustomAnimation() {
 function updateCustomAnimation(state) {
   if (!activeCharacter || activeCharacter.type !== 'animation' || !customAnimEl) return;
   const anims = activeCharacter.animations || {};
-  const path = anims[state];
-  if (!path) return;
+  // Fallback chain: the state's own animation → sleeping → any available.
+  // Without this, a state missing its animation keeps showing whatever was
+  // on screen last (e.g. the alert animation stuck after leaving alert).
+  let effState = state;
+  if (!anims[effState]) {
+    if (anims.sleeping) effState = 'sleeping';
+    else {
+      effState = ['working', 'alert'].find((s) => anims[s]);
+      if (!effState) return; // no animation files at all — keep current content
+    }
+  }
+  const path = anims[effState];
   const versions = activeCharacter.versions || {};
-  const url = animAssetUrl(path, versions[state]);
+  const url = animAssetUrl(path, versions[effState]);
   const ext = path.split('.').pop().toLowerCase();
   const isVideo = ['mp4', 'webm', 'mov'].includes(ext);
-  // Clear previous content.
-  while (customAnimEl.firstChild) customAnimEl.removeChild(customAnimEl.firstChild);
+  // Clear previous content, explicitly releasing media resources: a detached
+  // <video> keeps its decoder (and <img> its decoded bitmap) alive until GC,
+  // which can accumulate over long-running state switches.
+  while (customAnimEl.firstChild) {
+    const child = customAnimEl.firstChild;
+    if (child.tagName === 'VIDEO') {
+      try { child.pause(); child.removeAttribute('src'); child.load(); } catch (e) { /* element already dead */ }
+    } else if (child.tagName === 'IMG') {
+      child.removeAttribute('src');
+    }
+    customAnimEl.removeChild(child);
+  }
+  // Hide (instead of showing a broken-image icon) when the file is missing
+  // or unreadable — e.g. the animations folder was cleaned up by hand.
+  const onBroken = (el) => { if (el.parentNode) el.remove(); };
   if (isVideo) {
     const video = document.createElement('video');
     video.src = url;
@@ -1054,6 +1150,7 @@ function updateCustomAnimation(state) {
     video.loop = true;
     video.muted = true;
     video.playsInline = true;
+    video.onerror = () => onBroken(video);
     // Disable native drag — otherwise dragging the video triggers a file
     // drag-and-drop operation that interferes with window dragging.
     video.draggable = false;
@@ -1062,6 +1159,7 @@ function updateCustomAnimation(state) {
     const img = document.createElement('img');
     img.src = url;
     img.alt = state;
+    img.onerror = () => onBroken(img);
     // Disable native drag — otherwise dragging the image triggers a file
     // drag-and-drop operation (image copy/download) that interferes with
     // window dragging and breaks edge-dock snapping.
@@ -2097,13 +2195,21 @@ async function confirmCreateCharacter() {
   const name = input ? input.value.trim() : '';
   if (!name) return;
   if (!window.petAPI || !window.petAPI.createCharacter) return;
-  const result = await window.petAPI.createCharacter(name);
-  // Always hide the inline input after confirming (success or failure).
-  const inline = document.getElementById('char-create-inline');
-  if (inline) inline.classList.add('hidden');
-  if (result && result.id) {
-    await loadCharacters();
-    showEditCharacterView(result.id);
+  try {
+    const result = await window.petAPI.createCharacter(name);
+    // Hide the inline input only after a successful confirm.
+    const inline = document.getElementById('char-create-inline');
+    if (inline) inline.classList.add('hidden');
+    if (result && result.id) {
+      await loadCharacters();
+      showEditCharacterView(result.id);
+    }
+  } catch (err) {
+    // Keep the inline input visible so the user can retry; log the error
+    // instead of failing silently with the input stuck open.
+    const msg = err && err.message ? err.message : String(err);
+    console.warn('[char] Create failed:', msg);
+    if (window.__petSendLog) window.__petSendLog('error', '[char] Create failed: ' + msg);
   }
 }
 
@@ -2272,22 +2378,29 @@ function applyMiniMode(enabled, resizeWindow = true) {
   }
   updateMiniMenuCheck();
   if (resizeWindow && window.petAPI && window.petAPI.setMiniMode) {
-    Promise.resolve(window.petAPI.setMiniMode(enabled)).catch((e) => {
-      console.warn('[mini] Failed to resize window, rolling back:', e && e.message);
-      // The window wasn't resized — restore the previous CSS class and canvas
-      // so they stay consistent with the actual window size.
-      miniMode = prevMode;
-      document.body.classList.toggle('mini', prevMode);
-      updateMiniMenuCheck();
-      if (pixiApp) {
-        const w = prevMode ? MINI_PIXI_WIDTH : PIXI_WIDTH;
-        const h = prevMode ? MINI_PIXI_HEIGHT : PIXI_HEIGHT;
-        if (pixiApp.screen.width !== w || pixiApp.screen.height !== h) {
-          pixiApp.renderer.resize(w, h);
+    Promise.resolve(window.petAPI.setMiniMode(enabled))
+      .catch((e) => {
+        console.warn('[mini] Failed to resize window, rolling back:', e && e.message);
+        // The window wasn't resized — restore the previous CSS class and canvas
+        // so they stay consistent with the actual window size.
+        miniMode = prevMode;
+        document.body.classList.toggle('mini', prevMode);
+        updateMiniMenuCheck();
+        if (pixiApp) {
+          const w = prevMode ? MINI_PIXI_WIDTH : PIXI_WIDTH;
+          const h = prevMode ? MINI_PIXI_HEIGHT : PIXI_HEIGHT;
+          if (pixiApp.screen.width !== w || pixiApp.screen.height !== h) {
+            pixiApp.renderer.resize(w, h);
+          }
+          relayoutModel();
         }
-        relayoutModel();
-      }
-    });
+      })
+      .then(() => {
+        // Mini mode changes the window's base size — re-apply the monitor
+        // drawer's extra height (drawer is CSS-hidden in mini, so this
+        // settles to 0 / shrinks the window to the mini base).
+        applyMonitorConfig();
+      });
     // If the menu window is open, re-position it for the new pet size.
     if (menuWindowOpen) {
       closeMenu();
@@ -2317,6 +2430,323 @@ function toggleMiniMode() {
 function updateMiniMenuCheck() {
   const item = document.getElementById('menu-mini-mode');
   if (item) item.classList.toggle('active', miniMode);
+}
+
+// ===== System Monitor Drawer (系统监控) =====
+// Live metrics drawer between the pet canvas and the status bar: CPU / 内存 /
+// 显卡 / 网络 / 自身占用. The drawer itself is the "大菜单" (toggle via the
+// 右键菜单's 系统监控 item); the pill strip at its bottom is the "小菜单"
+// controlling per-row visibility + the project list. While open, the window
+// grows upward (backend keeps the bottom edge anchored via resize_pet_window).
+
+// Sparkline samples kept per metric (~1 minute at the 1.5s sampling interval).
+const MONITOR_SPARK_POINTS = 40;
+// Mirrors config::WINDOW_HEIGHT in Rust — the base window height the extra
+// height is measured against.
+const MONITOR_BASE_HEIGHT = 520;
+
+let monitorCfg = null;
+const monitorSparkData = { cpu: [], ram: [], gpu: [], net: [] };
+
+const MONITOR_ROWS = [
+  { key: 'showCpu', rowId: 'monitor-cpu-row' },
+  { key: 'showRam', rowId: 'monitor-ram-row' },
+  { key: 'showGpu', rowId: 'monitor-gpu-row' },
+  { key: 'showNet', rowId: 'monitor-net-row' },
+  { key: 'showSelf', rowId: 'monitor-self-row' },
+];
+
+// Compact byte / rate formatting for the one-line monitor rows ("12.3G", "86M").
+function fmtC(b) {
+  if (b == null || isNaN(b)) return '—';
+  if (b >= 1024 ** 3) return (b / 1024 ** 3).toFixed(1) + 'G';
+  if (b >= 1024 ** 2) return Math.round(b / 1024 ** 2) + 'M';
+  if (b >= 1024) return Math.round(b / 1024) + 'K';
+  return b + 'B';
+}
+
+function fmtRateC(b) {
+  if (b == null || isNaN(b)) return '—';
+  if (b >= 1024 ** 2) return (b / 1024 ** 2).toFixed(1) + 'M';
+  if (b >= 1024) return Math.round(b / 1024) + 'K';
+  return b + 'B';
+}
+
+/**
+ * Initialize the monitor drawer: load the persisted config, apply visibility,
+ * subscribe to backend metric events, and bind header/pill interactions.
+ * Runs in the main pet window; the menu window only needs the ✓ state.
+ */
+async function initMonitorPanel() {
+  if (window.__MENU_MODE__) return;
+  try {
+    monitorCfg = window.petAPI && window.petAPI.getMonitorConfig
+      ? await window.petAPI.getMonitorConfig()
+      : null;
+  } catch (e) {
+    console.warn('[monitor] getMonitorConfig failed:', e && e.message);
+  }
+  if (!monitorCfg) return;
+
+  applyMonitorConfig();
+
+  // Live metrics pushed by the backend sampling thread (1.5s interval).
+  if (window.petAPI && window.petAPI.onSysMetrics) {
+    window.petAPI.onSysMetrics((snap) => updateMonitorMetrics(snap));
+  }
+
+  // Collapse / expand — only the title strip remains when collapsed.
+  document.getElementById('monitor-collapse').addEventListener('click', (e) => {
+    e.stopPropagation();
+    setMonitorCollapsed(!monitorCfg.collapsed);
+  });
+
+  // 恢复默认显示 — all rows + project list visible, expanded.
+  document.getElementById('monitor-reset').addEventListener('click', (e) => {
+    e.stopPropagation();
+    monitorCfg = {
+      ...monitorCfg,
+      collapsed: false,
+      showCpu: true,
+      showRam: true,
+      showGpu: true,
+      showNet: true,
+      showSelf: true,
+      showProjectList: true,
+    };
+    persistMonitorConfig();
+    applyMonitorConfig();
+  });
+}
+
+/**
+ * Apply the current monitorCfg to the DOM: panel/row visibility, collapse
+ * state, project-list hiding, then re-sync the window height.
+ */
+function applyMonitorConfig() {
+  const panel = document.getElementById('monitor-panel');
+  const statusBar = document.getElementById('status-bar');
+  if (!panel || !statusBar || !monitorCfg) return;
+
+  // Drawer visibility is independent of project list: hiding the project list
+  // only affects the status bar, not the monitor drawer.
+  const drawerVisible = monitorCfg.enabled && !miniMode;
+  panel.classList.toggle('hidden', !drawerVisible);
+  panel.classList.toggle('collapsed', !!monitorCfg.collapsed);
+  for (const r of MONITOR_ROWS) {
+    document.getElementById(r.rowId).classList.toggle('hidden', !monitorCfg[r.key]);
+  }
+
+  // Row hover tooltips carry the full names the icon-only design removed.
+  document.getElementById('monitor-cpu-row').dataset.tip =
+    'CPU · ' + i18n.t('monitor.cpuTip');
+  document.getElementById('monitor-ram-row').dataset.tip = i18n.t('monitor.ramTip');
+  document.getElementById('monitor-net-row').dataset.tip = i18n.t('monitor.netTip');
+  document.getElementById('monitor-self-row').dataset.tip = i18n.t('monitor.selfTip');
+  const gpuRow = document.getElementById('monitor-gpu-row');
+  if (gpuRow && !gpuRow.dataset.named) gpuRow.dataset.tip = i18n.t('monitor.gpuTip');
+
+  // Project list visibility is independent of the drawer's enabled state.
+  statusBar.classList.toggle('no-projects', !monitorCfg.showProjectList);
+
+  const collapseBtn = document.getElementById('monitor-collapse');
+  if (monitorCfg.collapsed) {
+    collapseBtn.textContent = '▸';
+    collapseBtn.title = i18n.t('monitor.expand');
+  } else {
+    collapseBtn.textContent = '▾';
+    collapseBtn.title = i18n.t('monitor.collapse');
+  }
+
+  updateMonitorMenuCheck();
+
+  // Gate the backend sampling thread: only sample while metrics are actually
+  // on screen (drawer open + expanded + at least one row visible + not mini).
+  const anyRow =
+    monitorCfg.showCpu || monitorCfg.showRam || monitorCfg.showGpu ||
+    monitorCfg.showNet || monitorCfg.showSelf;
+  const sampling = drawerVisible && !monitorCfg.collapsed && anyRow;
+  if (window.petAPI && window.petAPI.setMonitorSampling) {
+    window.petAPI.setMonitorSampling(sampling).catch(() => {});
+  }
+
+  syncMonitorHeight();
+}
+
+/**
+ * Build the 小菜单 pill strip (per-row + project-list visibility toggles).
+ */
+function renderMonitorPills() {
+  // Pills were replaced by the 右键菜单's 显示隐藏 submenu; kept as a no-op
+  // guard in case any stale call path remains.
+}
+
+/**
+ * Keep the pet window height in sync with the drawer state. The backend adds
+ * the extra height to the base window size and anchors the bottom edge.
+ * Called after every visibility change (drawer toggle, collapse, pills).
+ */
+function syncMonitorHeight() {
+  if (window.__MENU_MODE__ || !window.petAPI || !window.petAPI.resizePetWindow) return;
+  // Wait one frame so the DOM class toggles above are laid out before
+  // offsetHeight is read.
+  requestAnimationFrame(() => {
+    let extra = 0;
+    if (!miniMode && monitorCfg) {
+      const panel = document.getElementById('monitor-panel');
+      if (monitorCfg.enabled && !panel.classList.contains('hidden')) {
+        // Drawer open: grow the window by the panel height (+ its 4px margin).
+        extra += panel.offsetHeight + 4;
+      }
+      if (!monitorCfg.showProjectList) {
+        // Whole status bar hidden — shrink the window to the bare 260px
+        // canvas (no header/margin/border chrome left to compensate).
+        extra += -(MONITOR_BASE_HEIGHT - 260);
+      }
+    }
+    window.petAPI.resizePetWindow(extra).catch((e) => {
+      console.warn('[monitor] resize_pet_window failed:', e && e.message);
+    });
+  });
+}
+
+function setMonitorCollapsed(collapsed) {
+  if (!monitorCfg) return;
+  monitorCfg.collapsed = collapsed;
+  persistMonitorConfig();
+  applyMonitorConfig();
+}
+
+/**
+ * Toggle the whole drawer (右键菜单's 系统监控 item) and persist it. The
+ * backend gates the sampling thread on the enabled flag, so closing the
+ * drawer also stops the (small) sampling cost.
+ */
+function toggleMonitor() {
+  if (!monitorCfg) return;
+  monitorCfg.enabled = !monitorCfg.enabled;
+  persistMonitorConfig();
+  applyMonitorConfig();
+}
+
+function persistMonitorConfig() {
+  if (window.petAPI && window.petAPI.updateMonitorConfig && monitorCfg) {
+    window.petAPI.updateMonitorConfig(monitorCfg).catch((e) => {
+      console.warn('[monitor] updateMonitorConfig failed:', e && e.message);
+    });
+  }
+}
+
+/**
+ * Show/hide the ✓ on the 显示隐藏 submenu items (main + menu window share ids).
+ */
+function updateMonitorMenuCheck() {
+  if (!monitorCfg) return;
+  const items = [
+    ['menu-vis-monitor', 'enabled'],
+    ['menu-vis-cpu', 'showCpu'],
+    ['menu-vis-ram', 'showRam'],
+    ['menu-vis-gpu', 'showGpu'],
+    ['menu-vis-net', 'showNet'],
+    ['menu-vis-self', 'showSelf'],
+    ['menu-vis-projectlist', 'showProjectList'],
+  ];
+  for (const [id, key] of items) {
+    const item = document.getElementById(id);
+    if (item) item.classList.toggle('active', !!monitorCfg[key]);
+  }
+}
+
+/**
+ * Render one backend MetricsSnapshot into the compact one-line rows.
+ * Layout per row: [icon] value [sparkline] — colors match the row icons.
+ */
+function updateMonitorMetrics(s) {
+  if (!monitorCfg || !monitorCfg.enabled || window.__MENU_MODE__) return;
+
+  if (monitorCfg.showCpu) {
+    document.getElementById('monitor-cpu-value').textContent =
+      Math.round(s.cpuUsage) + '%';
+    pushSpark('cpu', s.cpuUsage);
+    drawSparkline('monitor-cpu-spark', monitorSparkData.cpu, 100, '#4fc3f7');
+  }
+
+  if (monitorCfg.showRam) {
+    document.getElementById('monitor-ram-value').textContent =
+      fmtC(s.memUsed) + '/' + fmtC(s.memTotal);
+    // Auto-scale: RAM moves in a narrow band, so a fixed 0-100% axis would
+    // render a flat line.
+    pushSpark('ram', s.memTotal ? (s.memUsed / s.memTotal) * 100 : 0);
+    drawSparkline('monitor-ram-spark', monitorSparkData.ram, null, '#81c784');
+  }
+
+  if (monitorCfg.showGpu) {
+    const value = document.getElementById('monitor-gpu-value');
+    const row = document.getElementById('monitor-gpu-row');
+    if (s.gpuUsage != null) {
+      const vram =
+        s.vramTotal && s.vramUsed != null
+          ? ' · ' + fmtC(s.vramUsed) + '/' + fmtC(s.vramTotal)
+          : '';
+      value.textContent = Math.round(s.gpuUsage) + '%' + vram;
+      // Full GPU model name lives on the row tooltip (was the sub-line).
+      row.dataset.named = '1';
+      row.dataset.tip =
+        (s.gpuName ? s.gpuName + ' — ' : '') + i18n.t('monitor.gpuTip');
+      pushSpark('gpu', s.gpuUsage);
+      drawSparkline('monitor-gpu-spark', monitorSparkData.gpu, 100, '#ba68c8');
+    } else {
+      // No NVIDIA driver / NVML — degrade to a hint instead of failing.
+      value.textContent = '—';
+      row.dataset.named = '1';
+      row.dataset.tip = i18n.t('monitor.notSupported');
+    }
+  }
+
+  if (monitorCfg.showNet) {
+    document.getElementById('monitor-net-value').textContent =
+      '↓' + fmtRateC(s.netRxRate) + ' ↑' + fmtRateC(s.netTxRate);
+    pushSpark('net', s.netRxRate + s.netTxRate);
+    drawSparkline('monitor-net-spark', monitorSparkData.net, null, '#4dd0e1'); // auto-scale
+  }
+
+  if (monitorCfg.showSelf) {
+    document.getElementById('monitor-self-value').textContent =
+      (s.selfCpu || 0).toFixed(1) + '% · ' + fmtC(s.selfMem);
+  }
+}
+
+function pushSpark(name, v) {
+  const arr = monitorSparkData[name];
+  arr.push(v);
+  if (arr.length > MONITOR_SPARK_POINTS) arr.shift();
+}
+
+/**
+ * Draw a compact sparkline polyline on a monitor canvas.
+ * fixedMax = null → auto-scale to the max of the current buffer (network).
+ */
+function drawSparkline(canvasId, data, fixedMax, color) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas || !data.length) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  const max = fixedMax != null ? fixedMax : Math.max(1, ...data);
+  ctx.clearRect(0, 0, w, h);
+  ctx.beginPath();
+  const step = data.length > 1 ? w / (MONITOR_SPARK_POINTS - 1) : 0;
+  // Right-align: newest sample at the right edge; the line grows leftward
+  // while the buffer is still filling up.
+  const x0 = w - (data.length - 1) * step;
+  for (let i = 0; i < data.length; i++) {
+    const x = x0 + i * step;
+    const y = h - 1 - (Math.min(data[i], max) / max) * (h - 2);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = color || 'rgba(79, 195, 247, 0.9)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
 }
 // ===== Fallback Canvas Animation =====
 function initFallbackCanvas() {
@@ -2421,16 +2851,19 @@ function setPetState(state) {
 function updateStateUI(state) {
   const stateText = document.getElementById('pet-state-text');
   const statusBar = document.getElementById('status-bar');
+  const monitorPanel = document.getElementById('monitor-panel');
   const canvasWrapper = document.getElementById('canvas-wrapper');
 
   // Remove old state classes
   stateText.className = '';
   statusBar.className = '';
+  if (monitorPanel) monitorPanel.className = monitorPanel.className.replace(/\bstate-\w+/g, '').trim();
   canvasWrapper.classList.remove('shake');
 
   // Add new state classes
   stateText.classList.add(`state-${state}`);
   statusBar.classList.add(`state-${state}`);
+  if (monitorPanel) monitorPanel.classList.add(`state-${state}`);
 
   stateText.textContent = getStateLabel(state);
 
@@ -2567,6 +3000,9 @@ function setupIPC() {
           }
         } catch (e) { /* cosmetic — best effort */ }
       }
+      // The backend dropped the (stale physical-px) drawer growth record on
+      // the DPI change — re-apply it from the current logical layout.
+      syncMonitorHeight();
     });
   }
 
@@ -2587,6 +3023,15 @@ function setupIPC() {
     switch (action) {
       case 'toggleFlip': toggleFlip(); break;
       case 'toggleMiniMode': toggleMiniMode(); break;
+      case 'toggleMonitor': toggleMonitor(); break;
+      case 'toggleMonitorVis':
+        // 显示隐藏 submenu row/list toggles relayed from the menu window.
+        if (monitorCfg && params && params.key) {
+          monitorCfg[params.key] = !monitorCfg[params.key];
+          persistMonitorConfig();
+          applyMonitorConfig();
+        }
+        break;
       case 'toggleAutoLaunch': toggleAutoLaunch(); break;
       case 'toggleExternalAccess': toggleExternalAccess(); break;
       case 'switchModel':
@@ -2602,6 +3047,9 @@ function setupIPC() {
       case 'switchLanguage':
         // Already persisted by the menu window; just re-apply translations.
         applyTranslations();
+        // Monitor pills are dynamically generated (no data-i18n) — rebuild
+        // them so the pill labels follow the new language.
+        if (monitorCfg) applyMonitorConfig();
         break;
       case 'playMotion':
         if (params) playMotionOnce(params.group, params.idx);
@@ -2668,6 +3116,11 @@ function flashWindowAttention() {
 // to toggle the menu on ☰ click (the main window's context-menu element is
 // always hidden now — the menu lives in its own Tauri window).
 let menuWindowOpen = false;
+// True while the menu window is being shown (positionMenu → showMenuWindow),
+// plus a short grace period after. Showing the menu window steals focus from
+// THIS window, which fires our blur handler — without this flag the blur
+// could race the invoke resolution and close the menu the instant it opens.
+let menuOpenTransition = false;
 // Menu width (210 CSS) plus a small gap — the horizontal space to grow.
 const MENU_SIDE_WIDTH = 300;
 
@@ -2730,11 +3183,17 @@ async function positionMenu() {
 
   // Show the menu window at the calculated position.
   if (window.petAPI && window.petAPI.showMenuWindow) {
+    menuOpenTransition = true;
     try {
       await window.petAPI.showMenuWindow(menuX, petY, menuW, menuH);
       menuWindowOpen = true;
     } catch (e) {
       console.warn('[menu] Failed to show menu window:', e && e.message);
+    } finally {
+      // Keep suppressing blur for a short grace period so the focus-handoff
+      // blur event (which may arrive after the invoke resolves) is ignored
+      // instead of closing the freshly opened menu.
+      setTimeout(() => { menuOpenTransition = false; }, 300);
     }
   }
 
@@ -2744,6 +3203,8 @@ async function positionMenu() {
     motions: currentMotionGroups,
     flipHorizontal: flipHorizontal,
     miniMode: miniMode,
+    monitorEnabled: !!(monitorCfg && monitorCfg.enabled),
+    monitorCfg: monitorCfg || null,
     hooksInstalled: hooksInstalled,
     hookStatusHint: (document.getElementById('hook-status-hint') || {}).textContent || '',
     currentState: currentState,
@@ -2799,7 +3260,7 @@ function fitMenuWindow() {
  * Show one of the three menu views (main / model / motion), hiding the others.
  */
 function showView(viewId) {
-  for (const id of ['menu-main-view', 'menu-model-view', 'menu-motion-view', 'menu-settings-view', 'menu-language-view', 'menu-char-edit-view']) {
+  for (const id of ['menu-main-view', 'menu-model-view', 'menu-motion-view', 'menu-settings-view', 'menu-language-view', 'menu-visibility-view', 'menu-char-edit-view']) {
     document.getElementById(id).classList.toggle('hidden', id !== viewId);
   }
   // Reset the inline character-creation input whenever switching views.
@@ -2863,9 +3324,12 @@ function setupContextMenu() {
   });
 
   // Window losing focus (user clicked another app) also closes the menu.
-  // Skip when a file picker is open (set by upload button handler).
+  // Skip when a file picker is open (set by upload button handler), and
+  // during the menu-open transition (the menu window stealing focus fires
+  // this blur — that must NOT close the freshly opened menu).
   window.addEventListener('blur', () => {
-    if (!window.__PICKING_FILE__) closeMenu();
+    if (window.__PICKING_FILE__ || menuOpenTransition) return;
+    closeMenu();
   });
 
   // Secondary menus: 切换形象 / 播放动作 / 动作设定  ->  pop out the list
@@ -2966,6 +3430,33 @@ function setupContextMenu() {
   document.getElementById('menu-mini-mode').addEventListener('click', () => {
     toggleMiniMode();
   });
+
+  // 显示隐藏 toggle (checkbox) — keep the menu open so the ✓ change is visible.
+  document.getElementById('menu-visibility-trigger').addEventListener('click', () => {
+    updateMonitorMenuCheck();
+    showView('menu-visibility-view');
+  });
+  document.getElementById('menu-visibility-back').addEventListener('click', () => {
+    showView('menu-main-view');
+  });
+  document.getElementById('menu-vis-monitor').addEventListener('click', () => {
+    toggleMonitor();
+  });
+  for (const [id, key] of [
+    ['menu-vis-cpu', 'showCpu'],
+    ['menu-vis-ram', 'showRam'],
+    ['menu-vis-gpu', 'showGpu'],
+    ['menu-vis-net', 'showNet'],
+    ['menu-vis-self', 'showSelf'],
+    ['menu-vis-projectlist', 'showProjectList'],
+  ]) {
+    document.getElementById(id).addEventListener('click', () => {
+      if (!monitorCfg) return;
+      monitorCfg[key] = !monitorCfg[key];
+      persistMonitorConfig();
+      applyMonitorConfig();
+    });
+  }
 
   // Menu actions
   document.getElementById('menu-install-hooks').addEventListener('click', async () => {
@@ -3303,6 +3794,17 @@ function setupDrag() {
     beginDrag(e);
   });
 
+  // Monitor drawer: the whole panel (rows + header) drags the window too;
+  // the header's ▾/↺ buttons stay clickable.
+  const monitorPanel = document.getElementById('monitor-panel');
+  if (monitorPanel) {
+    monitorPanel.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || edgeDocked) return;
+      if (e.target.closest('.monitor-header-btn')) return;
+      beginDrag(e);
+    });
+  }
+
   let dragPendingX = 0, dragPendingY = 0, dragRafId = null;
   let lastPreviewAt = 0;
   document.addEventListener('mousemove', (e) => {
@@ -3478,6 +3980,8 @@ function setupClickThrough() {
     }
     const sb = document.getElementById('status-bar');
     if (sb) rects.push(toPhys(sb.getBoundingClientRect()));
+    const mp = document.getElementById('monitor-panel');
+    if (mp && !mp.classList.contains('hidden')) rects.push(toPhys(mp.getBoundingClientRect()));
     const cm = document.getElementById('context-menu');
     if (cm && !cm.classList.contains('hidden')) rects.push(toPhys(cm.getBoundingClientRect()));
     return rects;

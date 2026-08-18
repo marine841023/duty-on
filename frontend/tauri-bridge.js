@@ -126,6 +126,17 @@
     getLanguage: () => invoke('get_language'),
     setLanguage: (lang) => invoke('set_language', { lang }),
 
+    // ===== System monitor drawer (CPU/RAM/GPU/NET/self) =====
+    getMonitorConfig: () => invoke('get_monitor_config'),
+    updateMonitorConfig: (config) => invoke('update_monitor_config', { config }),
+    // Runtime sampling gate (drawer closed/collapsed/mini → false). Does not
+    // touch the persisted config.
+    setMonitorSampling: (enabled) => invoke('set_monitor_sampling', { enabled }),
+    // Grow the pet window upward by extraHeight logical px (bottom anchored).
+    resizePetWindow: (extraHeight) => invoke('resize_pet_window', { extraHeight }),
+    // Live metrics pushed by the backend sampling thread (1.5s interval).
+    onSysMetrics: (cb) => on('sys-metrics', cb),
+
     // ===== Auto-launch =====
     getAutoLaunch: () => invoke('get_auto_launch'),
     setAutoLaunch: (enabled) => invoke('set_auto_launch', { enabled }),

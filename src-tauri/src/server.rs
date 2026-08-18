@@ -289,10 +289,15 @@ async fn hook(
         "?"
     };
     log::info!(
-        "[PetServer] event: {} | session={} | project={}",
+        "[PetServer] event: {} | session={} | project={}{}",
         event.hook_event_name,
         event.session_id,
-        project_label
+        project_label,
+        event
+            .tool_name
+            .as_deref()
+            .map(|t| format!(" | tool={}", t))
+            .unwrap_or_default()
     );
     if event.hook_event_name == "Notification" {
         log::info!(

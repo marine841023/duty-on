@@ -52,6 +52,42 @@ pub struct UserConfig {
     /// character ID (e.g. "char_xxx"). When null, defaults to first built-in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_character_id: Option<String>,
+    /// Monitor drawer (system metrics panel above the status bar).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<MonitorConfig>,
+}
+
+/// Monitor drawer configuration: master switch, collapse state, per-metric
+/// visibility, and the status-bar project list visibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorConfig {
+    /// Master switch: the drawer is shown at all.
+    pub enabled: bool,
+    /// Drawer reduced to its title strip.
+    pub collapsed: bool,
+    pub show_cpu: bool,
+    pub show_ram: bool,
+    pub show_gpu: bool,
+    pub show_net: bool,
+    pub show_self: bool,
+    /// Status-bar project list visibility.
+    pub show_project_list: bool,
+}
+
+impl Default for MonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            collapsed: false,
+            show_cpu: true,
+            show_ram: true,
+            show_gpu: true,
+            show_net: true,
+            show_self: true,
+            show_project_list: true,
+        }
+    }
 }
 
 /// A user-created character with per-state animation files.

@@ -9,6 +9,7 @@ mod ide_scanner;
 mod models;
 mod server;
 mod state_manager;
+mod sys_monitor;
 mod user_config;
 
 use crate::state_manager::{current_millis, SharedStateManager, StateManager};
@@ -83,6 +84,10 @@ pub fn run() {
             commands::show_menu_window,
             commands::hide_menu_window,
             commands::resize_menu_window,
+            commands::get_monitor_config,
+            commands::update_monitor_config,
+            commands::set_monitor_sampling,
+            commands::resize_pet_window,
             commands::update_click_regions,
             commands::set_force_clickable,
             commands::bring_to_front,
@@ -101,6 +106,13 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+/// Browser args shared by every WebView2 window. The first two --disable-features
+/// entries are wry's defaults (must be repeated when overriding additional args);
+/// --process-per-site makes all same-origin windows (main / menu / dock-preview)
+/// share ONE renderer process instead of one per window — saves ~50-100 MB of
+/// private memory, which is most of the app's controllable footprint.
+const WEBVIEW_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --process-per-site";
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // ----- State manager -----
@@ -152,6 +164,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .visible(false)
         .inner_size(260.0, 520.0)
         .data_directory(webview_data_dir.clone())
+        .additional_browser_args(WEBVIEW_ARGS)
         .build()?;
     position_window(app, &window)?;
     let _ = window.set_always_on_top(true);
@@ -170,6 +183,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .visible(false)
         .inner_size(config::EDGE_DOCK_THICKNESS as f64, 200.0)
         .data_directory(webview_data_dir.clone())
+        .additional_browser_args(WEBVIEW_ARGS)
         .build()?;
     let _ = preview.set_ignore_cursor_events(true);
 
@@ -197,6 +211,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     .inner_size(230.0, 500.0)
     .initialization_script("window.__MENU_MODE__ = true;")
     .data_directory(webview_data_dir.clone())
+    .additional_browser_args(WEBVIEW_ARGS)
     .build()?;
 
     // Hide the menu window when it loses focus (user clicks elsewhere,
@@ -262,8 +277,26 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let now = current_millis();
             if now.saturating_sub(last_save_clone.load(Ordering::SeqCst)) >= 500 {
                 last_save_clone.store(now, Ordering::SeqCst);
+                // While the monitor drawer is open the window is grown upward
+                // by PET_WINDOW_EXTRA_HEIGHT — persist the BASE top position
+                // (as if the drawer were closed) so a restart + re-grow lands
+                // exactly where the user left the bottom edge. While the
+                // project list is hidden (negative extra) the window is
+                // TOP-anchored instead, so its top edge already IS the
+                // anchor position — persist it unchanged (the renderer's
+                // startup shrink is top-anchored too, landing the character
+                // exactly where the user left it).
+                let extra = commands::PET_WINDOW_EXTRA_HEIGHT.load(Ordering::SeqCst);
+                let extra_phys = if extra < 0 {
+                    0
+                } else {
+                    (extra as f64 * win_scale.scale_factor().unwrap_or(1.0)).round() as i32
+                };
                 user_config::update(|c| {
-                    c.window_position = Some(WindowPosition { x: pos.x, y: pos.y });
+                    c.window_position = Some(WindowPosition {
+                        x: pos.x,
+                        y: pos.y + extra_phys,
+                    });
                 });
             }
         }
@@ -279,8 +312,17 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             new_inner_size,
             ..
         } => {
-            *menu_space.grow.lock().unwrap() = None;
+            // unwrap_or_else(into_inner): a poisoned mutex (an earlier panic
+            // while locked) must not cascade into another panic here.
+            *menu_space
+                .grow
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
             menu_space.active.store(false, Ordering::SeqCst);
+            // Drop the monitor drawer growth too (recorded in physical px —
+            // stale after the scale change); the renderer re-applies it on
+            // the display-changed event.
+            commands::PET_WINDOW_EXTRA_HEIGHT.store(0, Ordering::SeqCst);
 
             let mini = user_config::load().mini_mode.unwrap_or(false);
             let (lw, lh) = if mini {
@@ -347,6 +389,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // ----- IDE window scanner (adaptive interval) -----
     spawn_ide_scanner(sm.clone());
+
+    // ----- System monitor sampler (CPU/RAM/GPU/NET/self, 1.5s tick) -----
+    // The thread sleeps at zero cost while the monitor drawer is closed.
+    let mon_cfg = user_config::load().monitor.unwrap_or_default();
+    sys_monitor::MONITOR_ACTIVE.store(mon_cfg.enabled, Ordering::SeqCst);
+    sys_monitor::spawn(app.handle().clone());
 
     // ----- System tray -----
     // The pet window is skipTaskbar + frameless + transparent, so users may

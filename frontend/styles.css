@@ -60,7 +60,9 @@ body.menu-window #context-menu {
 /* ===== Pet Container ===== */
 #pet-container {
   width: 260px;
-  height: 520px;
+  /* Follows the window height (grown upward by resize_pet_window while the
+     monitor drawer is open) instead of a fixed 520px. */
+  height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -230,6 +232,158 @@ body.menu-window #context-menu {
 @keyframes head-alert-bounce {
   0%   { transform: translate(-50%, 0) scale(1); }
   100% { transform: translate(-50%, -8px) scale(1.15); }
+}
+
+/* ===== System Monitor Drawer (大菜单) ===== */
+#monitor-panel {
+  width: 240px;
+  margin-top: 4px;
+  flex-shrink: 0;
+  background: rgba(30, 30, 40, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+/* State-specific monitor panel glow (matches status-bar) */
+#monitor-panel.state-sleeping {
+  border-color: rgba(100, 150, 255, 0.2);
+  box-shadow: 0 4px 20px rgba(100, 150, 255, 0.1);
+}
+
+#monitor-panel.state-working {
+  border-color: rgba(255, 200, 50, 0.3);
+  box-shadow: 0 4px 20px rgba(255, 200, 50, 0.15);
+}
+
+#monitor-panel.state-alert {
+  border-color: rgba(255, 68, 68, 0.4);
+  box-shadow: 0 4px 24px rgba(255, 68, 68, 0.25);
+  animation: alert-pulse 1s ease-in-out infinite alternate;
+}
+
+#monitor-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: default;
+}
+
+#monitor-title {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 10px;
+  font-weight: 600;
+  flex: 1;
+}
+
+.monitor-header-btn {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 1px 5px;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+  line-height: 1;
+}
+
+.monitor-header-btn:hover {
+  color: rgba(255, 255, 255, 1);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* Collapsed state: only the title strip remains. */
+#monitor-panel.collapsed #monitor-items,
+#monitor-panel.collapsed #monitor-pills {
+  display: none;
+}
+
+/* Hidden states: 系统监控 off (or project list hidden, which collapses the
+   whole drawer) hides the panel; per-row toggles hide individual rows. */
+#monitor-panel.hidden,
+.monitor-row.hidden {
+  display: none;
+}
+
+/* Mini mode has no room for the drawer — the window shrinks to the mini base
+   (syncMonitorHeight reports extra=0 while miniMode is on). */
+body.mini #monitor-panel {
+  display: none;
+}
+
+/* 极简单行: [彩色图标][数值][趋势线] —— 无文字标签，颜色+悬停提示区分指标 */
+.monitor-row {
+  position: relative; /* anchor for the data-tip tooltip */
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  cursor: move; /* the rows double as window drag handles */
+}
+
+.monitor-row + .monitor-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+/* 悬停说明 tooltip: 指标全名 + 说明（替代被去掉的文字标签） */
+.monitor-row[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 8px;
+  bottom: calc(100% + 3px);
+  background: rgba(18, 18, 26, 0.96);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 10px;
+  font-weight: 400;
+  font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* 紧凑行: [彩色短标签][数值][趋势线] —— 标签与数值对齐，悬停提示给完整说明 */
+.m-txt {
+  font-size: 10px;
+  font-weight: 600;
+  min-width: 28px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.txt-cpu { color: #4fc3f7; }
+.txt-ram { color: #81c784; }
+.txt-gpu { color: #ba68c8; }
+.txt-net { color: #4dd0e1; }
+.txt-self { color: #ffb74d; }
+
+.monitor-value {
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.monitor-spark {
+  flex: 1;
+  min-width: 0;
+  height: 12px;
+}
+
+/* 项目列表隐藏时整个状态栏（"忙碌中"标题行 + 列表）都收起，只留 Live2D 形象 */
+#status-bar.no-projects {
+  display: none;
 }
 
 /* ===== Status Bar ===== */
@@ -570,6 +724,7 @@ body.menu-window #context-menu {
 #menu-motion-view.hidden,
 #menu-settings-view.hidden,
 #menu-language-view.hidden,
+#menu-visibility-view.hidden,
 #menu-char-edit-view.hidden {
   display: none;
 }
@@ -642,6 +797,7 @@ body.menu-window #context-menu {
 /* 动作设定 view slides in like the motion submenu. */
 #menu-settings-view:not(.hidden),
 #menu-language-view:not(.hidden),
+#menu-visibility-view:not(.hidden),
 #menu-model-view:not(.hidden),
 #menu-char-edit-view:not(.hidden) {
   animation: submenu-slide-in 0.18s ease-out;
@@ -859,7 +1015,7 @@ body.menu-window #context-menu {
 }
 
 /* ===== Mini mode (130×280 window, canvas 120×130, status bar ~150px) ===== */
-body.mini #pet-container { width: 130px; height: 280px; }
+body.mini #pet-container { width: 130px; height: 100%; }
 body.mini #canvas-wrapper { width: 120px; height: 130px; }
 
 /* Status bar at half width (下方的操作框长度减半). */

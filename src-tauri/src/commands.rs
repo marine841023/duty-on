@@ -259,6 +259,101 @@ pub fn set_mini_mode(window: tauri::Window, enabled: bool) -> Result<(), String>
     Ok(())
 }
 
+// ===== System monitor (monitor drawer above the status bar) =====
+
+/// Current monitor-drawer extra height of the pet window (logical px), set by
+/// resize_pet_window. Positive = drawer open (window grown upward); negative =
+/// project list hidden (window shrunk below the base height). The lib.rs
+/// Moved handler uses it to persist the BASE position (as if the drawer were
+/// closed) — otherwise quitting with the drawer open would restore the window
+/// floating above where the user left it, and re-growing on the next launch
+/// would push it further off-screen.
+pub static PET_WINDOW_EXTRA_HEIGHT: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(0);
+
+/// Fetch the persisted monitor drawer configuration (defaults filled in).
+#[tauri::command]
+pub fn get_monitor_config() -> user_config::MonitorConfig {
+    user_config::load().monitor.unwrap_or_default()
+}
+
+/// Persist the full monitor config and sync the sampler's active flag so the
+/// sampling thread sleeps while the drawer is closed.
+#[tauri::command]
+pub fn update_monitor_config(
+    config: user_config::MonitorConfig,
+) -> Result<(), String> {
+    crate::sys_monitor::MONITOR_ACTIVE.store(config.enabled, std::sync::atomic::Ordering::SeqCst);
+    user_config::update(|cfg| cfg.monitor = Some(config));
+    Ok(())
+}
+
+/// Runtime sampling gate, driven by what is actually on screen: the frontend
+/// pauses sampling while the drawer is closed/collapsed/mini or every row is
+/// hidden, without touching the persisted config. update_monitor_config
+/// re-arms sampling from the persisted enabled flag when the config changes.
+#[tauri::command]
+pub fn set_monitor_sampling(enabled: bool) {
+    crate::sys_monitor::MONITOR_ACTIVE.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Grow (positive) or shrink (negative) the pet window by `extra_height`
+/// logical px. The monitor drawer grows the window upward; hiding the
+/// project list shrinks it below the base height.
+///
+/// Anchor selection keeps the character (top-aligned canvas) visually
+/// stable: at/above base height the BOTTOM edge stays fixed (drawer grows
+/// upward, matching the persisted base position). Below base height —
+/// shrinking there (project list hidden) or returning from it (re-shown) —
+/// the TOP edge stays fixed so the lower UI collapses downward instead of
+/// dragging the character down the screen.
+#[tauri::command]
+pub fn resize_pet_window(window: tauri::Window, extra_height: f64) -> Result<(), String> {
+    let mini = user_config::load().mini_mode.unwrap_or(false);
+    let (w, base_h) = if mini {
+        (
+            config::MINI_WINDOW_WIDTH as f64,
+            config::MINI_WINDOW_HEIGHT as f64,
+        )
+    } else {
+        (config::WINDOW_WIDTH as f64, config::WINDOW_HEIGHT as f64)
+    };
+    // Floor at the bare canvas height: hiding the project list leaves only
+    // the Live2D character (canvas = 260px), with no lower UI to keep.
+    let new_h = (base_h + extra_height).max(config::PET_CANVAS_HEIGHT as f64);
+    let extra = new_h - base_h;
+    PET_WINDOW_EXTRA_HEIGHT.store(extra.round() as i32, std::sync::atomic::Ordering::SeqCst);
+    let factor = window.scale_factor().unwrap_or(1.0);
+    let cur_below_base = window
+        .outer_size()
+        .ok()
+        .map(|s| (s.height as f64 / factor) < base_h - 0.5)
+        .unwrap_or(false);
+    let top_anchored = extra < 0.0 || cur_below_base;
+    let anchor = window
+        .outer_position()
+        .ok()
+        .zip(window.outer_size().ok())
+        .map(|(pos, size)| {
+            let new_h_phys = new_h * factor;
+            let y = if top_anchored {
+                pos.y
+            } else {
+                (pos.y as f64 + (size.height as f64 - new_h_phys)).round() as i32
+            };
+            (pos.x, y)
+        });
+    window
+        .set_size(tauri::Size::Logical(tauri::LogicalSize::new(w, new_h)))
+        .map_err(|e| e.to_string())?;
+    if let Some((x, y)) = anchor {
+        let _ = window.set_position(tauri::Position::Physical(
+            tauri::PhysicalPosition::new(x, y),
+        ));
+    }
+    Ok(())
+}
+
 // ===== Custom characters =====
 
 const ANIMATION_EXTS: &[&str] = &["gif", "png", "jpg", "jpeg", "webp", "mp4", "webm", "mov"];
@@ -266,7 +361,7 @@ const ANIMATION_EXTS: &[&str] = &["gif", "png", "jpg", "jpeg", "webp", "mp4", "w
 /// Max edge length (px) for uploaded animation images. Source images larger
 /// than this are downscaled (preserving aspect ratio) so giant GIFs don't
 /// bloat ~/.dutyon/animations/ or stall the renderer. Videos are not resized.
-/// 512px keeps GIFs crisp on 2x-DPI screens (the Live2D canvas renders at
+/// 1024px leaves headroom for high-DPI screens (the Live2D canvas renders at
 /// resolution>=2, so a 240px logical display needs ~480px backing pixels).
 const MAX_ANIM_DIM: u32 = 1024;
 
@@ -394,11 +489,25 @@ fn scaled_dims(w: u32, h: u32) -> (u32, u32) {
     (nw.max(1), nh.max(1))
 }
 
-fn now_millis() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
+/// Validate a custom-character id (defense against path traversal — the id
+/// is interpolated into animation filenames). Shared by every character
+/// command so the validation rules can't drift apart.
+fn validate_char_id(id: &str) -> Result<(), String> {
+    if !id.starts_with("char_") || id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(format!("Invalid character id '{}'", id));
+    }
+    Ok(())
+}
+
+/// Validate a state name used in animation filenames.
+fn validate_char_state(state: &str) -> Result<(), String> {
+    if !matches!(state, "sleeping" | "working" | "alert") {
+        return Err(format!(
+            "Invalid state '{}': must be sleeping/working/alert",
+            state
+        ));
+    }
+    Ok(())
 }
 
 /// Return all characters: built-in Live2D models + user-created animation
@@ -479,7 +588,16 @@ pub fn get_characters() -> Result<Value, String> {
 /// Create a new custom character with the given name.
 #[tauri::command]
 pub fn create_character(name: String) -> Result<Value, String> {
-    let id = format!("char_{}", now_millis());
+    // Nanosecond timestamp: a millisecond value could collide when two
+    // characters are created in the same millisecond (duplicate ids →
+    // duplicated config entries and shared animation files).
+    let id = format!(
+        "char_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
     user_config::update(|cfg| {
         let list = cfg.custom_characters.get_or_insert_with(Vec::new);
         list.push(user_config::CustomCharacter {
@@ -495,6 +613,9 @@ pub fn create_character(name: String) -> Result<Value, String> {
 /// Delete a custom character and its animation files.
 #[tauri::command]
 pub fn delete_character(id: String) -> Result<(), String> {
+    // Same traversal guard as pick_character_animation — the id builds the
+    // filename prefix used for deletion below.
+    validate_char_id(&id)?;
     user_config::update(|cfg| {
         if let Some(list) = &mut cfg.custom_characters {
             list.retain(|c| c.id != id);
@@ -657,12 +778,8 @@ pub async fn pick_character_animation(
 
     // Security: validate id and state BEFORE opening the file picker or
     // touching the filesystem. Prevents path traversal via crafted id/state.
-    if !matches!(state.as_str(), "sleeping" | "working" | "alert") {
-        return Err(format!("Invalid state '{}': must be sleeping/working/alert", state));
-    }
-    if !id.starts_with("char_") || id.contains('/') || id.contains('\\') || id.contains("..") {
-        return Err(format!("Invalid character id '{}'", id));
-    }
+    validate_char_state(&state)?;
+    validate_char_id(&id)?;
 
     // Set flag so menu window blur handler doesn't hide the menu while
     // the native file picker dialog is open (it steals window focus).
@@ -699,7 +816,39 @@ pub async fn pick_character_animation(
     let dest_filename = format!("{}_{}.{}", id, state, ext);
     let dest = dir.join(&dest_filename);
 
-    // Remove old files for this character+state (different extensions)
+    // Write to a temp file first, then rename into place — a failed or
+    // interrupted re-encode (GIF with too many frames, oversized frame,
+    // disk full) must never leave a truncated animation behind, and the
+    // previous file must survive until the new one is fully written.
+    // The ".tmp" suffix still matches the cleanup prefix below, so a stale
+    // temp file from a crashed upload is removed on the next upload.
+    let tmp = dir.join(format!("{}.tmp", dest_filename));
+
+    // Re-encoding a large GIF is CPU-heavy (up to seconds for 500 frames)
+    // — run it on a blocking thread so the async runtime's workers (state
+    // broadcasts, hook events) stay responsive.
+    let src = source.clone();
+    let tmp_for_task = tmp.clone();
+    let resized =
+        tokio::task::spawn_blocking(move || resize_or_copy_animation(&src, &tmp_for_task))
+            .await
+            .map_err(|e| format!("Animation processing task failed: {}", e))?;
+    if let Err(e) = resized {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // Atomic replace (same directory → same volume). WebView2 may hold the
+    // old file open without FILE_SHARE_DELETE, which makes rename-over fail
+    // on Windows — fall back to unlink + rename in that case.
+    if std::fs::rename(&tmp, &dest).is_err() {
+        let _ = std::fs::remove_file(&dest);
+        std::fs::rename(&tmp, &dest)
+            .map_err(|e| format!("Failed to move uploaded animation into place: {}", e))?;
+    }
+
+    // The new animation is safely in place — NOW remove old files for this
+    // character+state with different extensions (and any stale temp files).
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
@@ -709,9 +858,6 @@ pub async fn pick_character_animation(
             }
         }
     }
-
-    // Copy + auto-resize images/GIFs to MAX_ANIM_DIM; videos pass through.
-    resize_or_copy_animation(&source, &dest)?;
 
     user_config::update(|cfg| {
         if let Some(list) = &mut cfg.custom_characters {
@@ -733,6 +879,10 @@ pub async fn pick_character_animation(
 /// Clear a character's animation for a specific state.
 #[tauri::command]
 pub fn clear_character_animation(id: String, state: String) -> Result<(), String> {
+    // Same traversal guards as pick_character_animation — both values are
+    // interpolated into the filename prefix used for deletion below.
+    validate_char_id(&id)?;
+    validate_char_state(&state)?;
     user_config::update(|cfg| {
         if let Some(list) = &mut cfg.custom_characters {
             if let Some(c) = list.iter_mut().find(|c| c.id == id) {

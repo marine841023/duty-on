@@ -44,6 +44,13 @@ pub const SESSION_TIMEOUT: u64 = 10 * 60 * 1000; // 10 min: session removed if s
 pub const ALERT_REMINDER: u64 = 60 * 1000; // 1 min: re-alert interval while in alert
 pub const CLEANUP_INTERVAL_MS: u64 = 30 * 1000; // cleanup timer tick
 
+// ===== System monitor =====
+/// Metrics sampling interval for the monitor drawer (CPU/RAM/GPU/NET/self).
+/// 1.5s: well above sysinfo's MINIMUM_CPU_UPDATE_INTERVAL (200ms) so CPU
+/// percentages are meaningful, and cheap enough to keep the total sampling
+/// cost under ~0.5% CPU.
+pub const MONITOR_INTERVAL_MS: u64 = 1500;
+
 // ===== Hook bridge =====
 pub const BRIDGE_TIMEOUT_SEC: u64 = 5;
 // Events wired into ~/.trae-cn/hooks.json (keep in sync with install-hooks logic).
@@ -155,6 +162,35 @@ pub const ASK_USER_TOOLS: &[&str] = &[
     "AskQuestion",
     "ask_question",
     "askQuestion",
+];
+
+// Tools that always require an explicit approval click in the IDE (the
+// "运行/Run" button on computer-use cards) before they execute. Claude-style
+// hooks fire PreToolUse when the approval card APPEARS — i.e. while the agent
+// is blocked waiting for the user — so a PreToolUse naming one of these tools
+// means confirmation-needed, not tool-use. The matching PostToolUse (after
+// the user clicked Run and the tool finished) returns the session to Thinking.
+// Exact-match (case variants enumerated) to avoid false positives on benign
+// tools whose names merely CONTAIN these words.
+pub const CONFIRM_TOOLS: &[&str] = &[
+    // computer use family
+    "computer_use",
+    "computer-use",
+    "computerUse",
+    "ComputerUse",
+    "COMPUTER_USE",
+    "use_computer",
+    "useComputer",
+    "UseComputer",
+    "computer",
+    "Computer",
+    // browser/desktop automation family
+    "browser_use",
+    "browser-use",
+    "browserUse",
+    "BrowserUse",
+    "browser",
+    "Browser",
 ];
 
 // ===== Notification classification =====

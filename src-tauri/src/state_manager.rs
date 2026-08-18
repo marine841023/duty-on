@@ -259,6 +259,15 @@ impl StateManager {
                     // (Qoder has no Notification event for this).
                     session.status = SessionStatus::ConfirmationNeeded;
                     session.alert_message = Some(Self::extract_alert_message(event));
+                } else if Self::is_confirm_tool(event) {
+                    // Computer-use style tools always need an explicit Run
+                    // click in the IDE. Claude-style hooks fire PreToolUse
+                    // when the approval card appears, so this moment IS the
+                    // "waiting for the user" state — alert instead of
+                    // showing plain tool-use. PostToolUse (tool finished
+                    // after the click) returns to Thinking.
+                    session.status = SessionStatus::ConfirmationNeeded;
+                    session.alert_message = Some(Self::extract_alert_message(event));
                 } else {
                     // AI is about to use a tool — clears alert, marks tool-use.
                     session.status = SessionStatus::ToolUse;
@@ -272,17 +281,22 @@ impl StateManager {
                     session.alert_message = None;
                 } else if matches!(
                     session.status,
-                    SessionStatus::ToolUse | SessionStatus::Working | SessionStatus::Thinking
+                    SessionStatus::ToolUse
+                        | SessionStatus::Working
+                        | SessionStatus::Thinking
+                        | SessionStatus::ConfirmationNeeded
                 ) {
                     // Tool finished — AI is back to thinking (may call more
-                    // tools). This is the key refinement over the old flat
-                    // Working state: a returned tool result means "pondering",
-                    // not "still running the tool".
+                    // tools). This includes ConfirmationNeeded: a completed
+                    // tool means the user ALREADY approved it (or answered a
+                    // pending ask whose PostToolUse carries no tool_name), so
+                    // keeping the alert would ring forever while the agent
+                    // streams its "thinking" output with no further events.
                     session.status = SessionStatus::Thinking;
+                    session.alert_message = None;
                 }
                 // If Idle (e.g. after a Stop from manual abort), a
-                // stray delayed PostToolUse must NOT revive the session. If
-                // ConfirmationNeeded, keep waiting for the user's answer.
+                // stray delayed PostToolUse must NOT revive the session.
             }
             "Notification" => {
                 // Notification fires when:
@@ -363,6 +377,17 @@ impl StateManager {
             .tool_name
             .as_deref()
             .map(|t| config::ASK_USER_TOOLS.contains(&t))
+            .unwrap_or(false)
+    }
+
+    /// True when the event's tool always requires an explicit approval click
+    /// in the IDE (computer use's 运行 button) before it executes. See
+    /// config::CONFIRM_TOOLS.
+    fn is_confirm_tool(event: &HookEvent) -> bool {
+        event
+            .tool_name
+            .as_deref()
+            .map(|t| config::CONFIRM_TOOLS.contains(&t))
             .unwrap_or(false)
     }
 
@@ -975,6 +1000,53 @@ mod tests {
             sm.handle_hook_event(&e);
             assert_eq!(sm.overall_state, PetState::Alert, "tool={tool}");
         }
+    }
+
+    #[test]
+    fn pre_tool_use_computer_use_triggers_alert() {
+        // Computer-use tools show an approval card (运行 button) in the IDE;
+        // PreToolUse fires while the agent waits for that click → alert.
+        for tool in ["computer_use", "ComputerUse", "computer", "browser_use"] {
+            let (mut sm, _t) = make_manager();
+            sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+            let mut e = event("s1", "PreToolUse");
+            e.tool_name = Some(tool.to_string());
+            sm.handle_hook_event(&e);
+            assert_eq!(sm.overall_state, PetState::Alert, "tool={tool}");
+        }
+    }
+
+    #[test]
+    fn post_tool_use_computer_use_clears_alert() {
+        // After the user clicks 运行 and the tool finishes, PostToolUse must
+        // return the session to thinking — the alert must NOT stick.
+        let (mut sm, _t) = make_manager();
+        sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+        let mut e = event("s1", "PreToolUse");
+        e.tool_name = Some("computer_use".to_string());
+        sm.handle_hook_event(&e);
+        assert_eq!(sm.overall_state, PetState::Alert);
+        let mut e2 = event("s1", "PostToolUse");
+        e2.tool_name = Some("computer_use".to_string());
+        sm.handle_hook_event(&e2);
+        assert_eq!(sm.overall_state, PetState::Working);
+    }
+
+    #[test]
+    fn post_tool_use_without_tool_name_clears_confirmation() {
+        // Trae's PostToolUse payload sometimes omits tool_name. A completed
+        // tool while ConfirmationNeeded means the user already approved /
+        // answered — the alert must clear (this was the stuck-alert bug:
+        // project visibly back to "thinking" but the pet kept ringing).
+        let (mut sm, _t) = make_manager();
+        sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+        let mut e = event("s1", "PreToolUse");
+        e.tool_name = Some("AskUserQuestion".to_string());
+        sm.handle_hook_event(&e);
+        assert_eq!(sm.overall_state, PetState::Alert);
+        // PostToolUse with NO tool_name → must still clear.
+        sm.handle_hook_event(&event("s1", "PostToolUse"));
+        assert_eq!(sm.overall_state, PetState::Working);
     }
 
     #[test]
