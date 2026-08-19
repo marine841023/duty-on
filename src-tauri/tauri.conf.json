@@ -32,9 +32,6 @@
         "installMode": "currentUser",
         "languages": ["SimpChinese", "TradChinese", "English", "Japanese", "Korean"],
         "displayLanguageSelector": true
-      },
-      "webviewInstallMode": {
-        "type": "downloadBootstrapper"
       }
     },
     "macOS": {

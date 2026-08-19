@@ -197,6 +197,7 @@ fn build_router(state: SharedStateManager) -> Router {
     let api = Router::new()
         .route("/api/status", get(status))
         .route("/api/events", get(api_events))
+        .route("/api/metrics", get(api_metrics))
         .route("/api/sounds/:state", get(serve_sound_file))
         .route("/health", get(health))
         .layer(api_cors);
@@ -333,6 +334,24 @@ async fn status(State(state): State<SharedStateManager>) -> Response {
 
 async fn health() -> Response {
     ok_json(&json!({ "status": "ok", "port": config::PORT }))
+}
+
+/// GET /api/metrics — latest system-metrics sample for native (non-WebView)
+/// frontends: the 2.0 C++ desktop pet and ARM device clients. Unlike the
+/// Tauri `sys-metrics` event, this is plain read-only HTTP and needs no
+/// event subscription.
+///
+/// Polling this endpoint implicitly activates the sampler (`MONITOR_ACTIVE`)
+/// — a client asking for metrics obviously wants them — so the first call
+/// after app start may 503 for one sampling interval (~1.5s) until the
+/// loop produces its first snapshot.
+async fn api_metrics() -> Response {
+    use std::sync::atomic::Ordering;
+    crate::sys_monitor::MONITOR_ACTIVE.store(true, Ordering::SeqCst);
+    match crate::sys_monitor::LATEST_METRICS.read().unwrap().as_ref() {
+        Some(m) => ok_json(&**m),
+        None => (StatusCode::SERVICE_UNAVAILABLE, "metrics not ready yet").into_response(),
+    }
 }
 
 /// GET /live2d/*path — serve user-provided Live2D model files from

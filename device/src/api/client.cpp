@@ -40,4 +40,34 @@ std::optional<PetStatus> ApiClient::poll() {
     }
 }
 
+std::optional<SysMetrics> ApiClient::pollMetrics() {
+    cpr::Session session;
+    session.SetUrl(cpr::Url{base_url_ + "/api/metrics"});
+    session.SetTimeout(cpr::Timeout{2000});
+    auto r = session.Get();
+    if (r.status_code != 200) return std::nullopt;
+
+    try {
+        auto j = nlohmann::json::parse(r.text);
+        SysMetrics m;
+        m.cpu_usage = j.value("cpuUsage", 0.0f);
+        m.mem_total = j.value("memTotal", 0ULL);
+        m.mem_used = j.value("memUsed", 0ULL);
+        if (!j["gpuUsage"].is_null()) {
+            m.has_gpu = true;
+            m.gpu_usage = j.value("gpuUsage", 0.0f);
+            m.gpu_name = j.value("gpuName", std::string{});
+            m.vram_total = j.value("vramTotal", 0ULL);
+            m.vram_used = j.value("vramUsed", 0ULL);
+        }
+        m.net_rx_rate = j.value("netRxRate", 0ULL);
+        m.net_tx_rate = j.value("netTxRate", 0ULL);
+        m.self_cpu = j.value("selfCpu", 0.0f);
+        m.self_mem = j.value("selfMem", 0ULL);
+        return m;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 } // namespace dutyon

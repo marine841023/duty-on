@@ -11,6 +11,7 @@
 use crate::config;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use sysinfo::{Networks, System};
 use tauri::Emitter;
@@ -18,6 +19,11 @@ use tauri::Emitter;
 /// Master switch: true while the monitor drawer is enabled. When false the
 /// sampling loop skips all work (pure sleep).
 pub static MONITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Latest sample, shared with the HTTP `/api/metrics` endpoint so native
+/// (non-WebView) frontends — the 2.0 C++ desktop pet and the ARM device
+/// client — can poll metrics without a Tauri event subscription.
+pub static LATEST_METRICS: RwLock<Option<Arc<MetricsSnapshot>>> = RwLock::new(None);
 
 /// One sample. Byte counts are raw bytes; rates are bytes/sec. GPU fields
 /// are None when no NVIDIA driver is available — the frontend shows "—".
@@ -180,6 +186,8 @@ fn run_loop(app: tauri::AppHandle) {
             self_cpu,
             self_mem,
         };
-        let _ = app.emit("sys-metrics", snapshot);
+        let snapshot = Arc::new(snapshot);
+        *LATEST_METRICS.write().unwrap() = Some(snapshot.clone());
+        let _ = app.emit("sys-metrics", &*snapshot);
     }
 }

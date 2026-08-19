@@ -9,26 +9,38 @@
 //        third_party/CubismNativeSdk/Framework/src
 //   2. stb_image.h 放入 third_party/stb/（纹理 PNG 解码）
 //
-// 目标宏：CSM_TARGET_LINUX_GL（CMakeLists 中已定义）
+// 目标宏：CSM_TARGET_WIN_GL (Windows) 或 CSM_TARGET_LINUX_GL (ARM Linux)
+//          —— 由 CMakeLists 按平台定义
 
 #include "render/live2d_renderer.h"
 
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+
+// GL 头文件：PC 由 GLEW 引入桌面 OpenGL，设备用 OpenGL ES
+#ifdef _WIN32
+#define GLFW_INCLUDE_NONE   // 阻止 glfw3.h 包含 <GL/gl.h>（与 glew.h 冲突）
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+#else
 #include <GLES3/gl3.h>
+#endif
 
 // ---- Cubism Framework ----
 #include <CubismFramework.hpp>
 #include <ICubismAllocator.hpp>
 #include <Model/CubismUserModel.hpp>
-#include <Model/CubismModelSettingJson.hpp>
+#include <CubismModelSettingJson.hpp>   // SDK 5 起移至 Framework/src 根目录
 #include <Motion/CubismMotionManager.hpp>
 #include <Physics/CubismPhysics.hpp>
 #include <CubismDefaultParameterId.hpp>
 #include <Utils/CubismString.hpp>
 #include <Id/CubismIdManager.hpp>
+// SDK 5 起 PC/设备统一为 OpenGLES2 渲染器（Windows 下经 CSM_TARGET_WIN_GL
+// 走桌面 OpenGL，由 GLEW 提供函数指针）
 #include <Rendering/OpenGL/CubismRenderer_OpenGLES2.hpp>
+using GLRenderer = Live2D::Cubism::Framework::Rendering::CubismRenderer_OpenGLES2;
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
@@ -193,8 +205,7 @@ public:
         }
         projection.ScaleRelative(scale, scale);
 
-        CubismRenderer_OpenGLES2* renderer =
-            GetRenderer<CubismRenderer_OpenGLES2>();
+        GLRenderer* renderer = GetRenderer<GLRenderer>();
         if (renderer) {
             renderer->SetMvpMatrix(&projection);
             renderer->DrawModel();
@@ -322,8 +333,7 @@ private:
     // 绑定 GL 纹理
     void SetupTextures() {
         CreateRenderer(2, CubismRenderer::CubismTextureColorFormat::CubismTextureFormat_RGBA8888);
-        CubismRenderer_OpenGLES2* renderer =
-            GetRenderer<CubismRenderer_OpenGLES2>();
+        GLRenderer* renderer = GetRenderer<GLRenderer>();
         if (!renderer) return;
 
         const csmInt32 count = _setting->GetTextureCount();

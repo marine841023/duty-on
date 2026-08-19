@@ -1,5 +1,15 @@
-//! DutyOn （开工啦） — Live2D desktop pet for monitoring Trae IDE AI task status.
-//! Tauri 2.0 rewrite of the Electron app. See `.trae/documents/tauri-rewrite-plan.md`.
+//! DutyOn （开工啦） — 2.0 headless backend.
+//!
+//! 2.0 architecture: NO browser / WebView anywhere — not on PC, not on ARM
+//! devices. This Rust process is a pure backend: HTTP API server (state,
+//! events SSE, metrics, sounds) + state manager + IDE scanner + system
+//! monitor sampler + a tray icon with Quit. All rendering and UI is done by
+//! the native C++ client (device/: GLFW + OpenGL + ImGui on Windows,
+//! EGL/GLES2 on ARM Linux), which polls this backend over HTTP.
+//!
+//! The Tauri commands below are still registered (they're shared with the
+//! 1.x line and harmless), but with no WebView frontend nothing invokes
+//! them; window-management commands would simply find no window.
 
 mod click_through;
 mod commands;
@@ -12,21 +22,19 @@ mod state_manager;
 mod sys_monitor;
 mod user_config;
 
-use crate::state_manager::{current_millis, SharedStateManager, StateManager};
-use crate::user_config::WindowPosition;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::state_manager::{SharedStateManager, StateManager};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{
-    Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder,
-    menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+    Manager,
 };
 use tauri_plugin_autostart::MacosLauncher;
-use tokio::sync::broadcast::error::RecvError;
 
-/// Set to true while a file picker dialog is open, so the menu window's
-/// blur handler doesn't hide the menu when the dialog steals focus.
+/// Set to true while a file picker dialog is open. Kept for the shared
+/// commands module (pick_character_animation); unused in headless mode.
 pub static IS_PICKING_FILE: AtomicBool = AtomicBool::new(false);
 
 /// Entry point used by `main.rs` and the mobile/desktop lib targets.
@@ -41,13 +49,8 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            // A second launch attempted — focus the existing window instead.
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
-        }))
+        // Prevent a second backend instance (port 17521 would conflict).
+        .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}))
         .plugin(tauri_plugin_dialog::init())
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
@@ -107,278 +110,22 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-/// Browser args shared by every WebView2 window. The first two --disable-features
-/// entries are wry's defaults (must be repeated when overriding additional args);
-/// --process-per-site makes all same-origin windows (main / menu / dock-preview)
-/// share ONE renderer process instead of one per window — saves ~50-100 MB of
-/// private memory, which is most of the app's controllable footprint.
-const WEBVIEW_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --process-per-site";
-
+/// Headless setup: state + services only. No windows are created — the
+/// process keeps running thanks to the tray icon and the HTTP server.
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // ----- State manager -----
     let sm: SharedStateManager = Arc::new(tokio::sync::Mutex::new(StateManager::new()));
     app.manage(sm.clone());
 
-    // Pre-snap geometry for edge-dock restore. Kept as a clone so the
-    // WindowEvent::Moved handler below can skip persisting docked positions.
-    let edge_dock = commands::EdgeDockState::default();
-    app.manage(edge_dock.clone());
+    // States shared with the commands module (registered so managed-state
+    // lookups never panic if a command is invoked).
+    app.manage(commands::EdgeDockState::default());
+    app.manage(commands::MenuSpaceState::default());
+    app.manage(click_through::ClickThroughState::new());
 
-    // Temporary horizontal window growth while the context menu is open.
-    let menu_space = commands::MenuSpaceState::default();
-    app.manage(menu_space.clone());
-
-    // ----- Click-through state (must be managed BEFORE window.show(),
-    // otherwise the frontend's PIXI ticker may call update_click_regions
-    // before the state is registered, causing a "state not managed" error) -----
-    let ct_state = click_through::ClickThroughState::new();
-    app.manage(ct_state.clone());
-
-    // ----- Window: create main window with custom WebView2 data directory -----
-    // The main window is created in code (not in tauri.conf.json) so we can
-    // set a custom WebView2 data_directory. This avoids WebView2 ERROR_BUSY
-    // (0x800700AA) when the default LOCALAPPDATA cache is locked by a
-    // previous instance that didn't fully release its resources.
-    let webview_data_dir = std::env::temp_dir().join("dutyon_webview");
-    // Clear stale WebView2 cache from a previous version. Without this,
-    // WebView2 serves the old JS/CSS from cache even after a reinstall
-    // (the data dir is in %TEMP% and persists across installs). The
-    // cache-busting ?v= query params on script tags handle this going
-    // forward, but this one-time purge clears any pre-existing cache.
-    {
-        let cache_dir = webview_data_dir.join("Default").join("Cache");
-        if cache_dir.exists() {
-            let _ = std::fs::remove_dir_all(&cache_dir);
-        }
-    }
-    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-        .title("Duty On")
-        .transparent(true)
-        .decorations(false)
-        .always_on_top(true)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .skip_taskbar(true)
-        .shadow(false)
-        .visible(false)
-        .inner_size(260.0, 520.0)
-        .data_directory(webview_data_dir.clone())
-        .additional_browser_args(WEBVIEW_ARGS)
-        .build()?;
-    position_window(app, &window)?;
-    let _ = window.set_always_on_top(true);
-    let _ = window.show();
-
-    // Ghost preview window for the upcoming edge snap, shown while dragging
-    // close to a screen edge (update_dock_preview). Transparent, click-through
-    // and hidden by default — it must never intercept the drag.
-    let preview = WebviewWindowBuilder::new(app, "dock-preview", WebviewUrl::App("preview.html".into()))
-        .decorations(false)
-        .transparent(true)
-        .shadow(false)
-        .resizable(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .visible(false)
-        .inner_size(config::EDGE_DOCK_THICKNESS as f64, 200.0)
-        .data_directory(webview_data_dir.clone())
-        .additional_browser_args(WEBVIEW_ARGS)
-        .build()?;
-    let _ = preview.set_ignore_cursor_events(true);
-
-    // ----- Menu window (separate, zero-flicker) -----
-    // A second borderless transparent window that hosts the context menu. The
-    // pet window NEVER resizes when the menu opens — instead this window is
-    // shown beside the pet. Because the pet window's geometry is unchanged,
-    // WebView2's one-frame layout lag (the root cause of left-side menu
-    // flicker) never triggers. The window loads the same index.html with an
-    // injected flag (window.__MENU_MODE__ = true) so renderer.js can skip
-    // PixiJS/Live2D init and run in menu-only mode.
-    let menu_win = WebviewWindowBuilder::new(
-        app,
-        "menu",
-        WebviewUrl::App("index.html".into()),
-    )
-    .title("Menu")
-    .decorations(false)
-    .transparent(true)
-    .shadow(false)
-    .resizable(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .visible(false)
-    .inner_size(230.0, 500.0)
-    .initialization_script("window.__MENU_MODE__ = true;")
-    .data_directory(webview_data_dir.clone())
-    .additional_browser_args(WEBVIEW_ARGS)
-    .build()?;
-
-    // Hide the menu window when it loses focus (user clicks elsewhere,
-    // Alt-Tab, etc.). Emit an event so the main window can reset its menu
-    // state. Skipped while a file picker is open (pick_character_animation
-    // sets the flag so the dialog doesn't trigger menu close).
-    let menu_win_for_blur = menu_win.clone();
-    let app_for_blur = app.handle().clone();
-    menu_win.on_window_event(move |event| {
-        if let tauri::WindowEvent::Focused(false) = event {
-            if !crate::IS_PICKING_FILE.load(std::sync::atomic::Ordering::SeqCst) {
-                let _ = menu_win_for_blur.hide();
-                let _ = app_for_blur.emit("menu-closed", ());
-            }
-        }
-    });
-
-    // Log window state for debugging "completely transparent / can't click"
-    let vis = window.is_visible().unwrap_or(false);
-    let pos = window.outer_position().map(|p| (p.x, p.y)).unwrap_or((-1, -1));
-    let (sw, sh) = window.outer_size().map(|s| (s.width, s.height)).unwrap_or((0, 0));
-    let aot = window.is_always_on_top().unwrap_or(false);
-    let decor = window.is_decorated().unwrap_or(false);
-    log::info!(
-        "[window] visible={} pos=({},{}) size={}x{} alwaysOnTop={} decorated={}",
-        vis, pos.0, pos.1, sw, sh, aot, decor
-    );
-
-    // Log all detected monitors so multi-monitor dock bugs are diagnosable.
-    if let Ok(monitors) = app.available_monitors() {
-        log::info!("[monitors] detected {} display(s):", monitors.len());
-        for (i, m) in monitors.iter().enumerate() {
-            let p = m.position();
-            let s = m.size();
-            let sf = m.scale_factor();
-            log::info!(
-                "  #{} pos=({},{}) size={}x{} scale={}",
-                i, p.x, p.y, s.width, s.height, sf
-            );
-        }
-    }
-
-    // Open devtools in debug builds so we can inspect the webview console —
-    // essential for diagnosing frontend load failures (JS errors, CSP blocks,
-    // asset protocol issues that leave the transparent window blank).
-    #[cfg(debug_assertions)]
-    window.open_devtools();
-
-    // Persist window position on move (throttled to every 500ms). Docked
-    // (edge-snapped) positions are skipped so a restart doesn't open the
-    // full-size window glued to the screen edge; the shifted geometry while
-    // the context menu has grown the window is skipped for the same reason.
-    let last_save = Arc::new(AtomicU64::new(0));
-    let last_save_clone = last_save.clone();
-    let win_scale = window.clone();
-    window.on_window_event(move |event| match event {
-        tauri::WindowEvent::Moved(pos) => {
-            if edge_dock.active.load(Ordering::SeqCst)
-                || menu_space.active.load(Ordering::SeqCst)
-            {
-                return;
-            }
-            let now = current_millis();
-            if now.saturating_sub(last_save_clone.load(Ordering::SeqCst)) >= 500 {
-                last_save_clone.store(now, Ordering::SeqCst);
-                // While the monitor drawer is open the window is grown upward
-                // by PET_WINDOW_EXTRA_HEIGHT — persist the BASE top position
-                // (as if the drawer were closed) so a restart + re-grow lands
-                // exactly where the user left the bottom edge. While the
-                // project list is hidden (negative extra) the window is
-                // TOP-anchored instead, so its top edge already IS the
-                // anchor position — persist it unchanged (the renderer's
-                // startup shrink is top-anchored too, landing the character
-                // exactly where the user left it).
-                let extra = commands::PET_WINDOW_EXTRA_HEIGHT.load(Ordering::SeqCst);
-                let extra_phys = if extra < 0 {
-                    0
-                } else {
-                    (extra as f64 * win_scale.scale_factor().unwrap_or(1.0)).round() as i32
-                };
-                user_config::update(|c| {
-                    c.window_position = Some(WindowPosition {
-                        x: pos.x,
-                        y: pos.y + extra_phys,
-                    });
-                });
-            }
-        }
-        // The DPI scale changes at runtime — remote-desktop connect/disconnect,
-        // moving between monitors with different DPI, or a display-settings
-        // change. The OS keeps the window's PHYSICAL size, so its logical size
-        // (the unit the CSS layout works in) drifts and content gets clipped.
-        // Re-pin the window to its intended logical size, drop the temporary
-        // menu growth (recorded in stale physical px), and tell the renderer
-        // to reset its menu state too.
-        tauri::WindowEvent::ScaleFactorChanged {
-            scale_factor,
-            new_inner_size,
-            ..
-        } => {
-            // unwrap_or_else(into_inner): a poisoned mutex (an earlier panic
-            // while locked) must not cascade into another panic here.
-            *menu_space
-                .grow
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
-            menu_space.active.store(false, Ordering::SeqCst);
-            // Drop the monitor drawer growth too (recorded in physical px —
-            // stale after the scale change); the renderer re-applies it on
-            // the display-changed event.
-            commands::PET_WINDOW_EXTRA_HEIGHT.store(0, Ordering::SeqCst);
-
-            let mini = user_config::load().mini_mode.unwrap_or(false);
-            let (lw, lh) = if mini {
-                (config::MINI_WINDOW_WIDTH, config::MINI_WINDOW_HEIGHT)
-            } else {
-                (config::WINDOW_WIDTH, config::WINDOW_HEIGHT)
-            };
-            let (phys_w, phys_h) = if edge_dock.active.load(Ordering::SeqCst) {
-                // Stay docked: re-pin the bar thickness, keep its height.
-                let t = (config::EDGE_DOCK_THICKNESS as f64 * scale_factor).round() as u32;
-                (t, new_inner_size.height)
-            } else {
-                (
-                    (lw as f64 * scale_factor).round() as u32,
-                    (lh as f64 * scale_factor).round() as u32,
-                )
-            };
-            let _ = win_scale.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
-                phys_w, phys_h,
-            )));
-
-            // Keep the window visible: clamp into its current monitor.
-            if let (Ok(pos), Ok(Some(m))) =
-                (win_scale.outer_position(), win_scale.current_monitor())
-            {
-                let mp = m.position();
-                let ms = m.size();
-                let x = pos
-                    .x
-                    .clamp(mp.x, (mp.x + ms.width as i32 - phys_w as i32).max(mp.x));
-                let y = pos
-                    .y
-                    .clamp(mp.y, (mp.y + ms.height as i32 - phys_h as i32).max(mp.y));
-                if x != pos.x || y != pos.y {
-                    let _ = win_scale.set_position(PhysicalPosition::new(x, y));
-                }
-            }
-
-            let _ = win_scale.emit("display-changed", ());
-        }
-        _ => {}
-    });
-
-    // ----- Click-through polling thread -----
-    // Tauri's set_ignore_cursor_events has no {forward:true} mode, so the
-    // frontend can't drive click-through via mousemove (it stops receiving
-    // events once ignore=true). A Rust thread polls Win32 GetCursorPos and
-    // toggles ignore based on regions the frontend reports via the PixiJS
-    // ticker (which keeps running while click-through). See click_through.rs.
-    let window_ct = window.clone();
-    std::thread::spawn(move || click_through::run_polling_loop(window_ct, ct_state));
-
-    // ----- Forward state updates / alerts to the renderer -----
-    spawn_listeners(app.handle().clone(), sm.clone());
-
-    // ----- HTTP server (hook events from the Trae IDE bridge) -----
+    // ----- HTTP server (hook events from the Trae IDE bridge; also serves
+    // /api/status, /api/events SSE, /api/metrics and /api/sounds to the
+    // native C++ client) -----
     let sm_http = sm.clone();
     tauri::async_runtime::spawn(async move {
         server::start(sm_http).await;
@@ -391,161 +138,30 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     spawn_ide_scanner(sm.clone());
 
     // ----- System monitor sampler (CPU/RAM/GPU/NET/self, 1.5s tick) -----
-    // The thread sleeps at zero cost while the monitor drawer is closed.
+    // The thread sleeps at zero cost while no client polls /api/metrics.
     let mon_cfg = user_config::load().monitor.unwrap_or_default();
-    sys_monitor::MONITOR_ACTIVE.store(mon_cfg.enabled, Ordering::SeqCst);
+    sys_monitor::MONITOR_ACTIVE.store(mon_cfg.enabled, std::sync::atomic::Ordering::SeqCst);
     sys_monitor::spawn(app.handle().clone());
 
-    // ----- System tray -----
-    // The pet window is skipTaskbar + frameless + transparent, so users may
-    // lose track of it on a busy desktop. A tray icon provides a visible
-    // anchor with quick actions (show / hide / quit). Left-click toggles
-    // visibility.
-    let show_item = MenuItem::with_id(app, "tray_show", "显示宠物", true, None::<&str>)?;
-    let hide_item = MenuItem::with_id(app, "tray_hide", "隐藏宠物", true, None::<&str>)?;
-    let sep_item = PredefinedMenuItem::separator(app)?;
-    let quit_item = MenuItem::with_id(app, "tray_quit", "退出 DutyOn", true, None::<&str>)?;
-    let tray_menu = Menu::with_items(app, &[&show_item, &hide_item, &sep_item, &quit_item])?;
+    // ----- System tray (Quit only) -----
+    // The native C++ client has its own tray for pet interactions; this one
+    // exists so the headless backend can always be found and stopped.
+    let quit_item = MenuItem::with_id(app, "tray_quit", "退出 DutyOn 后端", true, None::<&str>)?;
+    let tray_menu = Menu::with_items(app, &[&quit_item])?;
 
-    TrayIconBuilder::with_id("main-tray")
+    TrayIconBuilder::with_id("backend-tray")
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&tray_menu)
-        .tooltip("DutyOn")
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "tray_show" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.set_focus();
-                }
-            }
-            "tray_hide" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.hide();
-                }
-            }
-            "tray_quit" => {
+        .tooltip("DutyOn Backend")
+        .on_menu_event(|app, event| {
+            if event.id.as_ref() == "tray_quit" {
                 app.exit(0);
-            }
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                let app = tray.app_handle();
-                if let Some(w) = app.get_webview_window("main") {
-                    if w.is_visible().unwrap_or(false) {
-                        let _ = w.hide();
-                    } else {
-                        let _ = w.show();
-                        let _ = w.set_focus();
-                    }
-                }
             }
         })
         .build(app)?;
 
+    log::info!("[setup] headless backend started (no WebView windows)");
     Ok(())
-}
-
-/// Restore the last window position if still on a visible screen, else default
-/// to the bottom-right corner of the primary monitor.
-fn position_window(app: &tauri::App, window: &tauri::WebviewWindow) -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = user_config::load();
-
-    // Restore the mini-mode window size before positioning so the default
-    // bottom-right placement and the on-screen check use the real geometry.
-    let mini = cfg.mini_mode.unwrap_or(false);
-    let (win_w, win_h) = if mini {
-        (config::MINI_WINDOW_WIDTH, config::MINI_WINDOW_HEIGHT)
-    } else {
-        (config::WINDOW_WIDTH, config::WINDOW_HEIGHT)
-    };
-    if mini {
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-            win_w as f64,
-            win_h as f64,
-        )));
-    }
-
-    let (screen_w, screen_h) = app
-        .primary_monitor()?
-        .map(|m| (m.size().width as i32, m.size().height as i32))
-        .unwrap_or((1920, 1080));
-
-    let mut x = screen_w - win_w - config::WINDOW_MARGIN;
-    let mut y = screen_h - win_h - config::WINDOW_MARGIN;
-    if let Some(pos) = &cfg.window_position {
-        if is_position_on_screen(app, pos.x, pos.y, win_w, win_h) {
-            x = pos.x;
-            y = pos.y;
-        }
-    }
-    window.set_position(PhysicalPosition::new(x, y))?;
-    Ok(())
-}
-
-/// True if the center of a window at (x,y) size (w,h) lies on any monitor.
-fn is_position_on_screen(app: &tauri::App, x: i32, y: i32, w: i32, h: i32) -> bool {
-    let cx = x + w / 2;
-    let cy = y + h / 2;
-    if let Ok(monitors) = app.available_monitors() {
-        for m in monitors {
-            let p = m.position();
-            let s = m.size();
-            if cx >= p.x
-                && cx <= p.x + s.width as i32
-                && cy >= p.y
-                && cy <= p.y + s.height as i32
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Spawn tasks that subscribe to state-manager broadcasts and emit them as
-/// Tauri events (`state-update`, `alert`) to the renderer. Subscription
-/// happens inside the async task (the subscribe call needs the async mutex).
-fn spawn_listeners(app_handle: tauri::AppHandle, sm: SharedStateManager) {
-    let app_for_update = app_handle.clone();
-    let sm_update = sm.clone();
-    tauri::async_runtime::spawn(async move {
-        let mut rx = {
-            let s = sm_update.lock().await;
-            s.subscribe_update()
-        };
-        loop {
-            match rx.recv().await {
-                Ok(snap) => {
-                    let _ = app_for_update.emit("state-update", snap);
-                }
-                Err(RecvError::Lagged(_)) => continue,
-                Err(RecvError::Closed) => break,
-            }
-        }
-    });
-
-    let sm_alert = sm;
-    tauri::async_runtime::spawn(async move {
-        let mut rx = {
-            let s = sm_alert.lock().await;
-            s.subscribe_alert()
-        };
-        loop {
-            match rx.recv().await {
-                Ok(snap) => {
-                    let _ = app_handle.emit("alert", snap);
-                }
-                Err(RecvError::Lagged(_)) => continue,
-                Err(RecvError::Closed) => break,
-            }
-        }
-    });
 }
 
 /// Spawn the cleanup (30s) and alert-reminder (60s) interval timers.
