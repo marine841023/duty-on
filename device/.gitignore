@@ -1,0 +1,6 @@
+build/
+third_party/CubismNativeSdk/
+*.o
+*.so
+*.a
+dutyon-device
