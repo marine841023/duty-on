@@ -2,25 +2,27 @@
 
 namespace dutyon {
 
-StateMachine::StateMachine() : current_state_("idle") {}
+StateMachine::StateMachine() : current_state_("sleeping") {}
 
-std::string StateMachine::onStatus(const PetStatus& status) {
-    if (status.state == current_state_) return "";
-    current_state_ = status.state;
-    return motionGroupFor(status.state);
+std::pair<std::string, int> StateMachine::onStatus(const PetStatus& status) {
+    // confirmation-needed 优先级最高，即使 overallState 是 working 也切到 alert
+    std::string effective = status.has_confirmation ? "alert" : status.overall_state;
+
+    if (effective == current_state_) return {"", 0};
+    current_state_ = effective;
+    return motionFor(effective);
 }
 
-std::string StateMachine::currentIdleGroup() const {
-    return motionGroupFor(current_state_);
+std::pair<std::string, int> StateMachine::currentMotion() const {
+    return motionFor(current_state_);
 }
 
-std::string StateMachine::motionGroupFor(const std::string& state) {
-    // 与桌面版 state -> motion 映射保持一致
-    // 这些动作组名来自 Live2D 模型的 .model3.json Motions 字段
-    if (state == "working")  return "working";   // 忙碌/工作中动作
-    if (state == "alert")    return "alert";     // 提醒/注意动作
-    if (state == "sleeping") return "sleeping";  // 睡眠动作
-    return "idle";                               // 默认待机
+std::pair<std::string, int> StateMachine::motionFor(const std::string& state) {
+    // 与桌面版 DEFAULT_STATE_MOTIONS（renderer.js:1785）一致
+    if (state == "working") return {"FlickLeft", 1};  // 走路
+    if (state == "alert")   return {"FlickLeft", 0};  // yeah
+    if (state == "sleeping") return {"Flick3", 1};    // 哈欠
+    return {"Idle", 0};
 }
 
 } // namespace dutyon

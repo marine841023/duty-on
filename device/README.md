@@ -41,11 +41,22 @@ device/
 
 ## 依赖
 
-- **Live2D Cubism Native SDK**（ proprietary，需从 [Live2D 官网](https://www.live2d.com/download/cubism-sdk/download-native/) 下载，
-  放入 `third_party/CubismNativeSdk/`）
-- OpenGL ES 3.0+ / EGL（ Mali-G31 支持）
-- libcurl 或 cpr（HTTP 客户端）
+- **Live2D Cubism Native SDK**（proprietary，需从 [Live2D 官网](https://www.live2d.com/download/cubism-sdk/download-native/) 下载，
+  解压后把 `Core/` 和 `Framework/` 放入 `third_party/CubismNativeSdk/`）
+- **stb_image.h**（纹理 PNG 解码，CMake FetchContent 自动拉取）
+- OpenGL ES 3.0+ / EGL（Mali-G31 支持）
+- cpr + nlohmann/json（HTTP 客户端，FetchContent 自动拉取）
 - CMake 3.16+，交叉编译工具链 `aarch64-linux-gnu-gcc`
+
+## 实现状态
+
+- [x] EGL/GLES2 上下文（无 X11/Wayland 直渲）
+- [x] HTTP 轮询 `/api/status`（字段与桌面端 Snapshot serde 结构对齐）
+- [x] 状态机（overallState -> 动作组，与桌面版 DEFAULT_STATE_MOTIONS 一致）
+- [x] Live2D 完整集成（moc3/表情/物理/姿势/眨眼/呼吸/动作预载/GLES2 渲染）
+- [ ] Cubism Native SDK 放入 third_party（需手动下载，许可限制）
+- [ ] 真机交叉编译验证
+- [ ] DRM/KMS 直接显示（当前用 EGL_DEFAULT_DISPLAY，部分驱动需 GBM surface）
 
 ## 目标硬件
 

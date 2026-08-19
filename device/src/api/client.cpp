@@ -23,9 +23,17 @@ std::optional<PetStatus> ApiClient::poll() {
     try {
         auto j = nlohmann::json::parse(r.text);
         PetStatus s;
-        s.state = j.value("state", "idle");
-        s.state_text = j.value("stateText", "");
-        s.active_sessions = j.value("activeSessions", 0);
+        s.overall_state = j.value("overallState", "sleeping");
+
+        if (j.contains("sessions") && j["sessions"].is_array()) {
+            s.session_count = static_cast<int>(j["sessions"].size());
+            for (const auto& sess : j["sessions"]) {
+                if (sess.value("status", "") == "confirmation-needed") {
+                    s.has_confirmation = true;
+                    break;
+                }
+            }
+        }
         return s;
     } catch (...) {
         return std::nullopt;
