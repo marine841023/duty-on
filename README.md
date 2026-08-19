@@ -11,18 +11,21 @@
 [![Built with Tauri](https://img.shields.io/badge/Tauri-2.0-24C8D8?logo=tauri&logoColor=white)](https://v2.tauri.app)
 [![Release](https://img.shields.io/github/v/release/marine841023/duty-on)](https://github.com/marine841023/duty-on/releases)
 
-### 🎉 v1.3.0 — Custom GIF characters!
+### 🎉 v1.3.1 — System monitor panel!
 
 > **Made for Chinese Trae users** — native Trae CN / TraeCode CN window-title
 > detection, multi-root workspace suffix stripping (工作区 / Workspace /
 > ワークスペース / 작업 영역), 8 languages with Simplified Chinese first.
 >
-> **New in v1.3.0:** Create your own desktop pet from any **GIF / PNG / MP4**!
-> Upload custom animations for each state (💤 sleeping / ⚡ working / 🔔 alert),
-> re-upload to replace at any time. No Live2D model required — just pick a GIF
-> and your pet comes alive. Large GIFs auto-resized; cache-busting ensures
-> re-uploads always show the new animation.
-> [Download v1.3.0 (.zip) →](https://github.com/marine841023/duty-on/releases/download/v1.3.0/DutyOn-v1.3.0.zip)
+> **New in v1.3.1:** a **system monitor panel** — live CPU / RAM / GPU /
+> network / self usage, styled like the task pane (status border colors stay in
+> sync). Show/hide the whole panel, collapse it, toggle each metric
+> individually. **Hidden by default** — enable it from the context menu.
+>
+> Since v1.3.0 you can also create your own desktop pet from any
+> **GIF / PNG / MP4** — no Live2D model required.
+>
+> Download v1.3.1 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v1.3.1/DutyOn-v1.3.1.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v1.3.1/DutyOn-v1.3.1.zip)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -80,7 +83,7 @@ Built with **Tauri 2 + Rust** (system WebView, no bundled Chromium):
 ### Download (recommended)
 
 Grab the **`.zip`** from
-[**Releases**](https://github.com/marine841023/duty-on/releases),
+GitHub [**Releases**](https://github.com/marine841023/duty-on/releases) or Gitee [**Releases**](https://gitee.com/megrezsoft/dutyo/releases),
 extract it, and run the NSIS installer inside (`DutyOn_<ver>_x64-setup.exe`).
 Distributed as ZIP to bypass Windows SmartScreen on unsigned exe.
 (macOS DMG and Linux AppImage/DEB buildable from source.)

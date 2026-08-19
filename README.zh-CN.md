@@ -8,16 +8,20 @@
 
 [English](README.md) · **简体中文**
 
-### 🎉 v1.3.0 — 自定义 GIF 角色！
+### 🎉 v1.3.1 — 系统监控面板！
 
 > **为中国 Trae 用户量身打造** — 原生 Trae CN / TraeCode CN 窗口标题识别，
 > 自动剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역），
 > 8 种语言、简体中文优先。
 >
-> **v1.3.0 更新：** 用任意 **GIF / PNG / MP4** 创建你的专属桌宠！
+> **v1.3.1 更新：** 新增**系统监控面板**——实时显示 CPU / 内存 / GPU / 网络 / 程序自身占用，
+> 与任务窗格风格统一（状态边框颜色同步）；可整体显示/隐藏、可折叠，各指标可单独开关，
+> **默认隐藏**，右键菜单开启。
+>
+> v1.3.0 起支持用任意 **GIF / PNG / MP4** 创建专属桌宠，无需 Live2D 模型——
 > 为每个状态（💤 睡觉 / ⚡ 忙碌 / 🔔 提醒）分别上传动画，随时可重新上传替换。
-> 无需 Live2D 模型——选个 GIF 就能让你的桌宠活过来。大图自动缩放；缓存失效确保重新上传后一定显示新动画。
-> [下载 v1.3.0 (.zip) →](https://github.com/marine841023/duty-on/releases/download/v1.3.0/DutyOn-v1.3.0.zip)
+>
+> 下载 v1.3.1 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v1.3.1/DutyOn-v1.3.1.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v1.3.1/DutyOn-v1.3.1.zip)
 
 </div>
 
@@ -56,7 +60,7 @@
 
 ### 方式一：下载安装包（推荐）
 
-从 [Releases](https://github.com/marine841023/duty-on/releases) 下载 **`.zip`** 压缩包，
+从 GitHub [Releases](https://github.com/marine841023/duty-on/releases) 或 Gitee [Releases](https://gitee.com/megrezsoft/dutyo/releases) 下载 **`.zip`** 压缩包，
 解压后运行里面的 `DutyOn_<版本>_x64-setup.exe` 安装（当前用户安装，含简/繁中/英/日/韩语言选择）。
 采用 ZIP 分发以避免 Windows SmartScreen 拦截未签名 exe。macOS / Linux 请从源码构建。
 
