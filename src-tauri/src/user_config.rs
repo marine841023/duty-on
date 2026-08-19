@@ -78,7 +78,7 @@ pub struct MonitorConfig {
 impl Default for MonitorConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             collapsed: false,
             show_cpu: true,
             show_ram: true,
