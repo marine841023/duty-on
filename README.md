@@ -82,6 +82,22 @@ hardware devices.
 - **8 languages** — auto-follows the OS locale (简中/繁中/EN/JA/KO/FR/DE/ES)
 - **Autostart** — one-toggle login launch per platform
 
+## Memory footprint, measured
+
+Same machine, same Live2D pet on screen:
+
+| Version | Processes | Working set (sum) | Private memory (sum) |
+|---------|-----------|-------------------|----------------------|
+| 1.x (WebView) | duty-on.exe (~70 MB) + 6 × WebView2 browser processes (~396 MB) | ~465 MB | ~195 MB |
+| **2.0 (native C++)** | **one dutyon-pet.exe, nothing hidden** | **~116 MB** | **~114 MB** |
+
+> **Correction:** 1.x marketing copy claimed "~80 MB RAM". That figure only
+> counted the main process and ignored the whole WebView2 browser-process
+> group, so real usage was several times higher — our oversight, hereby
+> corrected. 2.0 drops WebView2 entirely (GLFW + OpenGL native rendering):
+> one process in Task Manager, what you see is what it costs, a real
+> reduction of more than half.
+
 ## Install
 
 ### Download (recommended)

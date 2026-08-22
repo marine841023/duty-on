@@ -13,7 +13,7 @@
 │  ├ 状态机 + IDE 窗口扫描 + 系统指标采样        │
 │  └ GLFW 透明窗口 + OpenGL 3.3                │
 │      Live2D Native + ImGui 监控面板          │
-│ 实测 ~118MB，无 WebView2 进程群              │
+│ 实测 ~116MB 单进程，无 WebView2 进程群        │
 └─────────────────────────────────────────────┘
                    ▲ 局域网 HTTP 轮询
 ┌─ 硬件 (ARM Linux) ──────────────────┐
@@ -123,5 +123,5 @@ cmake --build build -j$(nproc)
 | 后端 | Tauri (Rust) 独立进程 | C++ 内嵌单进程（无 Rust） |
 | UI 框架 | HTML/CSS/JS | ImGui (PC) |
 | Live2D | pixi-live2d-display (WebGL) | Cubism Native SDK (OpenGL) |
-| 内存 | ~140MB（双进程） | 实测 ~118MB（单进程） |
+| 内存 | 全进程合计 ~465MB 工作集 / ~195MB 私有（主进程 ~70MB + WebView2 进程群 ~396MB；旧宣传 "~80MB" 只统计了主进程，特此勘误） | 实测 ~116MB 工作集 / ~114MB 私有（单进程，所见即所得） |
 | 模型格式 | .model3.json | **相同格式，原样复用** |
