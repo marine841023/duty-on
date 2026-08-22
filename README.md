@@ -7,25 +7,27 @@
 **Your favorite character watches your AI IDE, so you don't have to.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)]()
-[![Built with Tauri](https://img.shields.io/badge/Tauri-2.0-24C8D8?logo=tauri&logoColor=white)](https://v2.tauri.app)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20ARM%20Linux%20(device)-blue)]()
+[![Built with C++](https://img.shields.io/badge/C%2B%2B-native%20%7C%20no%20WebView-00599C?logo=cplusplus&logoColor=white)]()
 [![Release](https://img.shields.io/github/v/release/marine841023/duty-on)](https://github.com/marine841023/duty-on/releases)
 
-### 🎉 v1.3.1 — System monitor panel!
+### 🚀 v2.0.0 — Native C++ rewrite!
 
 > **Made for Chinese Trae users** — native Trae CN / TraeCode CN window-title
 > detection, multi-root workspace suffix stripping (工作区 / Workspace /
 > ワークスペース / 작업 영역), 8 languages with Simplified Chinese first.
 >
-> **New in v1.3.1:** a **system monitor panel** — live CPU / RAM / GPU /
-> network / self usage, styled like the task pane (status border colors stay in
-> sync). Show/hide the whole panel, collapse it, toggle each metric
-> individually. **Hidden by default** — enable it from the context menu.
+> **v2.0.0:** the whole app is now a **single native C++ process** — no
+> WebView, no browser runtime, no Rust backend. One `dutyon-pet.exe`
+> embeds the HTTP server, state machine, IDE scanner and metrics sampler,
+> and renders Live2D/GIF pets natively with GLFW + OpenGL + Cubism SDK.
+> Installs side-by-side with 1.x (shared `~/.dutyon` config), and is the
+> codebase we port to low-cost ARM hardware devices.
 >
-> Since v1.3.0 you can also create your own desktop pet from any
-> **GIF / PNG / MP4** — no Live2D model required.
+> **v1.3.x line (WebView-based, macOS/Linux):** still maintained on the
+> `master` branch — latest [v1.3.2](https://github.com/marine841023/duty-on/releases/tag/v1.3.2).
 >
-> Download v1.3.1 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v1.3.1/DutyOn-v1.3.1.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v1.3.1/DutyOn-v1.3.1.zip)
+> Download v2.0.0 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.0/DutyOn-v2.0.0.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.0/DutyOn-v2.0.0.zip)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -37,16 +39,18 @@ Running AI agents in several IDE windows at once? Stop Alt-Tabbing to check
 whether they're still working, done, or waiting for your confirmation.
 **Duty On** is a tiny transparent Live2D character that floats above your
 desktop and shows the live status of every **Trae** / Qoder / Cursor / Codex / OpenCode
-session at a glance. Built with **Tauri 2 + Rust** (~80 MB RAM, no bundled
-Chromium) — **made for Chinese Trae users**, with native Trae CN / TraeCode CN
-title detection and Simplified Chinese as a first-class language:
+session at a glance. **Made for Chinese Trae users**, with native Trae CN /
+TraeCode CN title detection and Simplified Chinese as a first-class language:
 
 - 💤 **Sleeping** — everything is idle (she naps, Zzz…)
 - ⚡ **Working** — an AI task is running right now
 - 🔔 **Alert** — an agent needs your confirmation **right now**
 
-Built with **Tauri 2 + Rust** (system WebView, no bundled Chromium):
-~80 MB RAM, 24 fps capped rendering, native click-through.
+v2.0 is a **single native C++ process**: embedded HTTP server + state
+machine + IDE scanner + system-metrics sampler, with the pet rendered
+natively via GLFW + OpenGL + Live2D Cubism SDK (or GIF sprites). No WebView,
+no browser runtime — and the same codebase builds for low-cost ARM Linux
+hardware devices.
 
 ## Screenshots
 
@@ -86,19 +90,23 @@ Grab the **`.zip`** from
 GitHub [**Releases**](https://github.com/marine841023/duty-on/releases) or Gitee [**Releases**](https://gitee.com/megrezsoft/dutyo/releases),
 extract it, and run the NSIS installer inside (`DutyOn_<ver>_x64-setup.exe`).
 Distributed as ZIP to bypass Windows SmartScreen on unsigned exe.
-(macOS DMG and Linux AppImage/DEB buildable from source.)
+Upgrading from 1.x? The installer auto-detects your existing install
+location and reuses your `~/.dutyon` config, GIF characters and models.
 
 ### Build from source
 
-Requirements: [Rust](https://rustup.rs/) (stable), Tauri CLI
-(`cargo install tauri-cli --version "^2"`), and the
-[platform prerequisites](https://v2.tauri.app/start/prerequisites/).
-The frontend is plain static files — no npm, no bundler.
+Requirements: CMake 3.16+, Visual Studio 2022 (MSVC), and the
+[Live2D Cubism Native SDK](https://www.live2d.com/sdk/download/native/)
+placed at `device/third_party/CubismNativeSdk/` (not redistributed in
+this repo for license reasons). All other dependencies (GLFW, nlohmann/json,
+stb, Dear ImGui, FreeType) are fetched automatically by CMake.
 
 ```bash
-git clone https://github.com/marine841023/duty-on.git
-cd duty-on/src-tauri
-cargo tauri build   # bundles into target/release/bundle/
+git clone -b v2.0-dev https://github.com/marine841023/duty-on.git
+cd duty-on/device
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --target dutyon-pet
+# NSIS installer: powershell ../tools/build-package.ps1
 ```
 
 ### Enable IDE hooks
@@ -110,16 +118,19 @@ a new AI session.
 
 ```
 ┌─────────────────────────────────────────────┐
-│       DutyOn (Tauri 2 desktop app)          │
+│  dutyon-pet.exe (single native C++ process) │
 │  ┌───────────────────────────────────────┐  │
-│  │  Frontend: Live2D pet (pixi-live2d)   │  │
+│  │  Native client: GLFW + OpenGL         │  │
+│  │  Live2D Cubism SDK / GIF sprites      │  │
 │  │  States: 💤 sleep / ⚡ work / 🔔 alert │  │
+│  │  Dear ImGui menus / status bar /      │  │
+│  │  system monitor panel                 │  │
 │  ├───────────────────────────────────────┤  │
-│  │  Rust backend:                        │  │
+│  │  Embedded backend:                    │  │
 │  │  · State machine (multi-session)      │  │
 │  │  · HTTP server (127.0.0.1:17521)      │  │
-│  │  · IDE window scanner                 │  │
-│  │  · Click-through polling (30 ms)      │  │
+│  │  · IDE window scanner + hooks install │  │
+│  │  · CPU/RAM/GPU/network sampler        │  │
 │  └───────────────────────────────────────┘  │
 └──────────────────┬──────────────────────────┘
                    │ HTTP POST /hook (localhost)
@@ -142,7 +153,7 @@ a new AI session.
 | `permission.ask` *(OpenCode)* | OpenCode permission prompt | → alert |
 
 Ambiguous `Notification` events default to "task complete" (no alert); the
-whitelist lives in [`src-tauri/src/config.rs`](src-tauri/src/config.rs).
+whitelist lives in [`device/src/backend/backend_config.h`](device/src/backend/backend_config.h).
 
 ## Custom GIF characters (v1.3.0+)
 
@@ -164,16 +175,15 @@ Files are stored in `~/.dutyon/animations/<character_id>/`.
 
 Drop a Cubism 4 model folder into `~/.dutyon/live2d/<name>/`
 (`<name>.moc3` + textures + `model3.json` + motions) — it shows up in the
-pet's **切换形象** menu immediately. User models are served through the local
-loopback server with proper CORS headers (the Tauri asset protocol can't be
-used for XHR-based loaders — see [this note](docs/technical-notes.md)).
+pet's **切换形象** menu immediately.
 
 ## Development
 
 ```bash
-cd src-tauri
-cargo tauri dev    # run with DevTools
-cargo test         # 87 unit tests (state machine, hooks merge, server, …)
+cd device
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --target dutyon-pet
+./build/Release/dutyon-pet.exe
 ```
 
 End-to-end regression script (pet must be running):
@@ -181,12 +191,12 @@ End-to-end regression script (pet must be running):
 
 ## Tech stack
 
-Tauri 2 · Rust (tokio, axum, serde) · PixiJS v7 · pixi-live2d-display ·
-Live2D Cubism Core · Trae / Qoder / Cursor / Codex / OpenCode hooks
+C++20 · GLFW · OpenGL · Dear ImGui (FreeType) · Live2D Cubism Native SDK ·
+cpp-httplib · nlohmann/json · stb · Trae / Qoder / Cursor / Codex / OpenCode hooks
 
 ## Roadmap
 
-- [ ] CI-built releases for macOS / Linux
+- [ ] ARM Linux hardware-device builds (aarch64 cross-toolchain)
 - [ ] Per-project alert sounds
 - [ ] More IDE integrations (the hook protocol is a plain HTTP POST — PRs welcome)
 - [ ] Community model gallery

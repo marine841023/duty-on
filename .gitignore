@@ -35,3 +35,6 @@ tools/nsis/
 tools/dist/
 tools/*.png
 tools/*.ico
+
+# Local release artifacts (installers built during cross-branch releases)
+release/

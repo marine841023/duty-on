@@ -8,20 +8,21 @@
 
 [English](README.md) · **简体中文**
 
-### 🎉 v1.3.1 — 系统监控面板！
+### 🚀 v2.0.0 — 原生 C++ 重写版！
 
 > **为中国 Trae 用户量身打造** — 原生 Trae CN / TraeCode CN 窗口标题识别，
 > 自动剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역），
 > 8 种语言、简体中文优先。
 >
-> **v1.3.1 更新：** 新增**系统监控面板**——实时显示 CPU / 内存 / GPU / 网络 / 程序自身占用，
-> 与任务窗格风格统一（状态边框颜色同步）；可整体显示/隐藏、可折叠，各指标可单独开关，
-> **默认隐藏**，右键菜单开启。
+> **v2.0.0：** 整个应用重写为**单个原生 C++ 进程**——无 WebView、无浏览器运行时、
+> 无 Rust 后端。一个 `dutyon-pet.exe` 内嵌 HTTP 服务器、状态机、IDE 扫描器和
+> 系统指标采样，用 GLFW + OpenGL + Cubism SDK 原生渲染 Live2D / GIF 精灵。
+> 与 1.x 可交替安装（共用 `~/.dutyon` 配置），也是移植到低成本 ARM 硬件设备的代码基线。
 >
-> v1.3.0 起支持用任意 **GIF / PNG / MP4** 创建专属桌宠，无需 Live2D 模型——
-> 为每个状态（💤 睡觉 / ⚡ 忙碌 / 🔔 提醒）分别上传动画，随时可重新上传替换。
+> **v1.3.x 系列（WebView 版，支持 macOS/Linux）：** 仍在 `master` 分支维护——
+> 最新 [v1.3.2](https://github.com/marine841023/duty-on/releases/tag/v1.3.2)。
 >
-> 下载 v1.3.1 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v1.3.1/DutyOn-v1.3.1.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v1.3.1/DutyOn-v1.3.1.zip)
+> 下载 v2.0.0 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.0/DutyOn-v2.0.0.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.0/DutyOn-v2.0.0.zip)
 
 </div>
 
@@ -35,8 +36,9 @@
 - ⚡ **忙碌**：有 AI 任务正在执行时，精灵睁眼专注工作
 - 🔔 **提醒**：需要你确认操作时，精灵抖动并弹出感叹号
 
-基于 **Tauri 2.0 + Rust** 构建（系统 WebView，无 Chromium），跨 Windows / macOS / Linux，
-内存占用约 80MB——同类 Electron 方案的 1/5。
+v2.0 是**单个原生 C++ 进程**：内嵌 HTTP 服务器 + 状态机 + IDE 扫描 + 系统指标采样，
+精灵用 GLFW + OpenGL + Live2D Cubism SDK（或 GIF 精灵）原生渲染。
+无 WebView、无浏览器运行时——同一套代码可构建低成本 ARM Linux 硬件设备版本。
 
 ## 功能
 
@@ -54,7 +56,7 @@
 - **21 个内置动作**：点击精灵随机触发，菜单可点播任意动作，状态机自动联动
 - **自定义 Live2D 模型**：把任意 Cubism 4 模型放进 `~/.dutyon/live2d/` 即可在菜单中切换
 - **多语言**：简中/繁中/英/日/韩/法/德/西（自动跟随系统语言）
-- **开机自启**：菜单一键开关（Windows 注册表 / macOS LaunchAgent / Linux autostart）
+- **开机自启**：菜单一键开关（Windows 注册表）
 
 ## 快速开始
 
@@ -62,18 +64,22 @@
 
 从 GitHub [Releases](https://github.com/marine841023/duty-on/releases) 或 Gitee [Releases](https://gitee.com/megrezsoft/dutyo/releases) 下载 **`.zip`** 压缩包，
 解压后运行里面的 `DutyOn_<版本>_x64-setup.exe` 安装（当前用户安装，含简/繁中/英/日/韩语言选择）。
-采用 ZIP 分发以避免 Windows SmartScreen 拦截未签名 exe。macOS / Linux 请从源码构建。
+采用 ZIP 分发以避免 Windows SmartScreen 拦截未签名 exe。
+从 1.x 升级？安装器会自动定位原有安装目录，并共用 `~/.dutyon` 里的配置、GIF 形象和模型。
 
 ### 方式二：从源码构建
 
-环境要求：[Rust](https://rustup.rs/)（stable）、Tauri CLI（`cargo install tauri-cli --version "^2"`）、
-[各平台依赖](https://v2.tauri.app/start/prerequisites/)。前端是纯静态文件，无需 npm/构建步骤。
+环境要求：CMake 3.16+、Visual Studio 2022（MSVC），以及
+[Live2D Cubism Native SDK](https://www.live2d.com/sdk/download/native/)
+（放到 `device/third_party/CubismNativeSdk/`，因许可协议不在仓库内分发）。
+其余依赖（GLFW、nlohmann/json、stb、Dear ImGui、FreeType）由 CMake 自动拉取。
 
 ```bash
-git clone https://github.com/marine841023/duty-on.git
-cd duty-on/src-tauri
-cargo tauri dev      # 开发模式（自动打开 DevTools）
-cargo tauri build    # 打包：产物在 target/release/bundle/
+git clone -b v2.0-dev https://github.com/marine841023/duty-on.git
+cd duty-on/device
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --target dutyon-pet
+# NSIS 安装包：powershell ../tools/build-package.ps1
 ```
 
 ### 安装 Hook 集成
@@ -86,16 +92,19 @@ cargo tauri build    # 打包：产物在 target/release/bundle/
 
 ```
 ┌─────────────────────────────────────────────┐
-│       DutyOn (Tauri 2.0 桌面应用)            │
+│  dutyon-pet.exe (单个原生 C++ 进程)          │
 │  ┌───────────────────────────────────────┐  │
-│  │  前端: Live2D 精灵 (pixi-live2d)       │  │
+│  │  原生客户端: GLFW + OpenGL             │  │
+│  │  Live2D Cubism SDK / GIF 精灵         │  │
 │  │  状态: 💤 睡觉 / ⚡ 忙碌 / 🔔 提醒     │  │
+│  │  Dear ImGui 菜单 / 状态栏 /           │  │
+│  │  系统监控面板                         │  │
 │  ├───────────────────────────────────────┤  │
-│  │  Rust 后端:                            │  │
+│  │  内嵌后端:                             │  │
 │  │  · 状态机 (多会话追踪 + 超时清理)       │  │
 │  │  · HTTP Server (127.0.0.1:17521)      │  │
-│  │  · IDE 窗口扫描 (检测 IDE 关闭)        │  │
-│  │  · 点击穿透轮询 (30ms 光标位置)        │  │
+│  │  · IDE 窗口扫描 + Hook 安装           │  │
+│  │  · CPU/内存/GPU/网络 采样             │  │
 │  └───────────────────────────────────────┘  │
 └──────────────────┬──────────────────────────┘
                    │ HTTP POST /hook (localhost)
@@ -120,7 +129,7 @@ cargo tauri build    # 打包：产物在 target/release/bundle/
 | `permission.ask` _(OpenCode)_ | OpenCode 请求权限 | → 提醒 (alert) |
 
 整体状态优先级：alert > working > sleeping。模糊 `Notification` 默认按"任务完成"处理
-（白名单见 `src-tauri/src/config.rs`）。
+（白名单见 [`device/src/backend/backend_config.h`](device/src/backend/backend_config.h)）。
 
 ## 自定义 GIF 角色（v1.3.0+）
 
@@ -139,15 +148,14 @@ cargo tauri build    # 打包：产物在 target/release/bundle/
 ## 自定义 Live2D 模型
 
 把模型目录放到 `~/.dutyon/live2d/<名字>/`（含 `<名字>.moc3` + 贴图 + `model3.json` + 动作），
-精灵菜单的"切换形象"里立刻就能看到。用户模型通过本地回环服务器
-（`http://127.0.0.1:17521/live2d/...`）加载——Tauri asset 协议的响应不带 CORS 头，
-cubism4/pixi 的 XHR 加载器会预检失败，详见[技术说明](docs/technical-notes.md)。
+精灵菜单的"切换形象"里立刻就能看到（原生客户端直接从磁盘加载，无需重启）。
 
 ## 测试
 
 ```bash
-cd src-tauri
-cargo test    # 87 个单元测试（状态机/Hook合并/服务器/点击穿透/扫描器）
+cd device
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --target dutyon-pet
 ```
 
 端到端回归脚本（需先启动精灵）：`.userdata/test-notification.ps1`。
@@ -159,39 +167,44 @@ cargo test    # 87 个单元测试（状态机/Hook合并/服务器/点击穿透
 | 接口 | 方法 | 说明 |
 |------|------|------|
 | `/hook` | POST | 接收 Hook 事件 |
-| `/status` | GET | 当前状态快照 |
+| `/status` | GET | 当前状态快照（1.x 兼容格式） |
+| `/api/status` | GET | 状态快照（2.0 原生格式） |
+| `/api/metrics` | GET | CPU / 内存 / GPU / 网络实时指标 |
+| `/api/events` | GET | 事件流（SSE） |
 | `/health` | GET | 健康检查 |
 | `/unregister` | POST | 注销会话 |
-| `/log` | POST | 前端诊断日志转发（落盘 `~/.dutyon/frontend.log`） |
-| `/live2d/*path` | GET | 用户 Live2D 模型文件（带 CORS） |
+| `/api/hooks` · `/api/hooks/install` | GET/POST | Hook 安装状态 / 触发安装 |
+| `/api/autostart` | GET/POST | 开机自启开关 |
+| `/api/quit` | POST | 退出程序 |
 
 ## 技术栈
 
-- **Tauri 2.0** — 桌面应用框架（系统 WebView2 / WKWebView / WebKitGTK）
-- **Rust** — tokio + axum（HTTP）、serde、regex；平台层 windows crate / core-graphics / x11rb
-- **PixiJS v7 + pixi-live2d-display + Cubism Core** — Live2D 渲染
+- **C++20 单进程架构** — 原生客户端 + 内嵌后端，无 WebView / 浏览器运行时
+- **GLFW + OpenGL + Dear ImGui (FreeType)** — 窗口、渲染与 UI
+- **Live2D Cubism Native SDK** — Live2D 模型渲染
+- **cpp-httplib + nlohmann/json** — 内嵌 HTTP 服务器与事件处理
 - **Trae / Qoder / Cursor / Codex / OpenCode Hooks** — 5 种 IDE 的 AI 生命周期事件钩子
 
 ## 常见问题
 
 **Q: 精灵不显示 Live2D 模型？**
-A: 开发模式查看 DevTools 控制台；发布版诊断日志在 `~/.dutyon/frontend.log`。
+A: 菜单 → "Hook 状态" / `http://127.0.0.1:17521/health` 排查进程状态；
+自定义模型需确认目录结构完整（`model3.json` + `.moc3` + 贴图 + 动作）。
 
 **Q: Hook 安装后没有反应？**
-A: 确保重启了 IDE 或开启了新的 AI 会话；菜单 → "Hook 状态"可查看诊断。
+A: 确保重启了 IDE 或开启了新的 AI 会话；菜单 → "Hook 状态"可查看诊断，
+事件落盘日志在 `~/.dutyon/hook-received.log`。
 
 **Q: 精灵一直显示睡觉？**
 A: 检查 `http://127.0.0.1:17521/health` 是否存活，并确认 Hook 已安装。
 
 **Q: AI 完成了却显示"需要确认"？**
-A: 模糊 Notification 默认按完成处理；如需触发提醒，将 `config.rs` 中
-`ALERT_ON_AMBIGUOUS_NOTIFICATION` 设为 `true`。
+A: 模糊 Notification 默认按完成处理；确认类型白名单见
+`device/src/backend/backend_config.h`（`kNotificationConfirmTypes`）。
 
-**Q: Wayland 下点击穿透不工作？**
-A: Wayland 无全局光标 API，降级为"始终可点击"（X11 正常）。
-
-**Q: 自定义模型切换失败？**
-A: 看 `~/.dutyon/frontend.log` 里的 `[live2d]` 日志行；确认模型目录结构完整。
+**Q: 从 1.x 升级后配置还在吗？**
+A: 在。两版本共用 `~/.dutyon/config.json` 与形象/模型目录；安装器会自动
+装回原目录，可与 1.x 交替安装。
 
 ## 许可证
 

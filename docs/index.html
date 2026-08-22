@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Duty On · 开工啦 — 为中国 Trae 用户量身打造的 AI 编程桌宠</title>
-<meta name="description" content="开工啦 (Duty On)：为中国 Trae 用户量身打造的 Live2D 桌面精灵。实时监控 Trae / Qoder / Cursor / Codex / OpenCode 的 AI 任务状态。Tauri 2 + Rust，内存仅 ~80MB，开源免费。">
+<meta name="description" content="开工啦 (Duty On)：为中国 Trae 用户量身打造的 Live2D 桌面精灵。实时监控 Trae / Qoder / Cursor / Codex / OpenCode 的 AI 任务状态。v2.0 原生 C++ 单进程，无 WebView，开源免费。">
 <style>
   :root {
     --bg: #0f1123; --bg2: #171a35; --card: #1e2244; --line: #2c3160;
@@ -108,8 +108,8 @@
   <div class="wrap hero-inner">
     <div>
       <span class="badge badge-cn">🇨🇳 为中国 Trae 用户量身打造</span>
-      <span class="badge">开源 · Tauri 2 + Rust · 内存仅 ~80MB</span>
-      <span class="badge badge-ver">🎉 v1.3.1 新增系统监控面板 · 默认隐藏</span>
+      <span class="badge">开源 · 原生 C++ 单进程 · 无 WebView</span>
+      <span class="badge badge-ver">🚀 v2.0.0 原生 C++ 重写 · 可与 1.x 交替安装</span>
       <h1>Duty On<span class="zh">开工啦 · 你的 AI 打工监督员</span></h1>
       <p class="tagline">
         专为 <strong>Trae</strong> 设计的 Live2D 桌面精灵——同时监控
@@ -117,8 +117,8 @@
         的 AI 任务状态。干活、干完、还是卡在等你确认，看一眼桌宠就知道，再也不用 Alt-Tab 挨个查。
       </p>
       <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/marine841023/duty-on/releases/tag/v1.3.1">⬇ GitHub 下载 v1.3.1</a>
-        <a class="btn btn-primary" href="https://gitee.com/megrezsoft/dutyo/releases/v1.3.1">⬇ Gitee 下载</a>
+        <a class="btn btn-primary" href="https://github.com/marine841023/duty-on/releases/tag/v2.0.0">⬇ GitHub 下载 v2.0.0</a>
+        <a class="btn btn-primary" href="https://gitee.com/megrezsoft/dutyo/releases/v2.0.0">⬇ Gitee 下载</a>
         <a class="btn btn-ghost" href="#guide">📖 使用指南</a>
         <a class="btn btn-ghost" href="https://github.com/marine841023/duty-on">★ GitHub 仓库</a>
       </div>
@@ -178,8 +178,8 @@
     <div class="why-grid">
       <div class="why-card">
         <span class="why-icon">🪶</span>
-        <h4>Tauri 2 + Rust，内存仅 ~80MB</h4>
-        <p>系统 WebView 渲染，<span class="highlight">无捆绑 Chromium</span>。同类 Electron 方案动辄 400MB+，Duty On 只有其五分之一——24fps 固定帧率，后台安静陪伴。</p>
+        <h4>原生 C++ 单进程，无 WebView</h4>
+        <p>GLFW + OpenGL <span class="highlight">原生渲染</span>，无捆绑 Chromium、无 WebView、无浏览器运行时。一个 dutyon-pet.exe 内嵌全部逻辑——24fps 固定帧率，后台安静陪伴。</p>
       </div>
       <div class="why-card">
         <span class="why-icon">🇨🇳</span>
@@ -276,8 +276,8 @@
       <h2 class="section-title">工作原理</h2>
       <p class="section-sub">IDE Hook 事件 → 本地 HTTP → 状态机 → Live2D 动画</p>
       <pre class="arch">┌─────────────────────────────────────────────┐
-│       DutyOn (Tauri 2 桌面应用)              │
-│   前端 Live2D 精灵   +   Rust 后端状态机      │
+│  DutyOn (原生 C++ 单进程 dutyon-pet.exe)     │
+│   原生客户端 GLFW/OpenGL + 内嵌后端状态机     │
 │   HTTP Server: 127.0.0.1:17521              │
 └──────────────────┬──────────────────────────┘
                    │ HTTP POST /hook (localhost)
@@ -310,7 +310,7 @@
   <div class="wrap">
     <p><strong>Duty On · 开工啦</strong> — 代码 <a href="https://github.com/marine841023/duty-on/blob/master/LICENSE">MIT</a> 开源 ·
     Live2D 运行时与示例模型 © Live2D Inc.（见 <a href="https://github.com/marine841023/duty-on/blob/master/NOTICE">NOTICE</a>）</p>
-    <p style="margin-top:6px">Windows · macOS · Linux &nbsp;|&nbsp; Made with Tauri 2, Rust, PixiJS & pixi-live2d-display</p>
+    <p style="margin-top:6px">Windows (v2.0) · ARM Linux 设备（规划中） &nbsp;|&nbsp; Made with C++, GLFW, OpenGL, Dear ImGui & Live2D Cubism Native SDK</p>
   </div>
 </footer>
 
