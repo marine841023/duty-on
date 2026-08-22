@@ -106,12 +106,56 @@ Var AutoStartState
   Pop $0
   nsExec::Exec 'taskkill /F /IM TraePet.exe /T'
   Pop $0
+  nsExec::Exec 'taskkill /F /IM duty-on.exe /T'
+  Pop $0
   Sleep 500
 !macroend
+
+; ---- 旧安装位置探测（升级安装装回原位）----
+; 优先级：2.0 注册表 > 1.x Tauri 注册表 > 全盘特征文件扫描 > 默认目录。
+; 背景：1.x（Tauri NSIS）把 InstallDir 存在 HKCU "Software\DutyOn" 默认值；
+; 但部分机器注册表被清理软件删除（实测本机即如此），故再加特征文件扫描：
+; duty-on.exe（1.1+ 主程序）/ TraePet.exe（1.0 主程序）。
+!macro TryOldRoot root
+  ${If} $R9 == ""
+    ${IfThen} ${FileExists} "${root}\duty-on.exe" ${|} StrCpy $R9 "${root}" ${|}
+    ${If} $R9 == ""
+      ${IfThen} ${FileExists} "${root}\TraePet.exe" ${|} StrCpy $R9 "${root}" ${|}
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+Function DetectPreviousInstallDir
+  StrCpy $R9 ""
+  ; 1) 2.0 自己的注册表（InstallDirRegKey 已设初值，双保险）
+  ReadRegStr $0 HKCU "${APP_REGKEY}" "InstallDir"
+  ${IfThen} $0 != "" ${|} StrCpy $R9 $0 ${|}
+  ; 2) 1.x Tauri NSIS 的键（默认值存 InstallDir）
+  ${If} $R9 == ""
+    ReadRegStr $0 HKCU "Software\${APP_NAME}" ""
+    ${IfThen} $0 != "" ${|} StrCpy $R9 $0 ${|}
+  ${EndIf}
+  ; 3) 全盘特征文件扫描（C~G 常见自定义位置；注册表被清的机器）
+  ${If} $R9 == ""
+    ${For} $R8 67 71   ; 'C'..'G'
+      IntFmt $R7 "%c:" $R8
+      !insertmacro TryOldRoot "$R7\DutyOn"
+      !insertmacro TryOldRoot "$R7\program\DutyOn"
+      !insertmacro TryOldRoot "$R7\Program Files\DutyOn"
+      !insertmacro TryOldRoot "$R7\Program Files (x86)\DutyOn"
+      !insertmacro TryOldRoot "$R7\TraePet"
+    ${Next}
+  ${EndIf}
+  ${If} $R9 != ""
+    StrCpy $INSTDIR $R9
+    DetailPrint "检测到既有安装: $INSTDIR（升级覆盖）"
+  ${EndIf}
+FunctionEnd
 
 Function .onInit
   ; 语言选择对话框（安装时）
   !insertmacro MUI_LANGDLL_DISPLAY
+  Call DetectPreviousInstallDir
 FunctionEnd
 
 ; ---- 开机自启选项页 ----
@@ -137,6 +181,21 @@ Section "install"
 
   ; 覆盖安装：先关旧进程再写文件
   !insertmacro CloseRunningApp
+
+  ; 就地升级清理：删除 1.x 主程序与 Tauri 专属目录（resources/_up_），
+  ; 用户数据在 ~/.dutyon 不受影响；旧卸载器一并移除（由 2.0 接管）
+  Delete "$INSTDIR\duty-on.exe"
+  Delete "$INSTDIR\TraePet.exe"
+  Delete "$INSTDIR\uninstall.exe"
+  Delete "$INSTDIR\Uninstall TraePet.exe"
+  RMDir /r "$INSTDIR\resources"
+  RMDir /r "$INSTDIR\_up_"
+  Delete "$SMPROGRAMS\DutyOn.lnk"
+
+  ; 1.0 僵尸自启项清理（目录已删但 Run 项残留，指向失效路径）
+  ${IfNot} ${FileExists} "D:\TraePet\TraePet.exe"
+    DeleteRegValue HKCU "${AUTORUN_REGKEY}" "TraePet"
+  ${EndIf}
 
   File "..\..\device\build\Release\${APP_EXE}"
   File "..\..\device\build\Release\glfw3.dll"
