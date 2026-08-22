@@ -1,6 +1,6 @@
 [package]
 name = "duty-on"
-version = "1.3.1"
+version = "1.3.2"
 description = "Live2D desktop pet for monitoring Trae IDE AI task status"
 authors = ["DutyOn"]
 edition = "2021"
@@ -38,7 +38,7 @@ image = { version = "0.25", default-features = false, features = ["gif", "png", 
 base64 = "0.22"
 # NVIDIA GPU metrics (utilization + VRAM) for the system monitor drawer.
 # Loads nvml.dll at runtime; a missing NVIDIA driver degrades the GPU row
-# to "—" instead of failing (Nvml::init() returns Err::LibNotLoaded).
+# to "鈥? instead of failing (Nvml::init() returns Err::LibNotLoaded).
 nvml-wrapper = "0.11"
 
 [target.'cfg(windows)'.dependencies]
@@ -59,7 +59,7 @@ core-graphics = "0.24"
 core-foundation = "0.10"
 
 # Linux: X11 cursor position (XQueryPointer) + window enumeration (XQueryTree).
-# Wayland has no global cursor/window APIs — connection failure is the detector.
+# Wayland has no global cursor/window APIs 鈥?connection failure is the detector.
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13"
 

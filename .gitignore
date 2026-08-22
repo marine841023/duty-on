@@ -33,3 +33,9 @@ Thumbs.db
 .userdata/*.png
 .userdata/check-i18n*.js
 .userdata/enum-titles.ps1
+
+# v2.0-dev branch content (C++ native client + packaging tools) — not part
+# of the 1.x master branch; only present in the working tree during
+# cross-branch work.
+/device/
+/tools/
