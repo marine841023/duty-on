@@ -45,9 +45,6 @@ endif()
 # ---------------------------------------------------------------------------
 include(FetchContent)
 
-FetchContent_Declare(cpr
-    GIT_REPOSITORY https://github.com/libcpr/cpr.git
-    GIT_TAG 1.10.5)
 FetchContent_Declare(json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
     GIT_TAG v3.11.3)
@@ -56,7 +53,15 @@ FetchContent_Declare(stb
     GIT_TAG master)
 
 if(WIN32)
-    # PC 端：GLFW（窗口）+ ImGui（UI 叠加层）
+    # PC 端：GLFW（窗口）+ ImGui（UI 叠加层）+ FreeType（字体 hinting 光栅化）
+    # stb_truetype 无 hinting：8~11px 小字号 CJK 笔画抗锯齿后糊成灰色
+    # （低分辨率屏 ui_scale<1 时尤为明显），FreeType 走 TrueType 原生
+    # hinting，笔画对齐像素网格，同字号清晰得多。
+    # httplib（cpp-httplib 单头）：内嵌 HTTP 服务器（原 duty-on.exe 的
+    # /hook 接收 + 硬件显示只读 API，单进程化）。网络受限，随仓库分发
+    # 单头文件（third_party/deps/httplib/httplib.h），不走 FetchContent。
+    # Windows 无 cpr：HTTP 客户端轮询（ApiClient）仅设备端使用，PC 端
+    # 内嵌后端直连，零 libcurl/cpr 依赖（少分发 cpr.dll + libcurl.dll）。
     FetchContent_Declare(glfw
         GIT_REPOSITORY https://github.com/glfw/glfw.git
         GIT_TAG 3.4)
@@ -64,9 +69,29 @@ if(WIN32)
         GIT_REPOSITORY https://github.com/ocornut/imgui.git
         GIT_TAG v1.91.5
         GIT_SHALLOW TRUE)
-    FetchContent_MakeAvailable(cpr json stb glfw imgui)
+    FetchContent_Declare(freetype
+        GIT_REPOSITORY https://github.com/freetype/freetype.git
+        GIT_TAG VER-2-13-3
+        GIT_SHALLOW TRUE)
+    # 只要 TTF/TTC 光栅化：关掉 zlib/bzip2/png/harfbuzz/brotli 子依赖
+    set(FT_DISABLE_ZLIB ON)
+    set(FT_DISABLE_BZIP2 ON)
+    set(FT_DISABLE_PNG ON)
+    set(FT_DISABLE_HARFBUZZ ON)
+    set(FT_DISABLE_BROTLI ON)
+    # glfw 保持 DLL（此前由 cpr 的 CMakeLists 隐式置 ON，现显式声明）：
+    # 预处理器已定义 GLFW_DLL，换静态库会 dllimport 链接失败。
+    # json/stb 为 header-only，不受该开关影响。
+    set(BUILD_SHARED_LIBS ON)
+    FetchContent_MakeAvailable(json stb glfw imgui)
+    # freetype 单独引入并强制静态 —— 运行期免分发 freetype.dll
+    set(BUILD_SHARED_LIBS OFF)
+    FetchContent_MakeAvailable(freetype)
 else()
-    # ARM Linux：系统 EGL + GLES3
+    # ARM Linux：系统 EGL + GLES3 + cpr（设备端轮询 PC 的 /api/status）
+    FetchContent_Declare(cpr
+        GIT_REPOSITORY https://github.com/libcpr/cpr.git
+        GIT_TAG 1.10.5)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(EGL REQUIRED egl)
     pkg_check_modules(GLES3 REQUIRED glesv3)
@@ -114,12 +139,18 @@ if(WIN32)
         ${IMGUI_DIR}/imgui_widgets.cpp
         ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
         ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+        ${IMGUI_DIR}/misc/freetype/imgui_freetype.cpp
     )
     target_include_directories(imgui_lib PUBLIC
         ${IMGUI_DIR}
         ${IMGUI_DIR}/backends
+        ${IMGUI_DIR}/misc/freetype
     )
-    target_link_libraries(imgui_lib PUBLIC glfw opengl32)
+    # PUBLIC：ui_renderer.cpp 等直接 include imgui.h 的编译单元必须与
+    # imgui_lib 使用同一 ImFontConfig 布局（IMGUI_ENABLE_FREETYPE 会
+    # 增补 RasterizerFlags 等字段，两侧不一致即 UB）
+    target_compile_definitions(imgui_lib PUBLIC IMGUI_ENABLE_FREETYPE)
+    target_link_libraries(imgui_lib PUBLIC glfw opengl32 freetype)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -127,16 +158,32 @@ endif()
 # ---------------------------------------------------------------------------
 set(SOURCES
     src/main.cpp
-    src/api/client.cpp
+    src/config/user_config.cpp
+    src/render/gif_sprite.cpp
     src/render/live2d_renderer.cpp
     src/state/machine.cpp
+    src/ui/i18n.cpp
     src/ui/ui_renderer.cpp
 )
 
 if(WIN32)
-    list(APPEND SOURCES src/platform/win32_window.cpp)
-else()
+    # 环境变量门控的诊断工具（DUTYON_FT_PROBE / DUTYON_MEM），从 main.cpp 抽出
+    # 内嵌后端（原 src-tauri Rust 后端的 C++ 移植：状态机/IDE 扫描/指标
+    # 采样/hook 安装器/HTTP 服务器/服务聚合）
     list(APPEND SOURCES
+        src/platform/win32_window.cpp
+        src/debug_diag.cpp
+        src/backend/state_manager.cpp
+        src/backend/ide_scanner.cpp
+        src/backend/sys_monitor.cpp
+        src/backend/hooks_installer.cpp
+        src/backend/autostart.cpp
+        src/backend/http_server.cpp
+        src/backend/backend_service.cpp)
+else()
+    # ApiClient（HTTP 轮询 PC 端 API）仅设备端使用；PC 端内嵌后端直连
+    list(APPEND SOURCES
+        src/api/client.cpp
         src/platform/egl_window.cpp
         src/render/gles_context.cpp)
 endif()
@@ -150,24 +197,50 @@ target_include_directories(dutyon-pet PRIVATE
     ${stb_SOURCE_DIR}
 )
 
+if(WIN32)
+    # cpp-httplib 单头文件（third_party/deps/httplib/httplib.h 随仓库分发）
+    target_include_directories(dutyon-pet PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/deps/httplib)
+endif()
+
 target_compile_definitions(dutyon-pet PRIVATE ${CSM_TARGET})
+
+# 诊断：生成 link map（含行号），崩溃偏移可直查源码位置
+if(MSVC)
+    target_link_options(dutyon-pet PRIVATE "/MAP:${CMAKE_CURRENT_BINARY_DIR}/dutyon-pet.map" "/MAPINFO:LINES")
+endif()
 
 # 平台特定链接
 if(WIN32)
     target_link_libraries(dutyon-pet
         cubism_framework
-        Live2DCubismCore
+        Live2DCubismCore_MD
         glfw
         imgui_lib
         opengl32
-        cpr::cpr
         nlohmann_json::nlohmann_json
+        ws2_32        # cpp-httplib 内嵌 HTTP 服务器（Winsock）
         shell32       # Shell_NotifyIcon
         user32
         gdi32
+        psapi         # EnumProcessModules（崩溃诊断）
     )
-    # 子系统：无控制台窗口（调试用 console 版可注释掉）
-    # set_target_properties(dutyon-pet PROPERTIES WIN32_EXECUTABLE TRUE)
+    # 子系统 WINDOWS：启动不弹控制台黑窗。入口仍是 main()，需显式指定
+    # mainCRTStartup（否则链接器找 WinMain 报错）。调试要看 printf 日志时
+    # 从控制台/重定向启动仍可拿到输出（stdout 句柄有效时 printf 正常写）
+    set_target_properties(dutyon-pet PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_options(dutyon-pet PRIVATE "/ENTRY:mainCRTStartup")
+
+    # Cubism SDK 5 的 OpenGL shader 在运行时从文件加载（FrameworkShaders/*.vert|frag，
+    # 相对路径由 live2d_renderer.cpp 的 FrameworkLoadFile 解析到 exe 同目录）。
+    # 构建后把 Standard 版 shader 复制到输出目录的 FrameworkShaders/ 下。
+    add_custom_command(TARGET dutyon-pet POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:dutyon-pet>/FrameworkShaders"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CUBISM_FRAMEWORK_PATH}/src/Rendering/OpenGL/Shaders/Standard"
+            "$<TARGET_FILE_DIR:dutyon-pet>/FrameworkShaders"
+    )
 else()
     target_include_directories(dutyon-pet PRIVATE
         ${EGL_INCLUDE_DIRS}

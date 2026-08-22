@@ -4,9 +4,11 @@ Third-Party Notices
 Duty On (开工啦) bundles the following third-party software and assets.
 The Duty On source code itself is licensed under the MIT License (see LICENSE).
 
-Live2D Cubism Core
-------------------
-Files: frontend/lib/live2dcubismcore.min.js, assets/libs/live2dcubismcore.min.js
+Live2D Cubism Native SDK (Core + Framework)
+-------------------------------------------
+Files: device/third_party/CubismNativeSdk/** (not distributed with this
+repository; downloaded manually per the Live2D SDK license), plus the
+Live2DCubismCore runtime linked into the application binary.
 Copyright (c) Live2D Inc.
 Licensed under the Live2D Proprietary Software License.
 https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html
@@ -20,15 +22,3 @@ These are official free sample materials distributed by Live2D Inc. under the
 Live2D Free Material License. They are bundled with this project for
 demonstration purposes and remain the property of Live2D Inc.
 https://www.live2d.com/eula/live2d-free-material-license-agreement_en.html
-
-PixiJS
-------
-Files: frontend/lib/pixi.min.js
-Copyright (c) Goodboy Digital Ltd. and contributors
-Licensed under the MIT License. https://pixijs.com
-
-pixi-live2d-display
--------------------
-Files: frontend/lib/cubism4.min.js
-Copyright (c) guansss and contributors
-Licensed under the MIT License. https://github.com/guansss/pixi-live2d-display

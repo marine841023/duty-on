@@ -6,39 +6,42 @@ Thanks for your interest! Issues and pull requests are welcome.
 ## Ways to contribute
 
 - **Bug reports** — use the bug report template; include your OS, app version,
-  and the relevant lines from `~/.dutyon/frontend.log` (if UI-related)
+  and steps to reproduce
 - **Feature ideas** — open a feature request first so we can align on scope
 - **New IDE integrations** — the hook protocol is a plain HTTP POST to
   `127.0.0.1:17521/hook`; see `hooks/hooks-template.json` and
-  `src-tauri/src/state_manager.rs` for the event model
-- **Translations** — `frontend/i18n.js` holds all 8 locales; keep key order aligned
+  `device/src/backend/state_manager.cpp` for the event model
+- **Translations** — `device/src/ui/i18n.cpp` holds all locales; keep key
+  order aligned
 - **Live2D models** — we can only bundle models with a redistribution-friendly
   license; user models can always be dropped into `~/.dutyon/live2d/` locally
 
 ## Development setup
 
-```bash
-# Rust stable + Tauri CLI + platform prerequisites (https://v2.tauri.app)
-cd src-tauri
-cargo tauri dev     # run with DevTools
-cargo test          # must stay green (52 tests)
+2.0 is a single-process C++ application (embedded HTTP server + state machine
++ native Live2D client). See `device/README.md` for prerequisites.
+
+```powershell
+cd device
+cmake -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+.\build\Release\dutyon-pet.exe
 ```
 
-No npm/node needed — the frontend is plain static files.
+No npm/node needed.
 
 ## Conventions
 
-- **Rust**: keep new logic covered by unit tests; state transitions belong in
-  `state_manager.rs`, platform APIs behind `click_through.rs` / `ide_scanner.rs`
-- **Frontend**: vanilla JS only, no build step; log via `window.__petSendLog`
-  so release builds stay diagnosable
+- **C++**: state transitions belong in `device/src/backend/state_manager.cpp`;
+  platform window/click-through logic in `device/src/platform/`, IDE window
+  scanning in `device/src/backend/ide_scanner.cpp`
 - **Commits**: concise imperative messages, Chinese or English both fine
   (e.g. `fix: 迷你模式切换后模型缩放错乱` / `feat: add /live2d file route`)
-- Don't commit `src-tauri/target/`, `node_modules/`, or anything under
-  `~/.dutyon/` (user data)
+- Don't commit `device/build/`, `device/third_party/` (Cubism SDK license
+  forbids redistribution), or anything under `~/.dutyon/` (user data)
 
 ## Pull requests
 
-1. Fork & branch from `master`
-2. `cargo test` green + `node --check` on edited JS files
+1. Fork & branch from the target branch (`master` for 1.x, `v2.0-dev` for 2.0)
+2. `cmake --build` green on your platform
 3. Describe the user-visible behavior change and how you verified it

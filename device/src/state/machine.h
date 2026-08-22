@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <string>
 #include <utility>
 #include "api/client.h"
@@ -27,10 +28,19 @@ public:
     // 当前状态对应的动作
     std::pair<std::string, int> currentMotion() const;
 
+    // 指定状态的当前动作（动作设定菜单 hint 用）
+    std::pair<std::string, int> motionForState(const std::string& state) const;
+
+    // 动作设定：覆盖某状态的默认动作（对应 1.x 菜单「动作设定」）
+    void setMotionFor(const std::string& state, const std::string& group, int index);
+
+    // 清除全部用户覆盖（切换模型后按新模型的 stateMotions 重新应用）
+    void clearOverrides();
+
 private:
     std::string current_state_;
-
-    static std::pair<std::string, int> motionFor(const std::string& state);
+    // 状态 -> 用户设定的动作（覆盖默认映射）
+    std::map<std::string, std::pair<std::string, int>> overrides_;
 };
 
 } // namespace dutyon

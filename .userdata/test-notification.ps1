@@ -1,5 +1,9 @@
 # White-list Notification classification test.
-# Verifies _checkConfirmationNeeded: task_complete -> idle, ambiguous -> idle, tool_name -> alert.
+# Verifies StateManager::checkConfirmationNeeded: task_complete -> idle,
+# ambiguous -> idle, tool_name -> alert.
+# Prerequisites: dutyon-pet.exe must already be running (embedded HTTP server
+# on 127.0.0.1:17521). Run from the project root:
+#   .\.userdata\test-notification.ps1
 $base = 'http://127.0.0.1:17521'
 function Send-Json($obj) {
     $body = $obj | ConvertTo-Json -Compress

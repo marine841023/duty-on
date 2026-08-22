@@ -103,8 +103,8 @@ cargo tauri build   # bundles into target/release/bundle/
 
 ### Enable IDE hooks
 
-Right-click the pet → **安装 Hook 集成** (or run `hooks/install-hooks.ps1`
-on Windows), then restart your IDE or start a new AI session.
+Right-click the pet → **安装 Hook 集成**, then restart your IDE or start
+a new AI session.
 
 ## How it works
 
@@ -176,8 +176,8 @@ cargo tauri dev    # run with DevTools
 cargo test         # 87 unit tests (state machine, hooks merge, server, …)
 ```
 
-End-to-end regression scripts (pet must be running):
-`.userdata/test-flow.ps1`, `.userdata/test-notification.ps1`.
+End-to-end regression script (pet must be running):
+`.userdata/test-notification.ps1`.
 
 ## Tech stack
 

@@ -17,6 +17,6 @@ constexpr int kDisplayHeight = 480;
 
 // Live2D 模型路径
 constexpr const char* kModelDir = "/opt/dutyon/models/";
-constexpr const char* kDefaultModel = "hiyori";
+constexpr const char* kDefaultModel = "miku_pro";
 
 } // namespace dutyon

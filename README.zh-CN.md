@@ -78,7 +78,7 @@ cargo tauri build    # 打包：产物在 target/release/bundle/
 
 ### 安装 Hook 集成
 
-右键精灵菜单 → **安装 Hook 集成**（或运行 `hooks/install-hooks.ps1`），
+右键精灵菜单 → **安装 Hook 集成**，
 然后**重启 IDE 或开启新的 AI 会话**即可生效。
 桥接脚本：`hooks/trae-hook-bridge.ps1`（Windows）、`hooks/trae-hook-bridge.sh`（macOS/Linux）。
 
@@ -150,7 +150,7 @@ cd src-tauri
 cargo test    # 87 个单元测试（状态机/Hook合并/服务器/点击穿透/扫描器）
 ```
 
-端到端回归脚本（需先启动精灵）：`.userdata/test-flow.ps1`、`.userdata/test-notification.ps1`。
+端到端回归脚本（需先启动精灵）：`.userdata/test-notification.ps1`。
 
 ## API 接口
 

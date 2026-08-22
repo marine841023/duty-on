@@ -6,26 +6,25 @@
 ## 架构
 
 ```
-┌─ PC (Windows) ──────────────────────┐
-│ duty-on.exe (Rust, 纯后端无窗口)      │
-│  └ HTTP/SSE API :17521               │
-│    (hooks 接收/状态机/系统监控)        │
-│           ▲ localhost                │
-│ dutyon-pet.exe (C++ 原生) ◄──────────┤
-│  GLFW 透明窗口 + OpenGL 3.3           │
-│  Live2D Native + ImGui 监控面板      │
-│  ~30MB 内存，无 WebView2 进程群       │
-└──────────────────────────────────────┘
-
+┌─ PC (Windows) ──────────────────────────────┐
+│ dutyon-pet.exe（C++ 单进程）                  │
+│  ├ 内嵌 HTTP Server (cpp-httplib) :17521     │
+│  │   /hook 接收 · /api/status · /api/metrics │
+│  ├ 状态机 + IDE 窗口扫描 + 系统指标采样        │
+│  └ GLFW 透明窗口 + OpenGL 3.3                │
+│      Live2D Native + ImGui 监控面板          │
+│ 实测 ~118MB，无 WebView2 进程群              │
+└─────────────────────────────────────────────┘
+                   ▲ 局域网 HTTP 轮询
 ┌─ 硬件 (ARM Linux) ──────────────────┐
-│ dutyon-device (C++ 同源)             │
-│  EGL/GLES2 framebuffer 直渲          │
-│  轮询 PC 的 HTTP API（局域网）        │
-│  ~60MB 内存（含系统）                 │
-└──────────────────────────────────────┘
+│ dutyon-pet（C++ 同源，ApiClient）     │
+│  EGL/GLES framebuffer 直渲          │
+│  轮询 PC 的 /api/status + /api/metrics │
+└─────────────────────────────────────┘
 ```
 
-**一套 C++ 代码，两个平台。** 浏览器/WebView 在 2.0 中不存在。
+**一套 C++ 代码，两个平台。** 浏览器/WebView 在 2.0 中不存在；
+1.x 的 Rust 后端（src-tauri）已移除，全部职责内嵌进 `dutyon-pet.exe`。
 
 ## 目录结构
 
@@ -37,27 +36,32 @@ device/
 ├── src/
 │   ├── main.cpp                # 统一入口（平台分流）
 │   ├── config.h                # 编译期配置
+│   ├── config/                 # 用户配置（位置记忆等）
 │   ├── api/
-│   │   ├── client.h            # HTTP 客户端（状态 + 监控轮询）
-│   │   └── client.cpp
+│   │   └── client.{h,cpp}      # HTTP 客户端（仅 ARM 设备端，轮询 PC API）
+│   ├── backend/                # 内嵌后端（原 src-tauri Rust 的 C++ 移植，仅 PC）
+│   │   ├── http_server.cpp     #   cpp-httplib 服务器 :17521
+│   │   ├── state_manager.cpp   #   多会话状态机
+│   │   ├── ide_scanner.cpp     #   IDE 窗口扫描（检测 IDE 关闭）
+│   │   ├── sys_monitor.cpp     #   CPU/RAM/GPU/网络指标采样（含 NVML）
+│   │   ├── hooks_installer.cpp #   IDE hook 幂等安装（5 IDE）
+│   │   ├── autostart.cpp       #   开机自启（注册表）
+│   │   └── backend_service.cpp #   后端聚合服务
 │   ├── platform/
 │   │   ├── window.h            # 平台窗口抽象接口
 │   │   ├── win32_window.cpp    # Windows: GLFW 透明窗口 + 穿透/托盘/拖拽
 │   │   └── egl_window.cpp      # ARM Linux: EGL framebuffer 直渲
 │   ├── render/
-│   │   ├── live2d_renderer.h   # Live2D Cubism Native 封装
-│   │   ├── live2d_renderer.cpp # 完整实现（moc3/表情/物理/眨眼/呼吸/动作）
-│   │   ├── gles_context.h      # ARM: EGL/GLES2 上下文
-│   │   └── gles_context.cpp
-│   ├── state/
-│   │   ├── machine.h           # 状态机：API 状态 -> Live2D 动作
-│   │   └── machine.cpp
+│   │   ├── live2d_renderer.cpp # Live2D Cubism Native 封装（moc3/物理/眨眼/动作）
+│   │   ├── gif_sprite.cpp      # 自定义 GIF 精灵（WIC 解码多帧）
+│   │   └── gles_context.cpp    # ARM: EGL/GLES 上下文
+│   ├── state/machine.cpp       # 状态机：API 状态 -> Live2D 动作
 │   └── ui/
-│       ├── ui_renderer.h       # UI 叠加层抽象
+│       ├── i18n.cpp            # 多语言
 │       └── ui_renderer.cpp     # PC: ImGui 监控面板 + 状态栏
-├── models/                     # Live2D 模型（与桌面版同格式）
 └── third_party/
-    └── CubismNativeSdk/        # Live2D Cubism Native SDK（需自行下载）
+    ├── CubismNativeSdk/        # Live2D Cubism Native SDK（需自行下载）
+    └── deps/                   # httplib.h（随仓库）、glew-2.2.0（需自行下载）
 ```
 
 ## 依赖
@@ -65,12 +69,17 @@ device/
 | 依赖 | PC (Windows) | ARM Linux | 说明 |
 |---|---|---|---|
 | Cubism Native SDK | 需手动下载 | 需手动下载 | Live2D 官方 SDK，放入 `third_party/CubismNativeSdk/` |
+| GLEW 2.2.0 | 需手动下载 | — | Cubism Framework 依赖，放入 `third_party/deps/glew-2.2.0/` |
+| cpp-httplib | 随仓库分发 | — | 内嵌 HTTP 服务器（单头文件） |
 | GLFW | FetchContent | — | 窗口 + OpenGL 上下文 |
-| ImGui | FetchContent | — | UI 叠加层（监控面板/状态栏） |
-| cpr + nlohmann/json | FetchContent | FetchContent | HTTP 客户端 |
-| stb_image | FetchContent | FetchContent | PNG 纹理解码 |
+| ImGui + FreeType | FetchContent | — | UI 叠加层（FreeType 保证小字号 CJK 清晰） |
+| nlohmann/json | FetchContent | FetchContent | JSON 解析 |
+| stb | FetchContent | FetchContent | 图像纹理解码 |
+| cpr | — | FetchContent | HTTP 客户端（仅设备端轮询） |
 | OpenGL 3.3 | 系统 | — | PC 渲染后端 |
 | EGL + GLES3 | — | 系统 | ARM 渲染后端 |
+
+Windows 端零 libcurl/cpr 依赖（少分发 cpr.dll + libcurl.dll）。
 
 ## 构建
 
@@ -78,45 +87,41 @@ device/
 
 ```powershell
 cd device
-mkdir build; cd build
-cmake .. -G "Visual Studio 17 2022" -A x64
-cmake --build . --config Release
-.\Release\dutyon-pet.exe
+cmake -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+.\build\Release\dutyon-pet.exe
 ```
 
 ### ARM Linux（交叉编译）
 
 ```bash
 cd device
-mkdir build && cd build
-cmake -DCMAKE_TOOLCHAIN_FILE=../cmake/aarch64-toolchain.cmake ..
-make -j$(nproc)
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=../cmake/aarch64-toolchain.cmake
+cmake --build build -j$(nproc)
 ```
 
 ## 实现状态
 
 - [x] 平台窗口抽象（`IPlatformWindow`）
 - [x] Windows: GLFW 透明无边框窗口 + Win32 穿透/托盘/拖拽/右键菜单
-- [x] ARM Linux: EGL/GLES2 framebuffer 直渲
-- [x] HTTP 轮询 `/api/status` + `/api/metrics`（与 Rust serde 对齐）
-- [x] 状态机（overallState -> 动作组，与桌面版一致）
+- [x] Windows: 内嵌 HTTP 服务器（/health /api/status /api/metrics /hook /unregister）
+- [x] 状态机（多会话追踪 + 超时清理 + overallState -> 动作组）
+- [x] IDE 窗口扫描 + hook 幂等安装（Trae/Qoder/Cursor/Codex/OpenCode）
+- [x] 系统指标采样（CPU/RAM/GPU-NVML/网络）+ ImGui 监控面板
 - [x] Live2D 完整集成（moc3/表情/物理/姿势/眨眼/呼吸/GLES2+GL3 渲染）
-- [x] ImGui 监控面板（CPU/RAM/GPU/NET/自占）+ 状态栏
-- [x] Rust 后端 `/api/metrics` HTTP 暴露（替代 Tauri event）
-- [ ] Cubism Native SDK 放入 third_party（需手动下载，许可限制）
-- [ ] PC 端真机构建验证（需 Visual Studio + SDK）
+- [x] 自定义 GIF 精灵（WIC 多帧解码 + 透明索引）
+- [x] 窗口位置持久化（记忆上次启动位置）
+- [x] 开机自启（注册表）
 - [ ] ARM 真机交叉编译验证
 - [ ] DRM/KMS 直接显示（部分 Mali 驱动需 GBM surface）
-- [ ] 自定义模型选择 UI（当前硬编码 nito）
-- [ ] 窗口位置持久化
 
 ## 与 1.x 的关系
 
 | | 1.x | 2.0 |
 |---|---|---|
 | 前端 | WebView2 (Chromium) + PixiJS + HTML | 无浏览器，C++ 原生 |
-| 后端 | Tauri (Rust) | 同一套 Rust，但纯 API 无窗口 |
-| UI 框架 | HTML/CSS/JS | ImGui (PC) / 占位 (ARM) |
+| 后端 | Tauri (Rust) 独立进程 | C++ 内嵌单进程（无 Rust） |
+| UI 框架 | HTML/CSS/JS | ImGui (PC) |
 | Live2D | pixi-live2d-display (WebGL) | Cubism Native SDK (OpenGL) |
-| 内存 | ~80-120MB | 目标 ~30MB (PC) / ~60MB (ARM) |
+| 内存 | ~140MB（双进程） | 实测 ~118MB（单进程） |
 | 模型格式 | .model3.json | **相同格式，原样复用** |
