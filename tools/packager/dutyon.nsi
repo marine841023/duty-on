@@ -112,27 +112,33 @@ Var AutoStartState
 !macroend
 
 ; ---- 旧安装位置探测（升级安装装回原位）----
-; 优先级：2.0 注册表 > 1.x Tauri 注册表 > 全盘特征文件扫描 > 默认目录。
-; 背景：1.x（Tauri NSIS）把 InstallDir 存在 HKCU "Software\DutyOn" 默认值；
-; 但部分机器注册表被清理软件删除（实测本机即如此），故再加特征文件扫描：
-; duty-on.exe（1.1+ 主程序）/ TraePet.exe（1.0 主程序）。
+; 优先级：1.x Tauri 恢复键 > 2.0 命名值 > 全盘特征文件扫描 > 默认目录。
+; 权威依据（tauri-bundler 2.9.4 installer.nsi，实测核对）：
+;   1.x RestorePreviousInstallLocation 读 SHCTX "Software\<MANUFACTURER>\<PRODUCTNAME>"
+;   的默认值 —— 即 HKCU "Software\DutyOn\DutyOn" 默认值（两层子键）。
+;   MANUFACTURER/DutyOn 与 PRODUCTNAME/DutyOn 同名，实测本机 1.3.1 安装后
+;   写入 [HKCU\Software\DutyOn\DutyOn] 默认值 = 安装目录。
+; 1.x 与 2.0 均读写该键 => 双向交替恢复闭环。
 !macro TryOldRoot root
   ${If} $R9 == ""
-    ${IfThen} ${FileExists} "${root}\duty-on.exe" ${|} StrCpy $R9 "${root}" ${|}
+    ${IfThen} ${FileExists} "${root}\dutyon-pet.exe" ${|} StrCpy $R9 "${root}" ${|}
     ${If} $R9 == ""
-      ${IfThen} ${FileExists} "${root}\TraePet.exe" ${|} StrCpy $R9 "${root}" ${|}
+      ${IfThen} ${FileExists} "${root}\duty-on.exe" ${|} StrCpy $R9 "${root}" ${|}
+      ${If} $R9 == ""
+        ${IfThen} ${FileExists} "${root}\TraePet.exe" ${|} StrCpy $R9 "${root}" ${|}
+      ${EndIf}
     ${EndIf}
   ${EndIf}
 !macroend
 
 Function DetectPreviousInstallDir
   StrCpy $R9 ""
-  ; 1) 2.0 自己的注册表（InstallDirRegKey 已设初值，双保险）
-  ReadRegStr $0 HKCU "${APP_REGKEY}" "InstallDir"
+  ; 1) 1.x Tauri 恢复键（HKCU Software\DutyOn\DutyOn 默认值；2.0 也写）
+  ReadRegStr $0 HKCU "Software\${APP_NAME}\${APP_NAME}" ""
   ${IfThen} $0 != "" ${|} StrCpy $R9 $0 ${|}
-  ; 2) 1.x Tauri NSIS 的键（默认值存 InstallDir）
+  ; 2) 2.0 命名值（老版本 2.0.0 写过）
   ${If} $R9 == ""
-    ReadRegStr $0 HKCU "Software\${APP_NAME}" ""
+    ReadRegStr $0 HKCU "${APP_REGKEY}" "InstallDir"
     ${IfThen} $0 != "" ${|} StrCpy $R9 $0 ${|}
   ${EndIf}
   ; 3) 全盘特征文件扫描（C~G 常见自定义位置；注册表被清的机器）
@@ -215,10 +221,11 @@ Section "install"
 
   ; 安装信息 + 卸载入口（当前用户）
   WriteRegStr HKCU "${APP_REGKEY}" "InstallDir" "$INSTDIR"
-  ; 双版本交替安装闭环：同时写"默认值"（1.x Tauri NSIS 的 InstallDirRegKey
-  ; 读默认值恢复目录），1.x 回装时才能装回本目录而不是落到 LOCALAPPDATA。
-  ; 双向对称：2.0 的 DetectPreviousInstallDir 也读该默认值。
-  WriteRegStr HKCU "${APP_REGKEY}" "" "$INSTDIR"
+  ; 双版本交替安装闭环（实测核对 tauri-bundler 2.9.4 installer.nsi）:
+  ; 1.x 的 RestorePreviousInstallLocation 读 HKCU "Software\DutyOn\DutyOn"
+  ; 默认值（MANUFACTURER\PRODUCTNAME 两层）恢复安装目录 —— 1.x 回装时
+  ; 装回本目录。2.0 的 DetectPreviousInstallDir 优先读同一键。
+  WriteRegStr HKCU "Software\${APP_NAME}\${APP_NAME}" "" "$INSTDIR"
   WriteRegStr HKCU "${APP_UNINSTKEY}" "DisplayName" "${APP_NAME} (${APP_NAME_CN})"
   WriteRegStr HKCU "${APP_UNINSTKEY}" "DisplayVersion" "${APP_VERSION}"
   WriteRegStr HKCU "${APP_UNINSTKEY}" "Publisher" "${APP_PUBLISHER}"
@@ -240,7 +247,10 @@ Section "Uninstall"
 
   DeleteRegValue HKCU "${AUTORUN_REGKEY}" "${APP_NAME}"
   DeleteRegKey HKCU "${APP_UNINSTKEY}"
-  DeleteRegKey HKCU "${APP_REGKEY}"
+  ; 只删自己的命名值，不删 Software\DutyOn 整键（会连带恢复键子键
+  ; DutyOn\DutyOn）。保留位置记忆：卸载 2.0 改装 1.x 时仍能装回原目录，
+  ; 对交替使用场景友好；残留空键无害（重装双方都会重写）。
+  DeleteRegValue HKCU "${APP_REGKEY}" "InstallDir"
 
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME} ${APP_NAME_CN}.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}\$(UninstallLink).lnk"
