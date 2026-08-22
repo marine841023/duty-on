@@ -215,6 +215,10 @@ Section "install"
 
   ; 安装信息 + 卸载入口（当前用户）
   WriteRegStr HKCU "${APP_REGKEY}" "InstallDir" "$INSTDIR"
+  ; 双版本交替安装闭环：同时写"默认值"（1.x Tauri NSIS 的 InstallDirRegKey
+  ; 读默认值恢复目录），1.x 回装时才能装回本目录而不是落到 LOCALAPPDATA。
+  ; 双向对称：2.0 的 DetectPreviousInstallDir 也读该默认值。
+  WriteRegStr HKCU "${APP_REGKEY}" "" "$INSTDIR"
   WriteRegStr HKCU "${APP_UNINSTKEY}" "DisplayName" "${APP_NAME} (${APP_NAME_CN})"
   WriteRegStr HKCU "${APP_UNINSTKEY}" "DisplayVersion" "${APP_VERSION}"
   WriteRegStr HKCU "${APP_UNINSTKEY}" "Publisher" "${APP_PUBLISHER}"
