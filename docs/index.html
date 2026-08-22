@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Duty On · 开工啦 — 为中国 Trae 用户量身打造的 AI 编程桌宠</title>
-<meta name="description" content="开工啦 (Duty On)：为中国 Trae 用户量身打造的 Live2D 桌面精灵。实时监控 Trae / Qoder / Cursor / Codex / OpenCode 的 AI 任务状态。Tauri 2 + Rust，内存仅 ~80MB，开源免费。">
+<meta name="description" content="开工啦 (Duty On)：为中国 Trae 用户量身打造的 Live2D 桌面精灵。实时监控 Trae / Qoder / Cursor / Codex / OpenCode 的 AI 任务状态。v2.0 原生 C++ 单进程实测 ~116MB，开源免费。">
 <style>
   :root {
     --bg: #0f1123; --bg2: #171a35; --card: #1e2244; --line: #2c3160;
@@ -108,7 +108,7 @@
   <div class="wrap hero-inner">
     <div>
       <span class="badge badge-cn">🇨🇳 为中国 Trae 用户量身打造</span>
-      <span class="badge">开源 · Tauri 2 + Rust · 内存仅 ~80MB</span>
+      <span class="badge">开源 · Tauri 2 + Rust · 2.0 原生版实测 ~116MB</span>
       <span class="badge badge-ver">🎉 v1.3.2 修复子代理/长工具误睡 · 通知全类型提醒</span>
       <h1>Duty On<span class="zh">开工啦 · 你的 AI 打工监督员</span></h1>
       <p class="tagline">
@@ -178,8 +178,8 @@
     <div class="why-grid">
       <div class="why-card">
         <span class="why-icon">🪶</span>
-        <h4>Tauri 2 + Rust，内存仅 ~80MB</h4>
-        <p>系统 WebView 渲染，<span class="highlight">无捆绑 Chromium</span>。同类 Electron 方案动辄 400MB+，Duty On 只有其五分之一——24fps 固定帧率，后台安静陪伴。</p>
+        <h4>内存占用：诚实数字 + 勘误</h4>
+        <p>旧宣传"仅 ~80MB"只统计了主进程，<span class="highlight">漏算了系统 WebView2 的浏览器进程群</span>——1.x 全进程实测合计约 465MB。勘误致歉。全新 <span class="highlight">v2.0 原生 C++ 单进程版</span>实测仅 ~116MB、无 WebView，<a href="https://github.com/marine841023/duty-on/tree/v2.0-dev">点此尝鲜 →</a></p>
       </div>
       <div class="why-card">
         <span class="why-icon">🇨🇳</span>

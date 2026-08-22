@@ -42,8 +42,9 @@ Running AI agents in several IDE windows at once? Stop Alt-Tabbing to check
 whether they're still working, done, or waiting for your confirmation.
 **Duty On** is a tiny transparent Live2D character that floats above your
 desktop and shows the live status of every **Trae** / Qoder / Cursor / Codex / OpenCode
-session at a glance. Built with **Tauri 2 + Rust** (~80 MB RAM, no bundled
-Chromium) — **made for Chinese Trae users**, with native Trae CN / TraeCode CN
+session at a glance. Built with **Tauri 2 + Rust** (system WebView; ~70 MB
+main process plus the WebView2 runtime's browser processes) — **made for
+Chinese Trae users**, with native Trae CN / TraeCode CN
 title detection and Simplified Chinese as a first-class language:
 
 - 💤 **Sleeping** — everything is idle (she naps, Zzz…)
@@ -51,7 +52,13 @@ title detection and Simplified Chinese as a first-class language:
 - 🔔 **Alert** — an agent needs your confirmation **right now**
 
 Built with **Tauri 2 + Rust** (system WebView, no bundled Chromium):
-~80 MB RAM, 24 fps capped rendering, native click-through.
+24 fps capped rendering, native click-through.
+
+> **Memory correction:** earlier copy claimed "~80 MB RAM" — that only
+> counted the main process and missed the WebView2 runtime's browser-process
+> group. Measured totals for 1.x: ~465 MB working set / ~195 MB private
+> memory. Want truly lightweight? The **[v2.0 native C++ rewrite](../tree/v2.0-dev)**
+> runs as a **single process with ~116 MB measured**, no WebView at all.
 
 ## Screenshots
 

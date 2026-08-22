@@ -39,8 +39,12 @@
 - ⚡ **忙碌**：有 AI 任务正在执行时，精灵睁眼专注工作
 - 🔔 **提醒**：需要你确认操作时，精灵抖动并弹出感叹号
 
-基于 **Tauri 2.0 + Rust** 构建（系统 WebView，无 Chromium），跨 Windows / macOS / Linux，
-内存占用约 80MB——同类 Electron 方案的 1/5。
+基于 **Tauri 2.0 + Rust** 构建（系统 WebView，无 Chromium），跨 Windows / macOS / Linux。
+
+> **内存勘误：** 旧文案宣传"内存约 80MB"——该数字只统计了主进程（实测 ~70MB），
+> 没有算上系统 WebView2 运行时拉起的浏览器进程群。1.x 全进程实测合计
+> 约 465MB 工作集 / 195MB 私有内存。想要真正轻量？**[v2.0 原生 C++ 单进程版](../tree/v2.0-dev)**
+> 实测仅 ~116MB，无 WebView、无隐藏进程。
 
 ## 功能
 
