@@ -1334,6 +1334,24 @@ pub fn set_auto_launch(app: AppHandle, enabled: bool) {
 #[tauri::command]
 pub async fn test_alert(state: State<'_, SharedStateManager>) -> Result<(), String> {
     let test_id = "__duty-on-test-alert__".to_string();
+    // A synthetic in-flight tool first: permission_request is a tool-bound
+    // confirm type, and the state machine's out-of-order guard ignores such
+    // notifications when no tool is pending (docs/fault-records.md 故障 3).
+    // Real permission prompts always follow a PreToolUse, so the preview
+    // mirrors the real sequence.
+    let pre = HookEvent {
+        session_id: test_id.clone(),
+        hook_event_name: "PreToolUse".to_string(),
+        project_path: String::new(),
+        project_name: "预览提醒".to_string(),
+        cwd: String::new(),
+        notification_type: None,
+        ide: None,
+        tool_name: Some("__preview__".to_string()),
+        tool_use_id: Some("__preview__".to_string()),
+        message: None,
+        timestamp: None,
+    };
     let event = HookEvent {
         session_id: test_id.clone(),
         hook_event_name: "Notification".to_string(),
@@ -1343,11 +1361,13 @@ pub async fn test_alert(state: State<'_, SharedStateManager>) -> Result<(), Stri
         notification_type: Some("permission_request".to_string()),
         ide: None,
         tool_name: None,
+        tool_use_id: None,
         message: Some("预览提醒效果".to_string()),
         timestamp: None,
     };
     {
         let mut sm = state.lock().await;
+        sm.handle_hook_event(&pre);
         sm.handle_hook_event(&event);
     }
     // Auto-clear after 8 seconds.

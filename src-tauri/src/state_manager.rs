@@ -78,6 +78,12 @@ struct SessionInfo {
     last_event: String,
     last_event_time: u64,
     alert_message: Option<String>,
+    /// In-flight tool marker: set on PreToolUse, cleared on the matching
+    /// PostToolUse / SessionStart / UserPromptSubmit / Stop. NOT cleared by
+    /// Notification (async, doesn't advance tool lifecycle — a tool awaiting
+    /// approval is still in flight). Drives TOOL_RUNNING_TIMEOUT and the
+    /// stale-notification guard (docs/fault-records.md 故障 1/3).
+    pending_tool: Option<String>,
 }
 
 /// Session as exposed to the renderer (no timing fields).
@@ -119,6 +125,11 @@ pub struct HookEvent {
     pub notification_type: Option<String>,
     #[serde(default)]
     pub tool_name: Option<String>,
+    /// Pairing id for PreToolUse/PostToolUse (present on both payloads per
+    /// Trae hook docs). Used to track in-flight tools; falls back to
+    /// tool_name when absent.
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
     /// IDE source reported by the bridge; absent on events from older
     /// bridge scripts (deserialized as lowercase "trae"/"qoder").
     #[serde(default)]
@@ -225,6 +236,7 @@ impl StateManager {
                 last_event: hook_event_name.clone(),
                 last_event_time: now,
                 alert_message: None,
+                pending_tool: None,
             }
         });
 
@@ -248,12 +260,26 @@ impl StateManager {
             "SessionStart" => {
                 session.status = SessionStatus::Idle;
                 session.alert_message = None;
+                session.pending_tool = None;
             }
             "UserPromptSubmit" => {
                 session.status = SessionStatus::Thinking;
                 session.alert_message = None;
+                session.pending_tool = None;
             }
             "PreToolUse" => {
+                // Tool is now in flight: silence until PostToolUse is
+                // EXPECTED (long builds/sub-agent tasks emit nothing in
+                // between), so record it for TOOL_RUNNING_TIMEOUT (故障 1).
+                // Applies to ask-user/confirm tools too — their PostToolUse
+                // clears it.
+                session.pending_tool = Some(
+                    event
+                        .tool_use_id
+                        .clone()
+                        .or_else(|| event.tool_name.clone())
+                        .unwrap_or_default(),
+                );
                 if Self::is_ask_user_tool(event) {
                     // The agent is now blocked waiting for the user's answer
                     // (Qoder has no Notification event for this).
@@ -275,6 +301,9 @@ impl StateManager {
                 }
             }
             "PostToolUse" => {
+                // Matching tool finished — clear the in-flight marker (also
+                // for a stray late post while Idle: no tool is in flight).
+                session.pending_tool = None;
                 if Self::is_ask_user_tool(event) {
                     // The user answered; the agent resumes thinking.
                     session.status = SessionStatus::Thinking;
@@ -302,14 +331,35 @@ impl StateManager {
                 // Notification fires when:
                 // 1. Tool execution needs user confirmation → confirmation-needed
                 // 2. AI completed task → Idle
-                let needs_confirmation = Self::check_confirmation_needed(event, session);
-                if needs_confirmation {
-                    session.status = SessionStatus::ConfirmationNeeded;
-                    session.alert_message = Some(Self::extract_alert_message(event));
-                } else {
-                    // Task completed notification → go straight to Idle.
-                    session.status = SessionStatus::Idle;
-                    session.alert_message = None;
+                //
+                // Notifications are ASYNC (Trae docs): a tool-bound confirm
+                // type can arrive AFTER the tool's PostToolUse. Re-alerting
+                // then would dead-lock — ConfirmationNeeded is exempt from
+                // all timeouts, so a stale alert never clears (故障 3).
+                // Guard: tool-bound confirm type + no in-flight tool =>
+                // stale, ignore entirely (keep current state; NOT Idle —
+                // the session is actively working).
+                // NOTE: pending_tool is intentionally NOT cleared here — a
+                // permission prompt means the tool is awaiting approval,
+                // still in flight (clearing here would break this guard).
+                let stale = event
+                    .notification_type
+                    .as_deref()
+                    .map(|nt| {
+                        config::NOTIFICATION_TOOL_BOUND_CONFIRM_TYPES.contains(&nt)
+                            && session.pending_tool.is_none()
+                    })
+                    .unwrap_or(false);
+                if !stale {
+                    let needs_confirmation = Self::check_confirmation_needed(event, session);
+                    if needs_confirmation {
+                        session.status = SessionStatus::ConfirmationNeeded;
+                        session.alert_message = Some(Self::extract_alert_message(event));
+                    } else {
+                        // Task completed notification → go straight to Idle.
+                        session.status = SessionStatus::Idle;
+                        session.alert_message = None;
+                    }
                 }
             }
             "PermissionRequest" => {
@@ -323,6 +373,7 @@ impl StateManager {
                 // Task finished → straight to Idle (no transient Complete).
                 session.status = SessionStatus::Idle;
                 session.alert_message = None;
+                session.pending_tool = None;
             }
             _ => {}
         }
@@ -589,8 +640,23 @@ impl StateManager {
             {
                 continue;
             }
+            // In-flight tool (PreToolUse without matching PostToolUse): the
+            // agent emits nothing between the two hooks, so silence is
+            // expected — widen both thresholds to TOOL_RUNNING_TIMEOUT
+            // instead of demoting/removing mid-run (故障 1). Long builds,
+            // tests and sub-agent tasks routinely run 5-15 minutes.
+            let tool_running = self
+                .sessions
+                .get(&id)
+                .map(|s| s.pending_tool.is_some())
+                .unwrap_or(false);
             // Remove sessions unheard from for a long time.
-            if elapsed > config::SESSION_TIMEOUT {
+            let session_timeout = if tool_running {
+                config::TOOL_RUNNING_TIMEOUT
+            } else {
+                config::SESSION_TIMEOUT
+            };
+            if elapsed > session_timeout {
                 self.sessions.remove(&id);
                 changed = true;
                 continue;
@@ -602,12 +668,17 @@ impl StateManager {
             // Any active/transient status (old Working or the new Thinking /
             // ToolUse) drops to Idle after the working silence
             // timeout. ConfirmationNeeded is exempt (handled above).
+            let working_timeout = if tool_running {
+                config::TOOL_RUNNING_TIMEOUT
+            } else {
+                config::WORKING_TIMEOUT
+            };
             if matches!(
                 session.status,
                 SessionStatus::Working
                     | SessionStatus::Thinking
                     | SessionStatus::ToolUse
-            ) && elapsed > config::WORKING_TIMEOUT
+            ) && elapsed > working_timeout
             {
                 session.status = SessionStatus::Idle;
                 changed = true;
@@ -755,6 +826,7 @@ impl StateManager {
                         last_event: "WindowDetected".to_string(),
                         last_event_time: now,
                         alert_message: None,
+                        pending_tool: None,
                     },
                 );
                 changed = true;
@@ -909,6 +981,7 @@ mod tests {
             cwd: String::new(),
             notification_type: None,
             tool_name: None,
+            tool_use_id: None,
             ide: None,
             message: None,
             timestamp: None,
@@ -1073,6 +1146,11 @@ mod tests {
     fn notification_permission_prompt_type_triggers_alert() {
         let (mut sm, _t) = make_manager();
         sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+        // permission_prompt is tool-bound: a real one always follows the
+        // tool's PreToolUse (out-of-order guard, 故障 3).
+        let mut pre = event("s1", "PreToolUse");
+        pre.tool_name = Some("RunCommand".to_string());
+        sm.handle_hook_event(&pre);
         let mut e = event("s1", "Notification");
         e.notification_type = Some("permission_prompt".to_string());
         e.message = Some("Agent is requesting permission".to_string());
@@ -1293,6 +1371,11 @@ mod tests {
     fn alert_persists_past_timeouts_until_resolved() {
         let (mut sm, t) = make_manager();
         sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+        // Real permission flow: PreToolUse first (tool-bound notification
+        // requires an in-flight tool — out-of-order guard, 故障 3).
+        let mut pre = event("s1", "PreToolUse");
+        pre.tool_name = Some("RunCommand".to_string());
+        sm.handle_hook_event(&pre);
         let mut e = event("s1", "Notification");
         e.notification_type = Some("permission_prompt".to_string());
         e.message = Some("Agent is requesting permission".to_string());
@@ -1581,5 +1664,111 @@ mod tests {
             1,
             "CLI session should survive timeout when process is alive"
         );
+    }
+
+    // ===== Regression tests for the three hook-handling faults =====
+    // (docs/fault-records.md; same fixes as the 2.0 C++ state machine.)
+
+    /// 故障 1: a tool in flight (PreToolUse without PostToolUse) must keep
+    /// the session working through long silence — sub-agent tasks and long
+    /// builds emit no hook events between the two hooks.
+    #[test]
+    fn tool_in_flight_keeps_working_past_working_timeout() {
+        let (mut sm, t) = make_manager();
+        sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+        let mut e = event("s1", "PreToolUse");
+        e.tool_name = Some("RunCommand".to_string());
+        e.tool_use_id = Some("tu-1".to_string());
+        sm.handle_hook_event(&e);
+        assert_eq!(sm.overall_state, PetState::Working);
+        // 5 minutes of silence: past WORKING_TIMEOUT (3min), well within
+        // TOOL_RUNNING_TIMEOUT (15min) — must stay working.
+        t.store(1000 + 5 * 60 * 1000, Ordering::SeqCst);
+        sm.cleanup_stale_sessions();
+        assert_eq!(sm.overall_state, PetState::Working, "tool still running — pet must not sleep");
+        // 16 minutes: past TOOL_RUNNING_TIMEOUT — now it may drop to idle.
+        t.store(1000 + 16 * 60 * 1000, Ordering::SeqCst);
+        sm.cleanup_stale_sessions();
+        assert_eq!(sm.overall_state, PetState::Sleeping);
+    }
+
+    /// 故障 1 (control): without a pending tool the old 3-minute demotion
+    /// still applies.
+    #[test]
+    fn no_pending_tool_demotes_after_working_timeout() {
+        let (mut sm, t) = make_manager();
+        sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+        t.store(1000 + 4 * 60 * 1000, Ordering::SeqCst);
+        sm.cleanup_stale_sessions();
+        assert_eq!(sm.overall_state, PetState::Sleeping);
+    }
+
+    /// 故障 2: the three UI-flow notification types must alert.
+    #[test]
+    fn ui_flow_notification_types_trigger_alert() {
+        for nt in ["document_review", "ask_user_question", "browser_interaction"] {
+            let (mut sm, _t) = make_manager();
+            sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+            let mut e = event("s1", "Notification");
+            e.notification_type = Some(nt.to_string());
+            sm.handle_hook_event(&e);
+            assert_eq!(sm.overall_state, PetState::Alert, "type {nt} must alert");
+        }
+    }
+
+    /// 故障 3: a permission_prompt arriving AFTER PostToolUse (async,
+    /// out-of-order) is stale — must not re-alert (and not idle either).
+    #[test]
+    fn late_permission_prompt_after_post_tool_use_is_ignored() {
+        let (mut sm, _t) = make_manager();
+        sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+        let mut pre = event("s1", "PreToolUse");
+        pre.tool_name = Some("RunCommand".to_string());
+        pre.tool_use_id = Some("tu-1".to_string());
+        sm.handle_hook_event(&pre);
+        // Tool completes first...
+        let mut post = event("s1", "PostToolUse");
+        post.tool_name = Some("RunCommand".to_string());
+        post.tool_use_id = Some("tu-1".to_string());
+        sm.handle_hook_event(&post);
+        assert_eq!(sm.overall_state, PetState::Working);
+        // ...then the async permission notification lands late.
+        let mut late = event("s1", "Notification");
+        late.notification_type = Some("permission_prompt".to_string());
+        sm.handle_hook_event(&late);
+        assert_eq!(sm.overall_state, PetState::Working, "stale notification must be ignored");
+    }
+
+    /// 故障 3 (control): a permission_prompt WHILE the tool is pending is
+    /// legitimate and must alert; the matching PostToolUse then clears it.
+    #[test]
+    fn permission_prompt_while_tool_pending_alerts_then_clears() {
+        let (mut sm, _t) = make_manager();
+        sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+        let mut pre = event("s1", "PreToolUse");
+        pre.tool_name = Some("RunCommand".to_string());
+        pre.tool_use_id = Some("tu-1".to_string());
+        sm.handle_hook_event(&pre);
+        let mut n = event("s1", "Notification");
+        n.notification_type = Some("permission_prompt".to_string());
+        sm.handle_hook_event(&n);
+        assert_eq!(sm.overall_state, PetState::Alert);
+        let mut post = event("s1", "PostToolUse");
+        post.tool_name = Some("RunCommand".to_string());
+        post.tool_use_id = Some("tu-1".to_string());
+        sm.handle_hook_event(&post);
+        assert_eq!(sm.overall_state, PetState::Working);
+    }
+
+    /// 故障 3 (guard against false positives): idle_prompt (completion) is
+    /// NOT tool-bound — must still idle even with no pending tool.
+    #[test]
+    fn idle_prompt_notification_still_idles() {
+        let (mut sm, _t) = make_manager();
+        sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
+        let mut e = event("s1", "Notification");
+        e.notification_type = Some("idle_prompt".to_string());
+        sm.handle_hook_event(&e);
+        assert_eq!(sm.overall_state, PetState::Sleeping);
     }
 }

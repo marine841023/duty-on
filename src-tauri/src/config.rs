@@ -40,6 +40,12 @@ pub const EDGE_SNAP_THRESHOLD: i32 = 60;
 /// a working session can legitimately go silent for minutes (long tool runs,
 /// or Qoder's ask-user dialog which fires no hook event at all).
 pub const WORKING_TIMEOUT: u64 = 3 * 60 * 1000;
+/// Sessions with an in-flight tool (PreToolUse seen, matching PostToolUse not
+/// yet) stay working for this much silence instead. Between PreToolUse and
+/// PostToolUse the agent emits NO hook event at all — long builds, long tests
+/// and sub-agent tasks routinely run 5-15 minutes; WORKING_TIMEOUT would
+/// wrongly show the pet sleeping mid-run (see docs/fault-records.md 故障 1).
+pub const TOOL_RUNNING_TIMEOUT: u64 = 15 * 60 * 1000;
 pub const SESSION_TIMEOUT: u64 = 10 * 60 * 1000; // 10 min: session removed if silent
 pub const ALERT_REMINDER: u64 = 60 * 1000; // 1 min: re-alert interval while in alert
 pub const CLEANUP_INTERVAL_MS: u64 = 30 * 1000; // cleanup timer tick
@@ -196,8 +202,32 @@ pub const CONFIRM_TOOLS: &[&str] = &[
 // ===== Notification classification =====
 // Used by StateManager::check_confirmation_needed.
 pub const NOTIFICATION_COMPLETE_TYPES: &[&str] = &["task_complete", "idle", "done", "idle_prompt"];
-pub const NOTIFICATION_CONFIRM_TYPES: &[&str] =
-    &["permission_request", "permission_prompt", "confirmation", "input_needed"];
+// Trae's official notification_type has 5 values (docs.trae.cn); the last
+// three are UI-flow waits that were previously unclassified and fell into the
+// ambiguous branch (= task complete -> pet sleeps while a review dialog is
+// open). All five are now classified (docs/fault-records.md 故障 2).
+pub const NOTIFICATION_CONFIRM_TYPES: &[&str] = &[
+    "permission_request",
+    "permission_prompt",
+    "confirmation",
+    "input_needed",
+    "document_review",
+    "ask_user_question",
+    "browser_interaction",
+];
+// Subset of NOTIFICATION_CONFIRM_TYPES that by definition brackets an
+// in-flight tool (payload carries the matching tool_use_id). Notifications
+// are ASYNC per Trae docs: these can arrive AFTER the tool's PostToolUse —
+// a late one with no pending tool is stale and must not re-trigger a
+// permanent alert (docs/fault-records.md 故障 3). The UI-flow types
+// (document_review / ask_user_question / browser_interaction) are NOT
+// tool-bound and skip this guard.
+pub const NOTIFICATION_TOOL_BOUND_CONFIRM_TYPES: &[&str] = &[
+    "permission_request",
+    "permission_prompt",
+    "confirmation",
+    "input_needed",
+];
 
 // Keywords that indicate a Notification is asking for user confirmation.
 // Expanded to cover "run command" / "execute command" phrasing — Trae IDE
