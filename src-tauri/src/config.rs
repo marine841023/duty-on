@@ -40,6 +40,12 @@ pub const EDGE_SNAP_THRESHOLD: i32 = 60;
 /// a working session can legitimately go silent for minutes (long tool runs,
 /// or Qoder's ask-user dialog which fires no hook event at all).
 pub const WORKING_TIMEOUT: u64 = 3 * 60 * 1000;
+/// Thinking sessions (LLM generation phase) drop to idle after this much
+/// silence instead. Between UserPromptSubmit/PostToolUse and the next event
+/// the agent emits NO hook event — the silence equals the reply generation
+/// time, measured at 3m52s in the wild (a 3-min WORKING_TIMEOUT demoted a
+/// still-generating session to idle; see docs/fault-records.md 故障 4).
+pub const THINKING_TIMEOUT: u64 = 10 * 60 * 1000;
 /// Sessions with an in-flight tool (PreToolUse seen, matching PostToolUse not
 /// yet) stay working for this much silence instead. Between PreToolUse and
 /// PostToolUse the agent emits NO hook event at all — long builds, long tests

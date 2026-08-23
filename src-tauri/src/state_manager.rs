@@ -665,11 +665,16 @@ impl StateManager {
             // Mark working sessions idle only after a long silence — long
             // tool runs and Qoder's ask-user dialog (no hook event) both keep
             // a session silent for minutes while still genuinely active.
-            // Any active/transient status (old Working or the new Thinking /
-            // ToolUse) drops to Idle after the working silence
-            // timeout. ConfirmationNeeded is exempt (handled above).
+            // Thinking (LLM generation) is silent for as long as the reply
+            // takes to generate — measured 3m52s between PostToolUse and the
+            // next PreToolUse — so it gets its own wider timeout instead of
+            // WORKING_TIMEOUT (docs/fault-records.md 故障 4).
+            // ConfirmationNeeded is exempt (handled above).
+            let status_for_timeout = session.status.clone();
             let working_timeout = if tool_running {
                 config::TOOL_RUNNING_TIMEOUT
+            } else if status_for_timeout == SessionStatus::Thinking {
+                config::THINKING_TIMEOUT
             } else {
                 config::WORKING_TIMEOUT
             };
@@ -1358,7 +1363,9 @@ mod tests {
         let (mut sm, t) = make_manager();
         sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
         assert_eq!(sm.overall_state, PetState::Working);
-        t.store(1000 + config::WORKING_TIMEOUT + 1, Ordering::SeqCst);
+        // UserPromptSubmit => Thinking, which decays on THINKING_TIMEOUT
+        // (故障 4), not the shorter WORKING_TIMEOUT.
+        t.store(1000 + config::THINKING_TIMEOUT + 1, Ordering::SeqCst);
         sm.cleanup_stale_sessions();
         assert_eq!(sm.overall_state, PetState::Sleeping);
     }
@@ -1575,17 +1582,26 @@ mod tests {
     }
 
     #[test]
-    fn thinking_decays_to_idle_after_timeout() {
+    fn thinking_survives_working_timeout_and_decays_on_its_own() {
         let (mut sm, t) = make_manager();
         sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
         assert_eq!(sm.overall_state, PetState::Working);
+        // LLM generation silence (3m52s measured in the wild) must NOT
+        // demote a still-generating Thinking session (故障 4).
         t.store(1000 + config::WORKING_TIMEOUT + 1, Ordering::SeqCst);
         sm.cleanup_stale_sessions();
-        assert_eq!(sm.overall_state, PetState::Sleeping);
+        assert_eq!(sm.overall_state, PetState::Working);
         assert_eq!(
             sm.get_snapshot().sessions[0].status,
-            SessionStatus::Idle
+            SessionStatus::Thinking
         );
+        // Its own (wider) timeout still applies eventually — at
+        // THINKING_TIMEOUT the session also crosses SESSION_TIMEOUT and is
+        // removed outright (removal runs before downgrade).
+        t.store(1000 + config::THINKING_TIMEOUT + 1, Ordering::SeqCst);
+        sm.cleanup_stale_sessions();
+        assert_eq!(sm.overall_state, PetState::Sleeping);
+        assert_eq!(sm.session_count(), 0);
     }
 
     #[test]
@@ -1692,13 +1708,14 @@ mod tests {
         assert_eq!(sm.overall_state, PetState::Sleeping);
     }
 
-    /// 故障 1 (control): without a pending tool the old 3-minute demotion
-    /// still applies.
+    /// 故障 1 (control): without a pending tool no widened timeout applies —
+    /// the Thinking session is gone once its own timeout (故障 4,
+    /// THINKING_TIMEOUT) passes.
     #[test]
     fn no_pending_tool_demotes_after_working_timeout() {
         let (mut sm, t) = make_manager();
         sm.handle_hook_event(&event("s1", "UserPromptSubmit"));
-        t.store(1000 + 4 * 60 * 1000, Ordering::SeqCst);
+        t.store(1000 + config::THINKING_TIMEOUT + 1, Ordering::SeqCst);
         sm.cleanup_stale_sessions();
         assert_eq!(sm.overall_state, PetState::Sleeping);
     }
