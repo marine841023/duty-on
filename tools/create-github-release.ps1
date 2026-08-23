@@ -6,8 +6,14 @@ $ErrorActionPreference = 'Stop'
 $proxy = 'http://127.0.0.1:7000'
 
 # -- token from git credential store (never hardcode) --
-$fill = "protocol=https`nhost=github.com`n" | git credential fill
+# NB: piping the query from nested powershell mangles line endings for
+# credential helpers (GCM sees no protocol field); use a temp file + cmd
+# redirect instead.
+$credQuery = Join-Path $env:TEMP 'dutyon-cred-github.txt'
+[System.IO.File]::WriteAllText($credQuery, "protocol=https`nhost=github.com`n")
+$fill = cmd /c "git credential fill < `"$credQuery`"" 2>$null
 $token = ($fill | Where-Object { $_ -match '^password=' }) -replace '^password=', ''
+Remove-Item $credQuery -ErrorAction SilentlyContinue
 if (-not $token) { throw 'no credential token for github.com' }
 
 $headers = @{
@@ -22,13 +28,13 @@ $api  = "https://api.github.com/repos/$repo"
 $up   = "https://uploads.github.com/repos/$repo"
 
 $releases = @(
-  @{ Tag = 'v1.3.2'; Name = 'DutyOn v1.3.2 - Hook state machine fixes'
-     Notes = 'D:\src\traeSprite\docs\release-notes\v1.3.2.md'
-     Zip   = 'D:\src\traeSprite\release\DutyOn-v1.3.2.zip'
+  @{ Tag = 'v1.3.3'; Name = 'DutyOn v1.3.3 - Thinking timeout fix'
+     Notes = 'D:\src\traeSprite\docs\release-notes\v1.3.3.md'
+     Zip   = 'D:\src\traeSprite\release\DutyOn-v1.3.3.zip'
      Latest = $false },
-  @{ Tag = 'v2.0.0'; Name = 'DutyOn v2.0.0 - Native C++ single-process rewrite'
-     Notes = 'D:\src\traeSprite\docs\release-notes\v2.0.0.md'
-     Zip   = 'D:\src\traeSprite\tools\dist\DutyOn-v2.0.0.zip'
+  @{ Tag = 'v2.0.1'; Name = 'DutyOn v2.0.1 - Native C++, thinking timeout fix'
+     Notes = 'D:\src\traeSprite\docs\release-notes\v2.0.1.md'
+     Zip   = 'D:\src\traeSprite\tools\dist\DutyOn-v2.0.1.zip'
      Latest = $true }
 )
 

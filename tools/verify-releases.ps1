@@ -11,8 +11,13 @@ foreach ($r in $gh) {
 }
 
 Write-Output '=== Gitee ==='
-$fill = "protocol=https`nhost=gitee.com`n" | git credential fill
+# NB: same nested-powershell pipe mangling as the release scripts - use a
+# temp file + cmd redirect for the credential query.
+$credQuery = Join-Path $env:TEMP 'dutyon-cred-gitee.txt'
+[System.IO.File]::WriteAllText($credQuery, "protocol=https`nhost=gitee.com`n")
+$fill = cmd /c "git credential fill < `"$credQuery`"" 2>$null
 $token = ($fill | Where-Object { $_ -match '^password=' }) -replace '^password=', ''
+Remove-Item $credQuery -ErrorAction SilentlyContinue
 $ge = Invoke-RestMethod -Uri "https://gitee.com/api/v5/repos/megrezsoft/dutyo/releases?access_token=$token&page=1&per_page=20&direction=desc"
 foreach ($r in $ge) {
   $assets = ($r.assets | ForEach-Object { $_.name }) -join ', '

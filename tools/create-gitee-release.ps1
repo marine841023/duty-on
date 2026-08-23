@@ -3,19 +3,25 @@
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$fill = "protocol=https`nhost=gitee.com`n" | git credential fill
+# NB: piping the query from nested powershell mangles line endings for
+# credential helpers (GCM sees no protocol field); use a temp file + cmd
+# redirect instead.
+$credQuery = Join-Path $env:TEMP 'dutyon-cred-gitee.txt'
+[System.IO.File]::WriteAllText($credQuery, "protocol=https`nhost=gitee.com`n")
+$fill = cmd /c "git credential fill < `"$credQuery`"" 2>$null
 $token = ($fill | Where-Object { $_ -match '^password=' }) -replace '^password=', ''
+Remove-Item $credQuery -ErrorAction SilentlyContinue
 if (-not $token) { throw 'no credential token for gitee.com' }
 
 $api = 'https://gitee.com/api/v5/repos/megrezsoft/dutyo'
 
 $releases = @(
-  @{ Tag = 'v1.3.2'
-     Notes = 'D:\src\traeSprite\docs\release-notes\v1.3.2.md'
-     Zip   = 'D:\src\traeSprite\release\DutyOn-v1.3.2.zip' },
-  @{ Tag = 'v2.0.0'
-     Notes = 'D:\src\traeSprite\docs\release-notes\v2.0.0.md'
-     Zip   = 'D:\src\traeSprite\tools\dist\DutyOn-v2.0.0.zip' }
+  @{ Tag = 'v1.3.3'
+     Notes = 'D:\src\traeSprite\docs\release-notes\v1.3.3.md'
+     Zip   = 'D:\src\traeSprite\release\DutyOn-v1.3.3.zip' },
+  @{ Tag = 'v2.0.1'
+     Notes = 'D:\src\traeSprite\docs\release-notes\v2.0.1.md'
+     Zip   = 'D:\src\traeSprite\tools\dist\DutyOn-v2.0.1.zip' }
 )
 
 $curl = 'C:\Windows\System32\curl.exe'
