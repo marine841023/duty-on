@@ -11,13 +11,18 @@
 [![Built with Tauri](https://img.shields.io/badge/Tauri-2.0-24C8D8?logo=tauri&logoColor=white)](https://v2.tauri.app)
 [![Release](https://img.shields.io/github/v/release/marine841023/duty-on)](https://github.com/marine841023/duty-on/releases)
 
-### 🎉 v1.3.2 — Smarter hook state machine!
+### 🎉 v1.3.3 — Smarter hook state machine!
 
 > **Made for Chinese Trae users** — native Trae CN / TraeCode CN window-title
 > detection, multi-root workspace suffix stripping (工作区 / Workspace /
 > ワークスペース / 작업 영역), 8 languages with Simplified Chinese first.
 >
-> **New in v1.3.2:** the pet no longer dozes off while sub-agents or long
+> **New in v1.3.3:** the pet no longer shows "idle" while the model is still
+> generating a long reply — the LLM thinking phase is completely silent (no
+> hook events) and was measured at 3m52s in the wild, so its timeout is now
+> 10 minutes instead of the 3-minute working timeout.
+>
+> **v1.3.2:** the pet no longer dozes off while sub-agents or long
 > tool runs (builds/tests) are still executing; document-review /
 > ask-user / browser-interaction notifications now trigger the alert; a late
 > async permission notification can no longer stick the alert forever.
@@ -30,7 +35,7 @@
 > Since v1.3.0 you can also create your own desktop pet from any
 > **GIF / PNG / MP4** — no Live2D model required.
 >
-> Download v1.3.2 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v1.3.2/DutyOn-v1.3.2.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v1.3.2/DutyOn-v1.3.2.zip)
+> Download v1.3.3 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v1.3.3/DutyOn-v1.3.3.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v1.3.3/DutyOn-v1.3.3.zip)
 
 **English** · [简体中文](README.zh-CN.md)
 

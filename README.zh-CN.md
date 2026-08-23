@@ -8,13 +8,17 @@
 
 [English](README.md) · **简体中文**
 
-### 🎉 v1.3.2 — 更聪明的 Hook 状态机！
+### 🎉 v1.3.3 — 更聪明的 Hook 状态机！
 
 > **为中国 Trae 用户量身打造** — 原生 Trae CN / TraeCode CN 窗口标题识别，
 > 自动剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역），
 > 8 种语言、简体中文优先。
 >
-> **v1.3.2 更新：** 子代理/长工具（构建、测试）执行期间宠物不再误睡；
+> **v1.3.3 更新：** 模型正在生成长回复时宠物不再误显示"空闲"——LLM 思考期
+> 完全静默（无任何 hook 事件），实测可长达 3 分 52 秒，其超时兜底从 3 分钟
+> 放宽到 10 分钟。
+>
+> **v1.3.2：** 子代理/长工具（构建、测试）执行期间宠物不再误睡；
 > 文档审阅 / 智能体提问 / 浏览器交互三类通知现在能正确触发提醒；
 > 迟到的异步授权通知不会再让提醒永久卡死。
 >
@@ -25,7 +29,7 @@
 > v1.3.0 起支持用任意 **GIF / PNG / MP4** 创建专属桌宠，无需 Live2D 模型——
 > 为每个状态（💤 睡觉 / ⚡ 忙碌 / 🔔 提醒）分别上传动画，随时可重新上传替换。
 >
-> 下载 v1.3.2 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v1.3.2/DutyOn-v1.3.2.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v1.3.2/DutyOn-v1.3.2.zip)
+> 下载 v1.3.3 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v1.3.3/DutyOn-v1.3.3.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v1.3.3/DutyOn-v1.3.3.zip)
 
 </div>
 
