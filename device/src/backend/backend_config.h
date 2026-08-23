@@ -17,6 +17,12 @@ constexpr const char* kHost = "127.0.0.1";
 // Working 会话静默这么久后降为 Idle。必须宽松：Qoder 的 ask-user 对话框
 // （完全不发 hook 事件）会让会话合法地静默几分钟。
 constexpr uint64_t kWorkingTimeout = 3 * 60 * 1000;
+// Thinking（LLM 生成期）单独放宽：UserPromptSubmit / PostToolUse 之后到下一
+// 个事件之间完全静默，时长 = 回复生成耗时。实测（hook-received.log）：
+// PostToolUse 后 LLM 连续生成 3 分 52 秒才发出下一 PreToolUse —— 3 分钟
+// 工作超时把还在生成的会话误判为空闲（用户反馈"项目正在跑却显示空闲"）。
+// 长分析/长代码生成动辄 5-10 分钟，降级兜底相应放宽。
+constexpr uint64_t kThinkingTimeout = 10 * 60 * 1000;
 constexpr uint64_t kSessionTimeout = 10 * 60 * 1000;  // 静默 10 分钟删除会话
 // 工具执行中（PreToolUse 已到、PostToolUse 未到）的放宽超时。实测
 // （~/.dutyon/hook-received.log 抓包）：工具执行期 Pre/Post 之间完全静默

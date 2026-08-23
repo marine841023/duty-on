@@ -493,13 +493,20 @@ void StateManager::cleanupStaleSessions() {
             continue;
         }
         // 长静默后才降 Idle：Qoder ask-user 对话框 / 工具执行期都会让会话
-        // 合法地静默（后者可达十几分钟，放宽判定）
+        // 合法地静默（后者可达十几分钟，放宽判定）。Thinking（LLM 生成期）
+        // 静默时长 = 回复生成耗时，实测可达 4 分钟以上，单独用
+        // kThinkingTimeout 放宽（kWorkingTimeout 的 3 分钟会误睡生成中的
+        // 会话，见 backend_config.h 注释）。
+        const uint64_t downgrade_timeout =
+            !it->second.pending_tool.empty()
+                ? bc::kToolRunningTimeout
+                : (it->second.status == SessionStatus::Thinking
+                       ? bc::kThinkingTimeout
+                       : bc::kWorkingTimeout);
         if ((it->second.status == SessionStatus::Working ||
              it->second.status == SessionStatus::Thinking ||
              it->second.status == SessionStatus::ToolUse) &&
-            elapsed > (!it->second.pending_tool.empty()
-                           ? bc::kToolRunningTimeout
-                           : bc::kWorkingTimeout)) {
+            elapsed > downgrade_timeout) {
             it->second.status = SessionStatus::Idle;
             changed = true;
         }
