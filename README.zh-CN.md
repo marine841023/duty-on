@@ -8,21 +8,25 @@
 
 [English](README.md) · **简体中文**
 
-### 🚀 v2.0.0 — 原生 C++ 重写版！
+### 🚀 v2.0.1 — 原生 C++ 重写版！
 
 > **为中国 Trae 用户量身打造** — 原生 Trae CN / TraeCode CN 窗口标题识别，
 > 自动剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역），
 > 8 种语言、简体中文优先。
 >
-> **v2.0.0：** 整个应用重写为**单个原生 C++ 进程**——无 WebView、无浏览器运行时、
+> **v2.0：** 整个应用重写为**单个原生 C++ 进程**——无 WebView、无浏览器运行时、
 > 无 Rust 后端。一个 `dutyon-pet.exe` 内嵌 HTTP 服务器、状态机、IDE 扫描器和
 > 系统指标采样，用 GLFW + OpenGL + Cubism SDK 原生渲染 Live2D / GIF 精灵。
 > 与 1.x 可交替安装（共用 `~/.dutyon` 配置），也是移植到低成本 ARM 硬件设备的代码基线。
 >
-> **v1.3.x 系列（WebView 版，支持 macOS/Linux）：** 仍在 `master` 分支维护——
-> 最新 [v1.3.2](https://github.com/marine841023/duty-on/releases/tag/v1.3.2)。
+> **v2.0.1 更新：** 模型正在生成长回复时宠物不再误显示"空闲"——LLM 思考期
+> 完全静默（无任何 hook 事件），实测可长达 3 分 52 秒，其超时兜底从 3 分钟
+> 放宽到 10 分钟（与 1.x v1.3.3 同源修复）。
 >
-> 下载 v2.0.0 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.0/DutyOn-v2.0.0.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.0/DutyOn-v2.0.0.zip)
+> **v1.3.x 系列（WebView 版，支持 macOS/Linux）：** 仍在 `master` 分支维护——
+> 最新 [v1.3.3](https://github.com/marine841023/duty-on/releases/tag/v1.3.3)。
+>
+> 下载 v2.0.1 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.1/DutyOn-v2.0.1.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.1/DutyOn-v2.0.1.zip)
 
 </div>
 

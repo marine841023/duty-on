@@ -11,23 +11,28 @@
 [![Built with C++](https://img.shields.io/badge/C%2B%2B-native%20%7C%20no%20WebView-00599C?logo=cplusplus&logoColor=white)]()
 [![Release](https://img.shields.io/github/v/release/marine841023/duty-on)](https://github.com/marine841023/duty-on/releases)
 
-### 🚀 v2.0.0 — Native C++ rewrite!
+### 🚀 v2.0.1 — Native C++ rewrite!
 
 > **Made for Chinese Trae users** — native Trae CN / TraeCode CN window-title
 > detection, multi-root workspace suffix stripping (工作区 / Workspace /
 > ワークスペース / 작업 영역), 8 languages with Simplified Chinese first.
 >
-> **v2.0.0:** the whole app is now a **single native C++ process** — no
+> **v2.0:** the whole app is now a **single native C++ process** — no
 > WebView, no browser runtime, no Rust backend. One `dutyon-pet.exe`
 > embeds the HTTP server, state machine, IDE scanner and metrics sampler,
 > and renders Live2D/GIF pets natively with GLFW + OpenGL + Cubism SDK.
 > Installs side-by-side with 1.x (shared `~/.dutyon` config), and is the
 > codebase we port to low-cost ARM hardware devices.
 >
-> **v1.3.x line (WebView-based, macOS/Linux):** still maintained on the
-> `master` branch — latest [v1.3.2](https://github.com/marine841023/duty-on/releases/tag/v1.3.2).
+> **New in v2.0.1:** the pet no longer shows "idle" while the model is
+> still generating a long reply — the LLM thinking phase is completely
+> silent (no hook events, measured 3m52s in the wild); its timeout is now
+> 10 minutes instead of 3 (same fix as v1.3.3 on the 1.x line).
 >
-> Download v2.0.0 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.0/DutyOn-v2.0.0.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.0/DutyOn-v2.0.0.zip)
+> **v1.3.x line (WebView-based, macOS/Linux):** still maintained on the
+> `master` branch — latest [v1.3.3](https://github.com/marine841023/duty-on/releases/tag/v1.3.3).
+>
+> Download v2.0.1 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.1/DutyOn-v2.0.1.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.1/DutyOn-v2.0.1.zip)
 
 **English** · [简体中文](README.zh-CN.md)
 
