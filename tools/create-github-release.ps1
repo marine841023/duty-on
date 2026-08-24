@@ -28,13 +28,9 @@ $api  = "https://api.github.com/repos/$repo"
 $up   = "https://uploads.github.com/repos/$repo"
 
 $releases = @(
-  @{ Tag = 'v1.3.3'; Name = 'DutyOn v1.3.3 - Thinking timeout fix'
-     Notes = 'D:\src\traeSprite\docs\release-notes\v1.3.3.md'
-     Zip   = 'D:\src\traeSprite\release\DutyOn-v1.3.3.zip'
-     Latest = $false },
-  @{ Tag = 'v2.0.1'; Name = 'DutyOn v2.0.1 - Native C++, thinking timeout fix'
-     Notes = 'D:\src\traeSprite\docs\release-notes\v2.0.1.md'
-     Zip   = 'D:\src\traeSprite\tools\dist\DutyOn-v2.0.1.zip'
+  @{ Tag = 'v2.0.2'; Name = 'DutyOn v2.0.2 - Multi-monitor scaling fix'
+     Notes = 'D:\src\traeSprite\docs\release-notes\v2.0.2.md'
+     Zip   = 'D:\src\traeSprite\tools\dist\DutyOn-v2.0.2.zip'
      Latest = $true }
 )
 
