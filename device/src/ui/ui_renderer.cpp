@@ -327,10 +327,10 @@ static ImFont* LoadFontSet(ImGuiIO& io, float size_px, const ImWchar* latin_rang
 
     // PixelSnapH：字形水平对齐像素边界（配合 AddTextS 的整数坐标，
     // 小字号 CJK 不再被双线性涂抹成灰色）
-    // 光栅化走 FreeType（IMGUI_ENABLE_FREETYPE），hinting 按屏幕/字号自适应：
-    //   低分屏（ui_scale<1）且 <13px：MonoHinting|Monochrome —— 无 AA 的
-    //     1px 实心笔画。8~11px 灰度 AA 必然把 CJK 笔画涂抹成灰雾（用户
-    //     在 1080p@100% 副屏两次反馈"很模糊/不清晰"）
+    // 光栅化走 FreeType（IMGUI_ENABLE_FREETYPE），hinting 按字号自适应：
+    //   <13px：MonoHinting|Monochrome —— 无 AA 的 1px 实心笔画。
+    //     8~12px 灰度 AA 必然把 CJK 笔画涂抹成灰雾（用户在 1080p@100%
+    //     副屏多次反馈"很模糊/不清晰"）
     //   其余：LightHinting + 灰度 AA —— 轻量竖向 hinting 保留字形原貌，
     //     最接近浏览器 DirectWrite 的渲染形态（ForceAutoHint 会让笔画
     //     变形发虚，高分屏用户反馈"字体好丑"）
@@ -775,11 +775,12 @@ struct UIRenderer::Impl {
         // 四档字号各自光栅（12/11/10/9）：所有绘制站点用同档字体绘制，
         // 字号与光栅尺寸一致（AddTextS 兜底对齐），杜绝字形位图缩放。
         // 字号取整：分数字号（如 11.25px）使行高/基线落在半像素上。
-        // 低分屏（S<1）小字号保留点阵光栅（清晰度优先），其余平滑 AA
+        // <13px 保留点阵光栅（清晰度优先，灰度 AA 会把 CJK 笔画涂成
+        // 灰雾），其余平滑 AA。不再限定低分屏：任何屏上 <13px 都需要。
         auto load = [&](float base, ImFont** slot) {
             const float px = (float)(int)(base * S * kTextScale + 0.5f);
             *slot = LoadFontSet(io, px, latin_ranges.Data, cjk_ranges.Data,
-                                font_file_bufs, S < 1.0f && px < 13.0f);
+                                font_file_bufs, px < 13.0f);
         };
         load(12.0f, &font_12);
         load(11.0f, &font_11);

@@ -8,7 +8,7 @@
 
 [English](README.md) · **简体中文**
 
-### 🚀 v2.0.1 — 原生 C++ 重写版！
+### 🚀 v2.0.2 — 原生 C++ 重写版！
 
 > **为中国 Trae 用户量身打造** — 原生 Trae CN / TraeCode CN 窗口标题识别，
 > 自动剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역），
@@ -19,14 +19,18 @@
 > 系统指标采样，用 GLFW + OpenGL + Cubism SDK 原生渲染 Live2D / GIF 精灵。
 > 与 1.x 可交替安装（共用 `~/.dutyon` 配置），也是移植到低成本 ARM 硬件设备的代码基线。
 >
-> **v2.0.1 更新：** 模型正在生成长回复时宠物不再误显示"空闲"——LLM 思考期
+> **v2.0.2 更新：** 修复跨显示器缩放——把宠物拖到低分辨率屏（如 1080p@100%）
+> 时角色和字体不再缩得过小，分辨率归一化下限提升到 1.0，≤1440p 的屏与 1.x
+> 尺寸完全一致；小字号点阵光栅（防笔画糊成灰雾）扩展到所有屏幕。
+>
+> **v2.0.1：** 模型正在生成长回复时宠物不再误显示"空闲"——LLM 思考期
 > 完全静默（无任何 hook 事件），实测可长达 3 分 52 秒，其超时兜底从 3 分钟
 > 放宽到 10 分钟（与 1.x v1.3.3 同源修复）。
 >
 > **v1.3.x 系列（WebView 版，支持 macOS/Linux）：** 仍在 `master` 分支维护——
 > 最新 [v1.3.3](https://github.com/marine841023/duty-on/releases/tag/v1.3.3)。
 >
-> 下载 v2.0.1 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.1/DutyOn-v2.0.1.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.1/DutyOn-v2.0.1.zip)
+> 下载 v2.0.2 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.2/DutyOn-v2.0.2.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.2/DutyOn-v2.0.2.zip)
 
 </div>
 
