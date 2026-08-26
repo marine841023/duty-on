@@ -16,9 +16,9 @@ if (-not $token) { throw 'no credential token for gitee.com' }
 $api = 'https://gitee.com/api/v5/repos/megrezsoft/dutyo'
 
 $releases = @(
-  @{ Tag = 'v2.0.2'
-     Notes = 'D:\src\traeSprite\docs\release-notes\v2.0.2.md'
-     Zip   = 'D:\src\traeSprite\tools\dist\DutyOn-v2.0.2.zip' }
+  @{ Tag = 'v2.0.3'
+     Notes = 'D:\src\traeSprite\docs\release-notes\v2.0.3.md'
+     Zip   = 'D:\src\traeSprite\tools\dist\DutyOn-v2.0.3.zip' }
 )
 
 $curl = 'C:\Windows\System32\curl.exe'

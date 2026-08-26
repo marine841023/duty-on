@@ -28,9 +28,9 @@ $api  = "https://api.github.com/repos/$repo"
 $up   = "https://uploads.github.com/repos/$repo"
 
 $releases = @(
-  @{ Tag = 'v2.0.2'; Name = 'DutyOn v2.0.2 - Multi-monitor scaling fix'
-     Notes = 'D:\src\traeSprite\docs\release-notes\v2.0.2.md'
-     Zip   = 'D:\src\traeSprite\tools\dist\DutyOn-v2.0.2.zip'
+  @{ Tag = 'v2.0.3'; Name = 'DutyOn v2.0.3 - Run in background, no taskbar button'
+     Notes = 'D:\src\traeSprite\docs\release-notes\v2.0.3.md'
+     Zip   = 'D:\src\traeSprite\tools\dist\DutyOn-v2.0.3.zip'
      Latest = $true }
 )
 
