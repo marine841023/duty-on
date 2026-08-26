@@ -541,10 +541,8 @@ void StateManager::syncDetectedWindows(const std::vector<DetectedProject>& detec
         if (id.rfind(kWindowPrefix, 0) != 0) hook_project_names.insert(s.project_name);
 
     std::set<std::string> detected_names;
-    std::set<int> detected_ides;
     for (const auto& d : detected) {
         detected_names.insert(d.name);
-        detected_ides.insert((int)d.ide);
     }
     bool changed = false;
 
@@ -573,12 +571,13 @@ void StateManager::syncDetectedWindows(const std::vector<DetectedProject>& detec
                 sessions_.erase(it);
                 changed = true;
             } else {
-                // 同 IDE 类型的窗口仍在（只是标题格式变了，如 Qoder 显示
-                // "安装 - Qoder" 设置页）—— IDE 还开着，抑制本次 miss
-                if (session_ide.has_value() && detected_ides.count((int)*session_ide))
-                    continue;
-                // 真实会话给宽限期：窗口可能短暂不可见（启动/重载）或标题
-                // 格式不匹配；只有连续 miss 才删，SESSION_TIMEOUT 兜底
+                // 窗口确认消失 —— 与 hook 静默超时分档处理（用户决策）：
+                // 思考中/工具执行期收不到 hook 信号可以等（10/15 分钟档），
+                // 但 EnumWindows 是确定性信号，窗口没了就该尽快删，不能挂
+                // 到 SESSION_TIMEOUT。仅保留 3 次扫描宽限（~12 秒）防闪烁：
+                // 窗口重载/标题短暂不可解析时单次 miss 不至于误删。
+                // 曾按"同 IDE 其他窗口仍在则豁免"处理，副作用是关掉的项目
+                // 只要开着其他同 IDE 窗口就一直挂在列表（用户实测反馈）。
                 if (++window_miss_counts_[id] >= kWindowMissGrace) {
                     sessions_.erase(it);
                     window_miss_counts_.erase(id);

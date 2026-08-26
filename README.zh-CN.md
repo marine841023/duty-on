@@ -8,7 +8,7 @@
 
 [English](README.md) · **简体中文**
 
-### 🚀 v2.0.3 — 原生 C++ 重写版！
+### 🚀 v2.0.4 — 原生 C++ 重写版！
 
 > **为中国 Trae 用户量身打造** — 原生 Trae CN / TraeCode CN 窗口标题识别，
 > 自动剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역），
@@ -19,8 +19,11 @@
 > 系统指标采样，用 GLFW + OpenGL + Cubism SDK 原生渲染 Live2D / GIF 精灵。
 > 与 1.x 可交替安装（共用 `~/.dutyon` 配置），也是移植到低成本 ARM 硬件设备的代码基线。
 >
-> **v2.0.3 更新：** 宠物完全后台运行——启动后任务栏不再出现图标，仅保留
-> 系统托盘。窗口改为隐藏创建、应用工具窗口样式后再显示。
+> **v2.0.4 更新：** 关闭的项目秒级从任务列表消失。此前窗口扫描删除被
+> "同 IDE 其他窗口仍在"的条件抑制，关闭的项目最长会挂 10 分钟；现在
+> 窗口消失即视为确定性信号（仅 12 秒防闪烁宽限）。
+>
+> **v2.0.3：** 宠物完全后台运行——启动后任务栏不再出现图标，仅保留系统托盘。
 >
 > **v2.0.2：** 修复跨显示器缩放——把宠物拖到低分辨率屏（如 1080p@100%）
 > 时角色和字体不再缩得过小，≤1440p 的屏与 1.x 尺寸完全一致。
@@ -32,7 +35,7 @@
 > **v1.3.x 系列（WebView 版，支持 macOS/Linux）：** 仍在 `master` 分支维护——
 > 最新 [v1.3.3](https://github.com/marine841023/duty-on/releases/tag/v1.3.3)。
 >
-> 下载 v2.0.3 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.3/DutyOn-v2.0.3.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.3/DutyOn-v2.0.3.zip)
+> 下载 v2.0.4 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.4/DutyOn-v2.0.4.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.4/DutyOn-v2.0.4.zip)
 
 </div>
 
