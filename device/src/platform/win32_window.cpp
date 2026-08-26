@@ -58,6 +58,9 @@ public:
         glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
         glfwWindowHint(GLFW_FOCUS_ON_SHOW, GLFW_FALSE);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        // 先隐藏创建，设好 WS_EX_TOOLWINDOW 再显示：GLFW 默认创建即可见，
+        // 窗口会先以普通应用窗口身份被 Shell 收进任务栏（按钮留下不消失）
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
@@ -94,6 +97,10 @@ public:
 
         // 默认放到右下角
         positionBottomRight();
+
+        // 样式/位置就绪后才显示：此时已带 WS_EX_TOOLWINDOW，不会在任务栏
+        // 留下按钮（后台运行，仅托盘图标可见）
+        glfwShowWindow(window_);
 
         printf("[Win32Window] %dx%d transparent window created\n", width, height);
         return true;
