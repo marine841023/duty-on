@@ -35,8 +35,10 @@ InstallDirRegKey HKCU "${APP_REGKEY}" "InstallDir"
 RequestExecutionLevel user
 
 ; ---- 图标与界面 ----
-!define MUI_ICON "..\dutyon.ico"
-!define MUI_UNICON "..\dutyon.ico"
+; 安装器图标：仓库内 1.x 同款多尺寸图标（device/resources/icon.ico，已入库；
+; 旧 tools/dutyon.ico 为本地未跟踪文件，新克隆会缺失）
+!define MUI_ICON "..\..\device\resources\icon.ico"
+!define MUI_UNICON "..\..\device\resources\icon.ico"
 !define MUI_ABORTWARNING
 !define MUI_LANGDLL_ALLLANGUAGES
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
