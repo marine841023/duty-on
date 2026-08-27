@@ -4,6 +4,7 @@
 
 #include "backend/autostart.h"
 
+#include <cstdio>
 #include <windows.h>
 
 namespace dutyon::backend {
@@ -28,10 +29,15 @@ bool setAutostartEnabled(bool enable) {
         return false;
     LSTATUS rc;
     if (enable) {
+        // 带引号写入（同 tauri-plugin-autostart/auto-launch 与 NSIS 安装器）：
+        // 安装目录含空格（如 C:\Program Files\DutyOn）时，无引号路径会被
+        // Windows 截断到首个空格导致自启静默失败
         wchar_t exe[MAX_PATH] = {};
         GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        rc = RegSetValueExW(key, kAutostartName, 0, REG_SZ, (const BYTE*)exe,
-                            (DWORD)((wcslen(exe) + 1) * sizeof(wchar_t)));
+        wchar_t quoted[MAX_PATH + 4] = {};
+        swprintf_s(quoted, L"\"%s\"", exe);
+        rc = RegSetValueExW(key, kAutostartName, 0, REG_SZ, (const BYTE*)quoted,
+                            (DWORD)((wcslen(quoted) + 1) * sizeof(wchar_t)));
     } else {
         rc = RegDeleteValueW(key, kAutostartName);
         if (rc == ERROR_FILE_NOT_FOUND) rc = ERROR_SUCCESS;  // 幂等删除

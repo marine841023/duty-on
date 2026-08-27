@@ -1,4 +1,4 @@
-﻿# DutyOn 2.0 安装包构建脚本
+﻿﻿# DutyOn 2.0 安装包构建脚本
 # 用法：powershell -File tools\build-package.ps1 [-Version 2.0.4]
 # 产物：tools\dist\DutyOn_<版本>_x64-setup.exe + DutyOn-v<版本>.zip
 # 说明：NSIS 工具链在 tools\nsis\nsis-3\（tauri 官方 GitHub 镜像的 NSIS 3
@@ -41,6 +41,23 @@ Write-Host "[2/4] 构建产物校验通过" -ForegroundColor Cyan
 
 # --- 3. 编译 NSIS 安装包 ---
 Write-Host "[3/4] makensis 编译安装器..." -ForegroundColor Cyan
+
+# 3.1 NSI 编码消毒：IDE 的编码往返会把 UTF-8 BOM 反复叠加到文件头
+#     （每往返一次 +1 个 BOM），makensis 解析多 BOM 直接报 line 1 错。
+#     剥掉全部前导 BOM 后字节级写回单 BOM（不做文本编码往返）。
+$nsi = Join-Path $tools 'packager\dutyon.nsi'
+$nsiBytes = [System.IO.File]::ReadAllBytes($nsi)
+$off = 0
+while ($off + 2 -lt $nsiBytes.Length -and $nsiBytes[$off] -eq 0xEF -and
+       $nsiBytes[$off+1] -eq 0xBB -and $nsiBytes[$off+2] -eq 0xBF) { $off += 3 }
+if ($off -gt 3) {
+    $clean = New-Object byte[] ($nsiBytes.Length - $off + 3)
+    [Array]::Copy([byte[]](0xEF,0xBB,0xBF), 0, $clean, 0, 3)
+    [Array]::Copy($nsiBytes, $off, $clean, 3, $nsiBytes.Length - $off)
+    [System.IO.File]::WriteAllBytes($nsi, $clean)
+    Write-Host "NSI BOM 消毒: $($off/3) 个叠加 BOM -> 1" -ForegroundColor Yellow
+}
+
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 & $makensis.FullName "/DAPP_VERSION=$Version" (Join-Path $tools 'packager\dutyon.nsi')
 if ($LASTEXITCODE -ne 0) { throw "makensis 失败（exit $LASTEXITCODE）" }

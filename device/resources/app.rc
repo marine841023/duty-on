@@ -1,0 +1,3 @@
+// Application icon resource (1.x Tauri icon.ico, multi-size).
+// ID 1 = lowest icon ID, used by Explorer/shortcuts as the exe icon.
+1 ICON "icon.ico"

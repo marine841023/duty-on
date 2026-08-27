@@ -307,7 +307,8 @@ private:
         nid.uID = TRAY_ID;
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         nid.uCallbackMessage = WM_TRAYICON;
-        nid.hIcon = LoadIconA(nullptr, IDI_APPLICATION);  // TODO: 自定义图标
+        // 应用图标（exe 资源 ID 1，resources/app.rc —— 1.x 同款）
+        nid.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1));
         strcpy_s(nid.szTip, "Duty On 桌宠");
         tray_added_ = Shell_NotifyIconA(NIM_ADD, &nid) != FALSE;
     }

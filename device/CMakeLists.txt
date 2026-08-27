@@ -172,6 +172,7 @@ if(WIN32)
     # 采样/hook 安装器/HTTP 服务器/服务聚合）
     list(APPEND SOURCES
         src/platform/win32_window.cpp
+        resources/app.rc
         src/debug_diag.cpp
         src/backend/state_manager.cpp
         src/backend/ide_scanner.cpp
