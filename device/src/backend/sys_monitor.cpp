@@ -229,7 +229,15 @@ dutyon::SysMetrics SysMonitor::sampleOnce(double elapsed_sec) {
             if (self_primed_ && wall > self_wall_) {
                 const double dproc = (double)(proc - self_proc_time_) / 1e7;  // 100ns -> s
                 const double dwall = (double)(wall - self_wall_) / 1e7;
-                m.self_cpu = (float)(100.0 * dproc / dwall);  // 多核累计（同 sysinfo）
+                // 归一到全机口径（任务管理器同款）：多核累计值需除以逻辑
+                // 处理器数，否则 20 线程机器上"自身 9%"与"总 CPU 3%"并排
+                // 显示会出现单进程超过全机的悖论观感
+                static const unsigned hw = [] {
+                    SYSTEM_INFO si{};
+                    GetNativeSystemInfo(&si);
+                    return si.dwNumberOfProcessors ? si.dwNumberOfProcessors : 1;
+                }();
+                m.self_cpu = (float)(100.0 * dproc / dwall / hw);
             }
             self_proc_time_ = proc;
             self_wall_ = wall;
