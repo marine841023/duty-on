@@ -7,13 +7,16 @@ $proxy = 'http://127.0.0.1:7000'
 
 # -- token from git credential store (never hardcode) --
 # NB: piping the query from nested powershell mangles line endings for
-# credential helpers (GCM sees no protocol field); use a temp file + cmd
-# redirect instead.
+# credential helpers (GCM sees no protocol field); use a temp file +
+# Start-Process stdin redirect instead (cmd /c is blocked by policy).
 $credQuery = Join-Path $env:TEMP 'dutyon-cred-github.txt'
+$credOut = Join-Path $env:TEMP 'dutyon-cred-github-out.txt'
 [System.IO.File]::WriteAllText($credQuery, "protocol=https`nhost=github.com`n")
-$fill = cmd /c "git credential fill < `"$credQuery`"" 2>$null
+Start-Process git -ArgumentList 'credential','fill' -RedirectStandardInput $credQuery `
+  -RedirectStandardOutput $credOut -NoNewWindow -Wait | Out-Null
+$fill = Get-Content $credOut
+Remove-Item $credQuery, $credOut -ErrorAction SilentlyContinue
 $token = ($fill | Where-Object { $_ -match '^password=' }) -replace '^password=', ''
-Remove-Item $credQuery -ErrorAction SilentlyContinue
 if (-not $token) { throw 'no credential token for github.com' }
 
 $headers = @{

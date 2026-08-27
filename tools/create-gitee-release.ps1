@@ -4,13 +4,16 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 # NB: piping the query from nested powershell mangles line endings for
-# credential helpers (GCM sees no protocol field); use a temp file + cmd
-# redirect instead.
+# credential helpers (GCM sees no protocol field); use a temp file +
+# Start-Process stdin redirect instead (cmd /c is blocked by policy).
 $credQuery = Join-Path $env:TEMP 'dutyon-cred-gitee.txt'
+$credOut = Join-Path $env:TEMP 'dutyon-cred-gitee-out.txt'
 [System.IO.File]::WriteAllText($credQuery, "protocol=https`nhost=gitee.com`n")
-$fill = cmd /c "git credential fill < `"$credQuery`"" 2>$null
+Start-Process git -ArgumentList 'credential','fill' -RedirectStandardInput $credQuery `
+  -RedirectStandardOutput $credOut -NoNewWindow -Wait | Out-Null
+$fill = Get-Content $credOut
 $token = ($fill | Where-Object { $_ -match '^password=' }) -replace '^password=', ''
-Remove-Item $credQuery -ErrorAction SilentlyContinue
+Remove-Item $credQuery, $credOut -ErrorAction SilentlyContinue
 if (-not $token) { throw 'no credential token for gitee.com' }
 
 $api = 'https://gitee.com/api/v5/repos/megrezsoft/dutyo'
