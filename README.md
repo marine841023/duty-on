@@ -11,7 +11,7 @@
 [![Built with C++](https://img.shields.io/badge/C%2B%2B-native%20%7C%20no%20WebView-00599C?logo=cplusplus&logoColor=white)]()
 [![Release](https://img.shields.io/github/v/release/marine841023/duty-on)](https://github.com/marine841023/duty-on/releases)
 
-### 🚀 v2.0.4 — Native C++ rewrite!
+### 🚀 v2.0.5 — Native C++ rewrite!
 
 > **Made for Chinese Trae users** — native Trae CN / TraeCode CN window-title
 > detection, multi-root workspace suffix stripping (工作区 / Workspace /
@@ -24,7 +24,13 @@
 > Installs side-by-side with 1.x (shared `~/.dutyon` config), and is the
 > codebase we port to low-cost ARM hardware devices.
 >
-> **New in v2.0.4:** closed projects now disappear from the task list in
+> **New in v2.0.5:** fixed Live2D pets rendering blank in installed
+> builds — the installer was missing the Cubism runtime's
+> `FrameworkShaders` directory, so Live2D models drew nothing in
+> v2.0.0–v2.0.4 installs (GIF pets were unaffected). The shaders are
+> now packaged; affected users just need to reinstall.
+>
+> **v2.0.4:** closed projects now disappear from the task list in
 > seconds. Window-scan removal used to be suppressed whenever another
 > window of the same IDE stayed open, so a closed project could linger
 > for up to 10 minutes; window disappearance is now treated as a
@@ -45,7 +51,7 @@
 > **v1.3.x line (WebView-based, macOS/Linux):** still maintained on the
 > `master` branch — latest [v1.3.3](https://github.com/marine841023/duty-on/releases/tag/v1.3.3).
 >
-> Download v2.0.4 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.4/DutyOn-v2.0.4.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.4/DutyOn-v2.0.4.zip)
+> Download v2.0.5 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.5/DutyOn-v2.0.5.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.5/DutyOn-v2.0.5.zip)
 
 **English** · [简体中文](README.zh-CN.md)
 

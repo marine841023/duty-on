@@ -1,4 +1,4 @@
-﻿﻿; DutyOn（开工啦）2.0 NSIS 安装包脚本
+﻿; DutyOn（开工啦）2.0 NSIS 安装包脚本
 ; 构建：tools\build-package.ps1（内部调用 makensis）
 ;
 ; 需求对应（见项目约定）：
@@ -20,7 +20,7 @@
 !define APP_EXE "dutyon-pet.exe"
 ; 版本可由命令行覆盖：makensis /DAPP_VERSION=x.y.z
 !ifndef APP_VERSION
-  !define APP_VERSION "2.0.4"
+  !define APP_VERSION "2.0.5"
 !endif
 !define APP_PUBLISHER "DutyOn"
 !define APP_REGKEY "Software\DutyOn"
@@ -209,6 +209,11 @@ Section "install"
   File "..\..\device\build\Release\glfw3.dll"
   File /nonfatal "..\..\LICENSE"
 
+  ; Cubism SDK 5 运行时从 <exe>/FrameworkShaders 加载 GL shader，
+  ; 缺失时 Live2D 模型渲染空白（ImGui 不受影响）——2026-08-30 实测故障
+  SetOutPath "$INSTDIR\FrameworkShaders"
+  File /r "..\..\device\build\Release\FrameworkShaders\*.*"
+
   ; 内置 Live2D 模型（发布布局 <exe>/assets/live2d，main.cpp 约定）
   SetOutPath "$INSTDIR\assets\live2d"
   File /r "..\..\frontend\assets\live2d\*.*"
@@ -262,6 +267,7 @@ Section "Uninstall"
   Delete "$INSTDIR\glfw3.dll"
   Delete "$INSTDIR\uninstall.exe"
   Delete "$INSTDIR\LICENSE"
+  RMDir /r "$INSTDIR\FrameworkShaders"
   RMDir /r "$INSTDIR\assets"
   RMDir "$INSTDIR"
 SectionEnd

@@ -8,7 +8,7 @@
 
 [English](README.md) · **简体中文**
 
-### 🚀 v2.0.4 — 原生 C++ 重写版！
+### 🚀 v2.0.5 — 原生 C++ 重写版！
 
 > **为中国 Trae 用户量身打造** — 原生 Trae CN / TraeCode CN 窗口标题识别，
 > 自动剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역），
@@ -19,7 +19,12 @@
 > 系统指标采样，用 GLFW + OpenGL + Cubism SDK 原生渲染 Live2D / GIF 精灵。
 > 与 1.x 可交替安装（共用 `~/.dutyon` 配置），也是移植到低成本 ARM 硬件设备的代码基线。
 >
-> **v2.0.4 更新：** 关闭的项目秒级从任务列表消失。此前窗口扫描删除被
+> **v2.0.5 更新：** 修复安装版 Live2D 精灵不显示——安装包此前遗漏了
+> Cubism 运行时所需的 `FrameworkShaders` 着色器目录，导致 v2.0.0~v2.0.4
+> 安装版 Live2D 模型渲染空白（GIF 形象不受影响）。现已打包齐全，
+> 受影响用户重新安装即可恢复。
+>
+> **v2.0.4：** 关闭的项目秒级从任务列表消失。此前窗口扫描删除被
 > "同 IDE 其他窗口仍在"的条件抑制，关闭的项目最长会挂 10 分钟；现在
 > 窗口消失即视为确定性信号（仅 12 秒防闪烁宽限）。
 >
@@ -35,7 +40,7 @@
 > **v1.3.x 系列（WebView 版，支持 macOS/Linux）：** 仍在 `master` 分支维护——
 > 最新 [v1.3.3](https://github.com/marine841023/duty-on/releases/tag/v1.3.3)。
 >
-> 下载 v2.0.4 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.4/DutyOn-v2.0.4.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.4/DutyOn-v2.0.4.zip)
+> 下载 v2.0.5 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.5/DutyOn-v2.0.5.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.5/DutyOn-v2.0.5.zip)
 
 </div>
 
