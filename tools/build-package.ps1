@@ -1,4 +1,4 @@
-﻿﻿# DutyOn 2.0 安装包构建脚本
+﻿﻿﻿﻿# DutyOn 2.0 安装包构建脚本
 # 用法：powershell -File tools\build-package.ps1 [-Version 2.0.4]
 # 产物：tools\dist\DutyOn_<版本>_x64-setup.exe + DutyOn-v<版本>.zip
 # 说明：NSIS 工具链在 tools\nsis\nsis-3\（tauri 官方 GitHub 镜像的 NSIS 3

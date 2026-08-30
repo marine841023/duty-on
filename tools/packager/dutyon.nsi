@@ -1,4 +1,4 @@
-﻿; DutyOn（开工啦）2.0 NSIS 安装包脚本
+﻿﻿; DutyOn（开工啦）2.0 NSIS 安装包脚本
 ; 构建：tools\build-package.ps1（内部调用 makensis）
 ;
 ; 需求对应（见项目约定）：
