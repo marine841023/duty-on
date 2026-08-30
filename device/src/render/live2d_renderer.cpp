@@ -374,6 +374,9 @@ public:
 
         GLRenderer* renderer = GetRenderer<GLRenderer>();
         if (renderer) {
+            // R5 渲染器按窗口尺寸管理离屏目标，尺寸变化时同步更新
+            renderer->SetRenderTargetSize(static_cast<csmUint32>(window_w),
+                                          static_cast<csmUint32>(window_h));
             renderer->SetMvpMatrix(&projection);
             renderer->DrawModel();
         }
@@ -558,7 +561,9 @@ private:
 
     // 绑定 GL 纹理
     void SetupTextures() {
-        CreateRenderer(2);
+        // SDK 5 R5 起 CreateRenderer 需先给渲染目标尺寸；此处窗口尺寸未知，
+        // 先占位创建（掩码缓冲数 2 沿用原参数），Draw() 时随窗口同步真实尺寸。
+        CreateRenderer(1, 1, 2);
         GLRenderer* renderer = GetRenderer<GLRenderer>();
         if (!renderer) return;
 
