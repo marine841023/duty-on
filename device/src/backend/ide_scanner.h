@@ -3,8 +3,9 @@
 // ---------------------------------------------------------------------------
 // IDE 窗口扫描 —— src-tauri/src/ide_scanner.rs 的 C++ 移植（仅 Windows）。
 //
-// EnumWindows 遍历可见顶层窗口，按属主进程名（Qoder.exe/Trae CN.exe/
-// Trae.exe/Cursor.exe）过滤后用 SendMessageTimeoutW（250ms 硬超时）读标题，
+// EnumWindows 遍历可见顶层窗口，按属主进程名（Qoder.exe/Qoder CN.exe/
+// Qoder CN IDE.exe/Trae CN.exe/Trae.exe/Cursor.exe）过滤后用
+// SendMessageTimeoutW（250ms 硬超时）读标题，
 // 解析出项目名 + IDE 类型。另有 Codex/OpenCode CLI 进程存活检测。
 //
 // 设计要点（Rust 版踩过的坑，一并移植）：

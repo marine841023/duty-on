@@ -2,11 +2,15 @@
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
+#include <memory>
 
 namespace dutyon {
 
-// 初始化 EGL + OpenGL ES 上下文（直接 DRM/KMS 或 framebuffer）
-// 不依赖 X11/Wayland，最小化系统开销
+struct DrmState;  // DRM/GBM 直渲状态（实现细节在 gles_context.cpp）
+
+// 初始化 EGL + OpenGL ES 上下文（DRM/GBM 直渲，无 X11/Wayland）
+// 打开 /dev/dri/cardX → GBM 表面 → EGL(GBM 平台)，首帧经
+// drmModeSetCrtc 上屏，之后 pageflip 等 vblank
 class GlesContext {
 public:
     GlesContext();
@@ -24,6 +28,7 @@ private:
     EGLContext context_ = EGL_NO_CONTEXT;
     int width_ = 0;
     int height_ = 0;
+    std::unique_ptr<DrmState> drm_;
 };
 
 } // namespace dutyon

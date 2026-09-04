@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -91,10 +92,34 @@ bool isLoopback(const std::string& addr) {
     return addr == "127.0.0.1" || addr == "::1" || addr == "localhost";
 }
 
+// 「允许外部访问」开关（1.x 同名菜单项的配置层移植）：~/.dutyon/config.json
+// 里 "externalAccess": true 时服务器改绑 0.0.0.0，供局域网硬件屏（香橙派等）
+// 轮询 /api/* 只读接口。写端点仍受 loopback_guard 保护，外部不可注入事件。
+// 修改后需重启生效（绑定地址只在 start() 读一次）。
+bool externalAccessEnabled() {
+    const std::string home = homeDir();
+    if (home.empty()) return false;
+    auto content = readFileIfExists(fs::path(home) / ".dutyon" / "config.json");
+    if (!content.has_value()) return false;
+    json j = json::parse(*content, nullptr, /*allow_exceptions=*/false);
+    return !j.is_discarded() && j.is_object() && j.contains("externalAccess") &&
+           j["externalAccess"].is_boolean() && j["externalAccess"].get<bool>();
+}
+
 // 200 + JSON 响应（匿名 namespace 自由函数：路由 lambda 不必逐个捕获）
 void okJson(httplib::Response& res, const json& j) {
     res.status = 200;
     res.set_content(j.dump(), "application/json");
+}
+
+// 读取 ~/.dutyon/config.json（解析失败/文件缺失返回 null）。
+// /api/status 每次轮询都要读：小文件 + 容错解析，开销可忽略。
+json readConfigJson() {
+    const std::string home = homeDir();
+    if (home.empty()) return json{};
+    auto content = readFileIfExists(fs::path(home) / ".dutyon" / "config.json");
+    if (!content.has_value()) return json{};
+    return json::parse(*content, nullptr, /*allow_exceptions=*/false);
 }
 
 } // namespace
@@ -116,7 +141,8 @@ bool HttpServer::start() {
 
     registerRoutes();
 
-    if (!svr_->bind_to_port(bc::kHost, (int)bc::kPort)) {
+    const char* bind_host = externalAccessEnabled() ? "0.0.0.0" : bc::kHost;
+    if (!svr_->bind_to_port(bind_host, (int)bc::kPort)) {
         // AddrInUse = 已有实例在跑（老版本双进程并存期也会出现）
         fprintf(stderr, "[HttpServer] Port %u is already in use. Another instance may be "
                         "running.\n",
@@ -133,7 +159,8 @@ bool HttpServer::start() {
         }
         running_ = false;
     }).detach();
-    printf("[HttpServer] Listening on http://%s:%u\n", bc::kHost, (unsigned)bc::kPort);
+    printf("[HttpServer] Listening on http://%s:%u%s\n", bind_host, (unsigned)bc::kPort,
+           externalAccessEnabled() ? " (external access ON)" : "");
     return true;
 }
 
@@ -167,6 +194,17 @@ void HttpServer::registerRoutes() {
     svr_->Options(R"(.*)", [add_cors](const httplib::Request&, httplib::Response& res) {
         add_cors(res);
         res.status = 204;
+    });
+
+    // 硬件显示端在线跟踪：USB 网段（192.168.7.x）任意请求记录时间戳
+    //（设备 ~2s 轮询一次 /api/status，10 秒窗口足够容错丢包）
+    svr_->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response&) {
+        if (req.remote_addr.rfind("192.168.7.", 0) == 0)
+            device_last_seen_.store(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count());
+        return httplib::Server::HandlerResponse::Unhandled;
     });
 
     // ---- internal tier（写端点仅限回环）----
@@ -299,7 +337,84 @@ void HttpServer::registerRoutes() {
 
     svr_->Get("/api/status", [this, add_cors](const httplib::Request&, httplib::Response& res) {
         add_cors(res);
-        okJson(res, sm_.snapshotJson());
+        json j = sm_.snapshotJson();
+        // 当前形象键 + 设备模式随快照下发（"char_xxx" = 自定义 GIF；否则
+        // Live2D 模型 key；deviceMode = single/multi/frame），硬件屏据此
+        // 热切换形象/布局模式与 PC 保持一致。旧版客户端忽略未知字段。
+        if (json cfg = readConfigJson(); cfg.is_object()) {
+            j["activeCharacter"] = cfg.value("activeCharacterId", std::string{});
+            j["deviceMode"] = cfg.value("deviceMode", "multi");
+        }
+        // PC 时间（设备无 RTC/网络不可信，时钟跟随 PC）：epoch 秒 +
+        // 本地时区偏移分钟（东八区=480），设备端 steady_clock 自行推进
+        {
+            const time_t now_sec = time(nullptr);
+            struct tm lt, gt;
+            localtime_s(&lt, &now_sec);
+            gmtime_s(&gt, &now_sec);
+            // 偏移秒 = 本地时刻 - UTC 时刻（含跨日/跨年的 yday 差）
+            const long offset_sec =
+                (lt.tm_yday - gt.tm_yday) * 86400L +
+                (lt.tm_hour - gt.tm_hour) * 3600L +
+                (lt.tm_min - gt.tm_min) * 60L + (lt.tm_sec - gt.tm_sec);
+            j["serverTime"] = (double)now_sec;
+            j["utcOffset"] = (int)(offset_sec / 60);
+        }
+        okJson(res, j);
+    });
+
+    // GET /api/character —— 当前角色详情（硬件屏拉取自定义 GIF 定义用）。
+    // 返回 {"type":"custom","id","name","sleeping","working","alert"} 或
+    // {"type":"live2d","id":<模型key>}；文件名相对 ~/.dutyon/animations/。
+    svr_->Get("/api/character", [add_cors](const httplib::Request&, httplib::Response& res) {
+        add_cors(res);
+        const json cfg = readConfigJson();
+        if (!cfg.is_object()) {
+            res.status = 500;
+            res.set_content("config unavailable", "text/plain");
+            return;
+        }
+        const std::string id = cfg.value("activeCharacterId", std::string{});
+        json out;
+        if (id.rfind("char_", 0) == 0) {
+            out = {{"type", "custom"}, {"id", id}};
+            for (const auto& c : cfg.value("customCharacters", json::array())) {
+                if (!c.is_object() || c.value("id", std::string{}) != id) continue;
+                out["name"] = c.value("name", std::string{});
+                out["sleeping"] = c.value("sleeping", std::string{});
+                out["working"] = c.value("working", std::string{});
+                out["alert"] = c.value("alert", std::string{});
+                break;
+            }
+        } else {
+            out = {{"type", "live2d"}, {"id", id}};
+        }
+        okJson(res, out);
+    });
+
+    // GET /api/animations/<file> —— 自定义形象动画文件（~/.dutyon/animations/）。
+    // 仅单文件名（无子目录）；拒绝 .. 防逃逸（校验同 /live2d）。
+    svr_->Get(R"(/api/animations/([^/]+))", [](const httplib::Request& req, httplib::Response& res) {
+        const std::string name = req.matches[1].str();
+        if (name.empty() || name == "..") {
+            res.status = 400;
+            res.set_content("invalid path", "text/plain");
+            return;
+        }
+        const std::string home = homeDir();
+        if (home.empty()) {
+            res.status = 500;
+            res.set_content("home dir unavailable", "text/plain");
+            return;
+        }
+        const fs::path file_path = fs::path(home) / ".dutyon" / "animations" / name;
+        if (auto bytes = readFileIfExists(file_path)) {
+            res.status = 200;
+            res.set_content(*bytes, "image/gif");
+        } else {
+            res.status = 404;
+            res.set_content("not found", "text/plain");
+        }
     });
 
     // GET /api/events —— SSE 状态流。每次状态机有效变更推完整 Snapshot；

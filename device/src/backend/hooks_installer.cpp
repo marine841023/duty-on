@@ -463,10 +463,14 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
         if (w.has_value()) warnings.push_back(*w);
     }
 
-    // ---- Qoder: ~/.qoder/settings.json（已安装才接线；shell 字段）----
+    // ---- Qoder: ~/.qoder/settings.json 与 ~/.qoder-cn/settings.json ----
+    // 国际版用 ~/.qoder，Qoder CN 版用 ~/.qoder-cn（进程名 "Qoder CN IDE.exe"）；
+    // 两者共存时都接线，均仅在已安装时才写。
     std::optional<std::string> qoder_path_str;
-    const fs::path qoder_dir = fs::path(home) / ".qoder";
-    if (fs::exists(qoder_dir)) {
+    const char* const kQoderDirs[] = {".qoder", ".qoder-cn"};
+    for (const char* qdir : kQoderDirs) {
+        const fs::path qoder_dir = fs::path(home) / qdir;
+        if (!fs::exists(qoder_dir)) continue;
         const fs::path qoder_hooks_path = qoder_dir / "settings.json";
         const std::string qoder_cmd = hookCommand("qoder", "");
         std::string err;
@@ -475,10 +479,10 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
             [&](const char*) { return qoder_cmd; }, "powershell",
             /*add_version=*/false, /*strip_version=*/false, HookFormat::Nested, err);
         if (err.empty()) {
-            if (w.has_value()) warnings.push_back("Qoder: " + *w);
-            qoder_path_str = qoder_hooks_path.string();
+            if (w.has_value()) warnings.push_back(std::string(qdir) + ": " + *w);
+            if (!qoder_path_str.has_value()) qoder_path_str = qoder_hooks_path.string();
         } else {
-            warnings.push_back("Qoder settings.json merge failed: " + err);
+            warnings.push_back(std::string(qdir) + " settings.json merge failed: " + err);
         }
     }
 
@@ -560,7 +564,7 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
 InstalledStatus isHooksInstalled() {
     const std::string home = homeDir();
     const fs::path trae_hooks_path = fs::path(home) / ".trae-cn" / "hooks.json";
-    const fs::path qoder_hooks_path = fs::path(home) / ".qoder" / "settings.json";
+    // Qoder 双配置目录：国际版 ~/.qoder、CN 版 ~/.qoder-cn，任一接线即算已装
     const fs::path cursor_hooks_path = fs::path(home) / ".cursor" / "hooks.json";
     const fs::path codex_hooks_path = fs::path(home) / ".codex" / "hooks.json";
     const fs::path opencode_plugin_path =
@@ -575,7 +579,8 @@ InstalledStatus isHooksInstalled() {
         return content.has_value() && isPetCommand(*content);
     };
     st.hooks_exist = contains_pet(trae_hooks_path);
-    st.qoder_hooks_exist = contains_pet(qoder_hooks_path);
+    st.qoder_hooks_exist = contains_pet(fs::path(home) / ".qoder" / "settings.json") ||
+                           contains_pet(fs::path(home) / ".qoder-cn" / "settings.json");
     st.cursor_hooks_exist = contains_pet(cursor_hooks_path);
     st.codex_hooks_exist = contains_pet(codex_hooks_path);
     // OpenCode 无 hook 配置；"已安装" = 我们的插件文件存在且带 DutyOn 标记

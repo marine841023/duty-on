@@ -30,7 +30,7 @@ std::string homeDir() {
 std::string configPath() {
     const std::string home = homeDir();
     if (home.empty()) return "config.json";
-    return home + "\\.dutyon\\config.json";
+    return home + "/.dutyon/config.json";
 }
 
 // 读-改-写：只改一个字段，保留文件其余内容（含 1.x 独有字段）
@@ -113,6 +113,8 @@ UserConfig UserConfigStore::load() {
         cfg.model_url = j["modelUrl"].get<std::string>();
     if (j.contains("activeCharacterId") && j["activeCharacterId"].is_string())
         cfg.active_character_id = j["activeCharacterId"].get<std::string>();
+    if (j.contains("deviceMode") && j["deviceMode"].is_string())
+        cfg.device_mode = j["deviceMode"].get<std::string>();
     if (j.contains("stateMotions") && j["stateMotions"].is_object()) {
         for (auto it = j["stateMotions"].begin(); it != j["stateMotions"].end(); ++it)
             cfg.state_motions[it.key()] = parseMotions(it.value());
@@ -210,19 +212,39 @@ void UserConfigStore::saveWindowPos(int x, int y) {
     });
 }
 
+void UserConfigStore::saveDeviceMode(const std::string& mode) {
+    // 设备模式（single/multi/frame）；/api/status 每次轮询读文件下发
+    updateConfig([&](json& j) { j["deviceMode"] = mode; });
+}
+
+void UserConfigStore::saveCustomCharacters(const UserConfig& cfg) {
+    // 设备端从 PC 下载新自定义形象后整体覆写该数组（camelCase 同 1.x serde）
+    updateConfig([&](json& j) {
+        json arr = json::array();
+        for (const auto& c : cfg.custom_characters) {
+            arr.push_back({{"id", c.id},
+                           {"name", c.name},
+                           {"sleeping", c.sleeping},
+                           {"working", c.working},
+                           {"alert", c.alert}});
+        }
+        j["customCharacters"] = std::move(arr);
+    });
+}
+
 std::string UserConfigStore::userModelsDir() {
     const std::string home = homeDir();
-    return home.empty() ? std::string("live2d") : home + "\\.dutyon\\live2d";
+    return home.empty() ? std::string("live2d") : home + "/.dutyon/live2d";
 }
 
 std::string UserConfigStore::animationsDir() {
     const std::string home = homeDir();
-    return home.empty() ? std::string("animations") : home + "\\.dutyon\\animations";
+    return home.empty() ? std::string("animations") : home + "/.dutyon/animations";
 }
 
 std::string UserConfigStore::thumbnailsDir() {
     const std::string home = homeDir();
-    return home.empty() ? std::string("thumbnails") : home + "\\.dutyon\\thumbnails";
+    return home.empty() ? std::string("thumbnails") : home + "/.dutyon/thumbnails";
 }
 
 std::string UserConfigStore::thumbnailFor(const std::string& model_name) {

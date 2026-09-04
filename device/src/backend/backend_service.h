@@ -60,6 +60,8 @@ public:
     // 请求整个应用退出（HTTP /api/quit 与本地菜单共用）；主循环每帧用
     // quitRequested() 轮询
     void requestQuit() { quit_requested_ = true; }
+    // 硬件显示端在线（USB 网段 10s 内有 API 轮询）；菜单"设备模式"分组用
+    bool deviceOnline() const { return http_ && http_->deviceOnline(); }
     bool quitRequested() const { return quit_requested_; }
     // ApiClient 兼容别名（菜单 quit 项调用面保持一致）
     bool quitApp() {

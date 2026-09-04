@@ -20,7 +20,7 @@
 !define APP_EXE "dutyon-pet.exe"
 ; 版本可由命令行覆盖：makensis /DAPP_VERSION=x.y.z
 !ifndef APP_VERSION
-  !define APP_VERSION "2.0.5"
+  !define APP_VERSION "2.0.6"
 !endif
 !define APP_PUBLISHER "DutyOn"
 !define APP_REGKEY "Software\DutyOn"

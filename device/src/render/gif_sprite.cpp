@@ -538,26 +538,275 @@ void GifSprite::render() {
 
 }  // namespace dutyon
 
-#else  // 非 Windows 设备端：占位实现
+#else  // 非 Windows 设备端：stb_image + GLES2 实现
+//
+// ARM Linux 版：stb_image 解码动画 GIF（内部按 disposal 合成为全画布
+// RGBA 帧序列，语义与 Windows/WIC 版一致），GLES2 shader 绘制贴图四边形
+// （无固定管线，参考 prompt_banner 的渲染方式）。
+// 帧数据驻留 RAM，仅当前帧上传纹理（帧切换时全量 glTexSubImage2D；
+// 480×480 一帧 0.9MB，USB/SoC 带宽足够）。
+
+#include <GLES3/gl3.h>
+#include <stb_image.h>
+
+#include <fstream>
+#include <string>
+#include <vector>
 
 namespace dutyon {
 
-struct GifSprite::Impl {};
+namespace {
+
+// 正交 2D 贴图（GLES2 语法；Y 向下：与 Windows 版 glOrtho(0,w,h,0) 一致）
+const char* kVertSrc =
+    "attribute vec2 a_pos;\n"      // 视口内像素坐标（原点左上）
+    "attribute vec2 a_uv;\n"
+    "uniform vec2 u_screen;\n"     // 视口宽高
+    "varying vec2 v_uv;\n"
+    "void main() {\n"
+    "  vec2 ndc = vec2(a_pos.x / u_screen.x * 2.0 - 1.0,\n"
+    "                  1.0 - a_pos.y / u_screen.y * 2.0);\n"
+    "  gl_Position = vec4(ndc, 0.0, 1.0);\n"
+    "  v_uv = a_uv;\n"
+    "}\n";
+
+const char* kFragSrc =
+    "precision mediump float;\n"
+    "varying vec2 v_uv;\n"
+    "uniform sampler2D u_tex;\n"
+    "void main() { gl_FragColor = texture2D(u_tex, v_uv); }\n";
+
+GLuint compileShader(GLenum type, const char* src) {
+    GLuint s = glCreateShader(type);
+    glShaderSource(s, 1, &src, nullptr);
+    glCompileShader(s);
+    GLint ok = 0;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512] = {};
+        glGetShaderInfoLog(s, sizeof(log), nullptr, log);
+        fprintf(stderr, "[GifSprite] shader compile: %s\n", log);
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+}  // namespace
+
+struct GifSprite::Impl {
+    std::vector<unsigned char> frames;  // 全帧 RGBA（w*h*4*n，stb 已合成）
+    std::vector<float> delays;          // 每帧时长（秒）
+    int w = 0, h = 0, n = 0;
+    int cur = 0;
+    int uploaded = -1;  // 已上传纹理的帧序号
+    float elapsed = 0.0f;
+    GLuint tex = 0;
+    GLuint program = 0;
+    int vp_x = 0, vp_y = 0, vp_w = 0, vp_h = 0;
+    bool flip = false;
+    Rect content;
+
+    void ensureProgram() {
+        if (program) return;
+        GLuint vs = compileShader(GL_VERTEX_SHADER, kVertSrc);
+        GLuint fs = compileShader(GL_FRAGMENT_SHADER, kFragSrc);
+        if (!vs || !fs) return;
+        program = glCreateProgram();
+        glAttachShader(program, vs);
+        glAttachShader(program, fs);
+        glBindAttribLocation(program, 0, "a_pos");
+        glBindAttribLocation(program, 1, "a_uv");
+        glLinkProgram(program);
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+        GLint ok = 0;
+        glGetProgramiv(program, GL_LINK_STATUS, &ok);
+        if (!ok) {
+            char log[512] = {};
+            glGetProgramInfoLog(program, sizeof(log), nullptr, log);
+            fprintf(stderr, "[GifSprite] link: %s\n", log);
+            glDeleteProgram(program);
+            program = 0;
+        }
+    }
+};
 
 GifSprite::GifSprite() : impl_(new Impl) {}
-GifSprite::~GifSprite() { delete impl_; }
-bool GifSprite::load(const std::string&) { return false; }
-bool GifSprite::isLoaded() const { return false; }
-void GifSprite::unload() {}
-void GifSprite::update(float) {}
-void GifSprite::render() {}
-void GifSprite::setViewport(int, int, int, int) {}
-void GifSprite::setFlip(bool) {}
-bool GifSprite::isFlipped() const { return false; }
-Rect GifSprite::contentRect() const { return Rect{}; }
-int GifSprite::frameCount() const { return 0; }
-int GifSprite::width() const { return 0; }
-int GifSprite::height() const { return 0; }
+GifSprite::~GifSprite() {
+    if (impl_->tex) glDeleteTextures(1, &impl_->tex);
+    if (impl_->program) glDeleteProgram(impl_->program);
+    delete impl_;
+}
+
+bool GifSprite::load(const std::string& path_utf8) {
+    if (path_utf8.empty()) return false;
+    std::ifstream in(path_utf8, std::ios::binary);
+    if (!in) {
+        fprintf(stderr, "GIF load failed: %s\n", path_utf8.c_str());
+        return false;
+    }
+    std::vector<unsigned char> buf((std::istreambuf_iterator<char>(in)),
+                                   std::istreambuf_iterator<char>());
+    if (buf.empty()) {
+        fprintf(stderr, "GIF load failed (empty): %s\n", path_utf8.c_str());
+        return false;
+    }
+    // stb 与浏览器/WIC 的语义差异：首帧未覆盖的像素会被
+    // GIF 逻辑屏幕背景色强制不透明填充（绿幕 GIF 因此出现绿色边框）。
+    // 置 bgindex=0 让 stb 跳过该填充，与 PC 端 WIC 渲染（背景视为透明）一致。
+    if (buf.size() > 11 && buf[0] == 'G' && buf[1] == 'I' && buf[2] == 'F' &&
+        buf[11] != 0)
+        buf[11] = 0;
+    int w = 0, h = 0, z = 0;
+    int* delays_ms = nullptr;
+    // req_comp=4：统一 RGBA；stb 内部按 disposal 逐帧合成到全画布
+    unsigned char* data = stbi_load_gif_from_memory(
+        buf.data(), (int)buf.size(), &delays_ms, &w, &h, &z, nullptr, 4);
+    if (!data || z <= 0) {
+        fprintf(stderr, "GIF load failed: %s (%s)\n", path_utf8.c_str(),
+                stbi_failure_reason());
+        if (delays_ms) stbi_image_free(delays_ms);
+        return false;
+    }
+    // 换动画：清旧帧（失败保持原状的语义由调用方"先 load 成功才切换"保证，
+    // 这里 load 失败直接返回，不动旧状态）
+    const size_t frame_bytes = (size_t)w * h * 4;
+    impl_->frames.assign(data, data + frame_bytes * z);
+    impl_->delays.resize(z);
+    for (int i = 0; i < z; ++i) {
+        const int ms = delays_ms ? delays_ms[i] : 0;
+        // <=10ms 按浏览器惯例兜底 100ms（同 Windows 版）
+        impl_->delays[i] = ms > 10 ? ms / 1000.0f : 0.1f;
+    }
+    stbi_image_free(data);  // 释放 stb 缓冲（含 delays）
+    impl_->w = w;
+    impl_->h = h;
+    impl_->n = z;
+    impl_->cur = 0;
+    impl_->elapsed = 0.0f;
+    impl_->uploaded = -1;  // 触发下一帧 render 全量上传
+    printf("[GifSprite] loaded %dx%d %d frames: %s\n", w, h, z,
+           path_utf8.c_str());
+    return true;
+}
+
+bool GifSprite::isLoaded() const { return !impl_->frames.empty(); }
+
+void GifSprite::unload() {
+    impl_->frames.clear();
+    impl_->frames.shrink_to_fit();
+    impl_->delays.clear();
+    impl_->delays.shrink_to_fit();
+    impl_->w = impl_->h = impl_->n = 0;
+    impl_->cur = 0;
+    impl_->uploaded = -1;
+    impl_->elapsed = 0.0f;
+    if (impl_->tex) {
+        glDeleteTextures(1, &impl_->tex);
+        impl_->tex = 0;
+    }
+}
+
+void GifSprite::update(float delta_seconds) {
+    if (impl_->frames.empty()) return;
+    impl_->elapsed += delta_seconds;
+    float dur = impl_->delays[impl_->cur];
+    while (impl_->elapsed >= dur) {
+        impl_->elapsed -= dur;
+        impl_->cur = (impl_->cur + 1) % impl_->n;
+        dur = impl_->delays[impl_->cur];
+    }
+}
+
+void GifSprite::setViewport(int x, int y, int w, int h) {
+    impl_->vp_x = x;
+    impl_->vp_y = y;
+    impl_->vp_w = w;
+    impl_->vp_h = h;
+}
+
+void GifSprite::setFlip(bool flip) { impl_->flip = flip; }
+bool GifSprite::isFlipped() const { return impl_->flip; }
+
+void GifSprite::render() {
+    if (impl_->frames.empty() || impl_->vp_w <= 0 || impl_->vp_h <= 0) return;
+    impl_->ensureProgram();
+    if (!impl_->program) return;
+
+    // 纹理：帧切换时全量上传（RGBA，stb 行序自顶向下与 uv 一致）
+    if (!impl_->tex) {
+        glGenTextures(1, &impl_->tex);
+        glBindTexture(GL_TEXTURE_2D, impl_->tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, impl_->w, impl_->h, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, impl_->frames.data());
+        impl_->uploaded = impl_->cur;
+    } else if (impl_->uploaded != impl_->cur) {
+        glBindTexture(GL_TEXTURE_2D, impl_->tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexSubImage2D(
+            GL_TEXTURE_2D, 0, 0, 0, impl_->w, impl_->h, GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            impl_->frames.data() + (size_t)impl_->cur * impl_->w * impl_->h * 4);
+        impl_->uploaded = impl_->cur;
+    }
+
+    // 适配（contain）：最大占画布 80%、水平居中、垂直贴底（多任务）/
+    // 垂直居中（单任务/相框，setCenterV）—— Y 向下坐标系
+    const float max_w = impl_->vp_w * 0.80f;
+    const float max_h = impl_->vp_h * 0.80f;
+    float scale = max_w / (float)impl_->w;
+    if ((float)impl_->h * scale > max_h) scale = max_h / (float)impl_->h;
+    const float dw = (float)impl_->w * scale;
+    const float dh = (float)impl_->h * scale;
+    const float dx = (impl_->vp_w - dw) * 0.5f;
+    const float dy = center_v_ ? (impl_->vp_h - dh) * 0.5f
+                               : impl_->vp_h - dh;
+    impl_->content = Rect{dx, dy, dw, dh};
+
+    glViewport(impl_->vp_x, impl_->vp_y, impl_->vp_w, impl_->vp_h);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // 四边形（视口内相对坐标；uv 的 v=0 是图像首行=屏幕顶部，天然正立）
+    const float u0 = impl_->flip ? 1.0f : 0.0f;
+    const float u1 = impl_->flip ? 0.0f : 1.0f;
+    const float verts[] = {
+        dx,      dy,      u0, 0.0f,
+        dx + dw, dy,      u1, 0.0f,
+        dx + dw, dy + dh, u1, 1.0f,
+        dx,      dy + dh, u0, 1.0f,
+    };
+
+    glUseProgram(impl_->program);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, impl_->tex);
+    glUniform1i(glGetUniformLocation(impl_->program, "u_tex"), 0);
+    glUniform2f(glGetUniformLocation(impl_->program, "u_screen"),
+                (float)impl_->vp_w, (float)impl_->vp_h);
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), verts);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), verts + 2);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glDisableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+    glDisable(GL_BLEND);
+}
+
+Rect GifSprite::contentRect() const { return impl_->content; }
+int GifSprite::frameCount() const { return impl_->n; }
+int GifSprite::width() const { return impl_->w; }
+int GifSprite::height() const { return impl_->h; }
 
 }  // namespace dutyon
 

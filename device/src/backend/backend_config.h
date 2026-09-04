@@ -137,6 +137,10 @@ constexpr uint64_t kScanIntervalIdleMs = 15000;
 constexpr const char* kTraeTitleSuffix = " - Trae CN";
 constexpr const char* kTraeCodeTitleSuffix = " - TraeCode CN";
 constexpr const char* kQoderTitleSuffix = " - Qoder";
+// Qoder CN 版：进程叫 "Qoder CN IDE.exe"（另有 "Qoder CN.exe"），
+// 窗口标题后缀 " - Qoder CN IDE"；配置目录 ~/.qoder-cn（国际版 ~/.qoder）
+constexpr const char* kQoderCnIdeTitleSuffix = " - Qoder CN IDE";
+constexpr const char* kQoderCnTitleSuffix = " - Qoder CN";
 constexpr const char* kCursorTitleSuffix = " - Cursor";
 // Cursor 3.x 独立的 Agents 面板窗口：无工作区时标题就叫 "Cursor Agents"
 constexpr const char* kCursorAgentsTitle = "Cursor Agents";

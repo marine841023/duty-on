@@ -32,6 +32,8 @@ public:
     void setViewport(int x, int y, int w, int h);
     void setFlip(bool flip);
     bool isFlipped() const;
+    // 垂直对齐：true=居中（单任务/相框模式），false=贴底（多任务模式，默认）
+    void setCenterV(bool center) { center_v_ = center; }
 
     // 内容包围盒（视口像素，Y 向下）= 绘制矩形；头饰特效锚定用
     Rect contentRect() const;
@@ -43,6 +45,7 @@ public:
 private:
     struct Impl;
     Impl* impl_;
+    bool center_v_ = false;  // 垂直居中（单任务/相框模式）
 };
 
 }  // namespace dutyon

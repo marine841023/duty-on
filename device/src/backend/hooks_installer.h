@@ -5,7 +5,8 @@
 //
 // 把桥接脚本装到 ~/.dutyon/hooks/，并把 hook 条目合并进：
 //   ~/.trae-cn/hooks.json   （Trae，Nested 格式，加 version:1）
-//   ~/.qoder/settings.json  （Qoder，Nested + shell 字段，仅在已安装时）
+//   ~/.qoder/settings.json 与 ~/.qoder-cn/settings.json
+//                           （Qoder 国际版/CN 版，Nested + shell 字段，仅已装时）
 //   ~/.cursor/hooks.json    （Cursor，Flat 格式 + camelCase 事件，仅已装时）
 //   ~/.codex/hooks.json     （Codex，Nested，剥 version 字段，仅已装时）
 //   ~/.config/opencode/plugins/dutyon-bridge.js（OpenCode JS 插件，仅已装时）

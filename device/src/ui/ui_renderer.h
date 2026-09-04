@@ -105,6 +105,12 @@ public:
     // 菜单展开方向：false 向右扩（默认）/ true 向左扩（右侧屏幕空间不足，
     // 对齐 1.x menu-left 模式：菜单贴窗口左缘、角色区右锚）
     void setMenuLeft(bool left);
+    // 硬件显示端状态（主循环每帧注入）：在线时菜单显示"设备模式"分组
+    //（单任务/多任务/电子相框三选一，menu_activate 收 "device-mode:<m>"）
+    void setDeviceStatus(bool online, const std::string& mode) {
+        device_online_ = online;
+        device_mode_ = mode;
+    }
     // 客户区坐标是否落在菜单矩形内（右键菜单区域时不触发开/关切换）
     bool isPointInMenu(float x, float y) const;
     // 客户区坐标是否落在「可点击内容」上（1.x setupClickThrough 的
@@ -170,6 +176,9 @@ public:
 private:
     struct Impl;
     Impl* impl_;
+    // 硬件显示端状态（setDeviceStatus 注入；渲染线程同循环读，无并发）
+    bool device_online_ = false;
+    std::string device_mode_ = "multi";
 };
 
 } // namespace dutyon

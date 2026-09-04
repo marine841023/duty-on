@@ -2293,6 +2293,25 @@ void UIRenderer::renderMenu() {
             if (p->MenuRow("autostart", I18n::t("menu.autoLaunch"),
                         checked("autostart"), false, nullptr, false).clicked)
                 activate("autostart");
+            // ---- 硬件显示端（USB 连接后显示模式选择）----
+            p->MenuDivider();
+            if (device_online_) {
+                p->MenuLabel(I18n::t("menu.deviceOnline"));
+                if (p->MenuRow("dmode-single", I18n::t("menu.modeSingle"),
+                            device_mode_ == "single", false, nullptr,
+                            false).clicked)
+                    activate("device-mode:single");
+                if (p->MenuRow("dmode-multi", I18n::t("menu.modeMulti"),
+                            device_mode_ == "multi", false, nullptr,
+                            false).clicked)
+                    activate("device-mode:multi");
+                if (p->MenuRow("dmode-frame", I18n::t("menu.modeFrame"),
+                            device_mode_ == "frame", false, nullptr,
+                            false).clicked)
+                    activate("device-mode:frame");
+            } else {
+                p->MenuLabel(I18n::t("menu.deviceOffline"));
+            }
             if (p->MenuRow("lang", I18n::t("menu.language"), false, false,
                         nullptr, true).clicked)
                 go(kMenuLanguage);

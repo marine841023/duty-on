@@ -20,11 +20,14 @@ namespace dutyon::backend {
 
 namespace {
 
-// 我们追踪的 IDE 可执行文件名（大小写不敏感，匹配进程镜像最后一段）
+// 我们追踪的 IDE 可执行文件名（大小写不敏感，匹配进程镜像最后一段）。
+// Qoder CN 版主进程叫 "Qoder CN IDE.exe"，另有伴生进程 "Qoder CN.exe"；
+// 国际版为 "Qoder.exe"。
 const wchar_t* const kIdeProcessExes[] = {
-    L"Qoder.exe", L"Trae CN.exe", L"Trae.exe", L"Cursor.exe",
+    L"Qoder.exe", L"Qoder CN.exe", L"Qoder CN IDE.exe", L"Trae CN.exe", L"Trae.exe",
+    L"Cursor.exe",
 };
-constexpr int kIdeProcessExesCount = 4;
+constexpr int kIdeProcessExesCount = 6;
 
 // 每个标题请求的硬超时（毫秒）
 constexpr UINT kTitleQueryTimeoutMs = 250;
@@ -63,6 +66,7 @@ std::string trimStr(const std::string& s) {
 // 返回剥好的标题（无匹配则原样返回）。
 std::string stripPrivilegeSuffix(const std::string& title) {
     const char* suffixes[] = {
+        bc::kQoderCnIdeTitleSuffix,  bc::kQoderCnTitleSuffix,
         bc::kQoderTitleSuffix,       bc::kTraeTitleSuffix,
         bc::kTraeCodeTitleSuffix,    bc::kCursorAgentsTitleSuffix,
         bc::kCursorTitleSuffix,      bc::kCursorAgentsTitle,
@@ -83,7 +87,7 @@ std::string stripPrivilegeSuffix(const std::string& title) {
 
 // 解析 IDE 窗口标题 -> (项目名, IDE 类型)。
 //   Trae:   "<file> - <project> - Trae CN" / " - TraeCode CN"（改名后的新版）
-//   Qoder:  "<file> - <project> - Qoder"
+//   Qoder:  "<file> - <project> - Qoder" / " - Qoder CN IDE"（CN 版）
 //   Cursor: "<file> - <project> - Cursor" / " - Cursor Agents" /
 //           独立 "Cursor Agents"（3.x Agents 面板）
 // 无项目打开的通用标题（"Trae CN - Trae CN"）返回 nullopt。
@@ -96,7 +100,9 @@ std::optional<std::pair<std::string, IdeKind>> parseTitle(const std::string& raw
     IdeKind ide;
     if (endsWith(title, bc::kTraeTitleSuffix) || endsWith(title, bc::kTraeCodeTitleSuffix)) {
         ide = IdeKind::Trae;
-    } else if (endsWith(title, bc::kQoderTitleSuffix)) {
+    } else if (endsWith(title, bc::kQoderCnIdeTitleSuffix) ||
+               endsWith(title, bc::kQoderCnTitleSuffix) ||
+               endsWith(title, bc::kQoderTitleSuffix)) {
         ide = IdeKind::Qoder;
     } else if (endsWith(title, bc::kCursorAgentsTitleSuffix)) {
         ide = IdeKind::Cursor;  // 必须在 " - Cursor" 之前判定
@@ -133,7 +139,7 @@ std::optional<std::pair<std::string, IdeKind>> parseTitle(const std::string& raw
         }
     }
     if (raw.empty() || raw == "Trae" || raw == "Trae CN" || raw == "TraeCode CN" ||
-        raw == "Qoder" || raw == "Cursor") {
+        raw == "Qoder" || raw == "Qoder CN" || raw == "Qoder CN IDE" || raw == "Cursor") {
         return std::nullopt;
     }
     return std::make_pair(raw, ide);

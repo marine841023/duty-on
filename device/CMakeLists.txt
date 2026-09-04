@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(dutyon-2.0 VERSION 2.0.5 LANGUAGES CXX)
+project(dutyon-2.0 VERSION 2.0.6 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,8 +19,13 @@ if(WIN32)
     set(CUBISM_CORE_LIB_DIR "windows/x86_64/142")
 else()
     set(PLATFORM_NAME "Linux-ARM")
-    set(CSM_TARGET "CSM_TARGET_LINUX_GL")
-    set(CUBISM_CORE_LIB_DIR "linux/aarch64")
+    # SDK 的 CSM_TARGET_LINUX_GL 走桌面 GL/glew（不适配设备端 GLES）；
+    # 复用官方 GLES3 分支宏（仅影响 Framework 三个头文件的 include，
+    # 走 GLES3/gl3.h，无 JNI 等副作用），匹配 gles_context 的 ES3 上下文
+    set(CSM_TARGET "CSM_TARGET_HARMONYOS_ES3")
+    # SDK R5 里 ARM Linux 静态库在 experimental 目录（dll/experimental/linux/arm64
+    # 有同名 .so；这里链静态库，运行期免部署 libLive2DCubismCore.so）
+    set(CUBISM_CORE_LIB_DIR "experimental/linux/arm64")
 endif()
 
 message(STATUS "Building for: ${PLATFORM_NAME}")
@@ -44,6 +49,8 @@ endif()
 # 第三方依赖（FetchContent 自动拉取）
 # ---------------------------------------------------------------------------
 include(FetchContent)
+# 设备端弱网：依赖已拉取后不再每次 configure 做 git update（github 抽风即断）
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
 FetchContent_Declare(json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
@@ -94,7 +101,15 @@ else()
         GIT_TAG 1.10.5)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(EGL REQUIRED egl)
-    pkg_check_modules(GLES3 REQUIRED glesv3)
+    # DRM/GBM 直渲（无 X11）：gbm 表面 + libdrm 的 CRTC/翻页接口
+    pkg_check_modules(GBM REQUIRED gbm)
+    pkg_check_modules(DRM REQUIRED libdrm)
+    # GLES3 头/库由 glesv2.pc 提供（libGLESv2 含 GLES3 入口）；仅少数发行版
+    # 另附 glesv3.pc，先试 glesv3 再回退 glesv2（Armbian trixie 只有后者）
+    pkg_check_modules(GLES3 glesv3)
+    if(NOT GLES3_FOUND)
+        pkg_check_modules(GLES3 REQUIRED glesv2)
+    endif()
     FetchContent_MakeAvailable(cpr json stb)
 endif()
 
@@ -182,11 +197,17 @@ if(WIN32)
         src/backend/http_server.cpp
         src/backend/backend_service.cpp)
 else()
-    # ApiClient（HTTP 轮询 PC 端 API）仅设备端使用；PC 端内嵌后端直连
+    # ApiClient（HTTP 轮询 PC 端 API）仅设备端使用；PC 端内嵌后端直连。
+    # usb_link = USB 直连链路监视（租约发现）；prompt_banner = 开机引导横幅；
+    # text_renderer/task_panel = 下半屏任务列表（字形图集文字 + 面板）
     list(APPEND SOURCES
         src/api/client.cpp
+        src/net/usb_link.cpp
         src/platform/egl_window.cpp
-        src/render/gles_context.cpp)
+        src/render/gles_context.cpp
+        src/render/prompt_banner.cpp
+        src/render/text_renderer.cpp
+        src/ui/task_panel.cpp)
 endif()
 
 add_executable(dutyon-pet ${SOURCES})
@@ -246,16 +267,22 @@ else()
     target_include_directories(dutyon-pet PRIVATE
         ${EGL_INCLUDE_DIRS}
         ${GLES3_INCLUDE_DIRS}
+        ${GBM_INCLUDE_DIRS}
+        ${DRM_INCLUDE_DIRS}
     )
     target_link_directories(dutyon-pet PRIVATE
         ${EGL_LIBRARY_DIRS}
         ${GLES3_LIBRARY_DIRS}
+        ${GBM_LIBRARY_DIRS}
+        ${DRM_LIBRARY_DIRS}
     )
     target_link_libraries(dutyon-pet
         cubism_framework
         Live2DCubismCore
         ${EGL_LIBRARIES}
         ${GLES3_LIBRARIES}
+        ${GBM_LIBRARIES}
+        ${DRM_LIBRARIES}
         cpr::cpr
         nlohmann_json::nlohmann_json
         pthread

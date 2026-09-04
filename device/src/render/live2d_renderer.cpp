@@ -9,7 +9,7 @@
 //        third_party/CubismNativeSdk/Framework/src
 //   2. stb_image.h 放入 third_party/stb/（纹理 PNG 解码）
 //
-// 目标宏：CSM_TARGET_WIN_GL (Windows) 或 CSM_TARGET_LINUX_GL (ARM Linux)
+// 目标宏：CSM_TARGET_WIN_GL (Windows) 或 CSM_TARGET_HARMONYOS_ES3 (ARM Linux GLES3)
 //          —— 由 CMakeLists 按平台定义
 
 #include "render/live2d_renderer.h"
@@ -20,6 +20,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#ifndef _WIN32
+#include <unistd.h>  // readlink（/proc/self/exe 解析 shader 路径）
+#endif
 
 // GL 头文件：PC 由 GLEW 引入桌面 OpenGL，设备用 OpenGL ES
 #ifdef _WIN32
@@ -318,8 +321,10 @@ public:
     // 渲染（调用前确保 GL 上下文 current、viewport 已设）
     // 适配算法对齐 1.x refineContentFit：
     //   scale = min(视口宽/内容宽, 视口高/内容高) * 0.72
-    //   内容底边贴视口底边，水平居中
-    void Draw(int window_w, int window_h, bool flip, Rect* out_content_rect) {
+    //   垂直对齐：center_v=内容中心贴视口中心（单任务/相框），
+    //             否则内容底边贴视口底边（多任务，1.x 语义）；水平居中
+    void Draw(int window_w, int window_h, bool flip, bool center_v,
+              Rect* out_content_rect) {
         if (!_model || window_w <= 0 || window_h <= 0) return;
 
         const csmFloat32 cw = _contentMaxX - _contentMinX;   // 内容宽（模型单位）
@@ -348,9 +353,13 @@ public:
         const csmFloat32 canvas_h_log =
             (_model->GetCanvasHeight() > 0.0f ? _model->GetCanvasHeight() : 1.0f) * scale_log;
 
-        // 画布中心逻辑坐标：内容底边 -> -1（视口底），内容中心 X -> 0（水平居中）
+        // 画布中心逻辑坐标：center_v 时内容中心 Y -> 0（视口中心），
+        // 否则内容底边 -> -1（视口底）；内容中心 X -> 0（水平居中）
         const csmFloat32 center_x_log = -src_cx * scale_log;
-        const csmFloat32 center_y_log = -1.0f - src_min_y * scale_log;
+        const csmFloat32 center_y_log =
+            center_v
+                ? -src_min_y * scale_log - use_ch * scale_log * 0.5f
+                : -1.0f - src_min_y * scale_log;
 
         _modelMatrix->SetHeight(canvas_h_log);
         // 平移：画布原点(0,0) -> (center_x_log, center_y_log)。
@@ -389,7 +398,10 @@ public:
             const float content_h_px = use_ch * scale_px;
             out_content_rect->x =
                 flip ? window_w - left_px - use_cw * scale_px : left_px;
-            out_content_rect->y = static_cast<float>(window_h) - content_h_px;
+            out_content_rect->y =
+                center_v
+                    ? (static_cast<float>(window_h) - content_h_px) * 0.5f
+                    : static_cast<float>(window_h) - content_h_px;
             out_content_rect->w = use_cw * scale_px;
             out_content_rect->h = content_h_px;
         }
@@ -634,6 +646,17 @@ static csmByte* FrameworkLoadFile(const std::string path, csmSizeInt* out_size) 
             return CreateBuffer(full.generic_string().c_str(), out_size);
         }
     }
+#else
+    // Linux：/proc/self/exe 读真实二进制路径（不依赖 systemd/终端的 cwd）
+    char exe_path[1024];
+    const ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len > 0) {
+        exe_path[len] = '\0';
+        fs::path full = fs::path(exe_path).parent_path() / path;
+        if (fs::exists(full, ec)) {
+            return CreateBuffer(full.generic_string().c_str(), out_size);
+        }
+    }
 #endif
     fprintf(stderr, "[Live2D] framework file not found: %s\n", path.c_str());
     return nullptr;
@@ -769,7 +792,8 @@ void Live2DRenderer::render() {
     glBindVertexArray(0);
 #endif
     glViewport(impl_->vp_x, impl_->vp_y, impl_->vp_w, impl_->vp_h);
-    impl_->model->Draw(impl_->vp_w, impl_->vp_h, impl_->flip, &impl_->content_rect);
+    impl_->model->Draw(impl_->vp_w, impl_->vp_h, impl_->flip, center_v_,
+                       &impl_->content_rect);
 }
 
 void Live2DRenderer::setViewport(int x, int y, int w, int h) {

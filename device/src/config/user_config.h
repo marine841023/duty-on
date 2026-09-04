@@ -44,6 +44,9 @@ struct UserConfig {
     int win_y = 0;
     // 自定义 GIF 形象（2.0 原生端 WIC 解码渲染）
     std::vector<CustomCharacter> custom_characters;
+    // 硬件显示端模式：single=单任务（角色全屏+大时钟）/ multi=多任务
+    //（角色+任务列表）/ frame=电子相框（角色全屏循环播放动作）
+    std::string device_mode = "multi";
 };
 
 // 模型目录条目
@@ -71,6 +74,10 @@ public:
     static void saveMonitor(const UserConfig& cfg);
     // 窗口位置记忆（x=左缘、y=底边，见 UserConfig 注释）
     static void saveWindowPos(int x, int y);
+    // 自定义形象列表整体覆写（设备端从 PC 下载新角色后持久化）
+    static void saveCustomCharacters(const UserConfig& cfg);
+    // 硬件显示端模式（single/multi/frame；PC 菜单选择后经 /api/status 下发）
+    static void saveDeviceMode(const std::string& mode);
 
     // ---- 模型目录（内置 frontend/assets/live2d + 用户 ~/.dutyon/live2d）----
     // builtin_roots: 内置模型搜索目录（相对 exe 解析，main 传入）

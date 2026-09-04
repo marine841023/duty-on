@@ -17,6 +17,8 @@
 //             /api/autostart /api/quit —— POST，仅限回环
 // ---------------------------------------------------------------------------
 
+#include <atomic>
+#include <chrono>
 #include <functional>
 #include <string>
 
@@ -43,6 +45,17 @@ public:
     // /api/quit 触发完整退出（main 注入：关窗口/停主循环/结束进程）
     void setQuitHandler(std::function<void()> fn) { quit_handler_ = std::move(fn); }
 
+    // 硬件显示端（USB 网段 192.168.7.x）在线状态：10 秒内有过 API 轮询
+    // 即视为在线。菜单"设备模式"分组据此显示/隐藏
+    bool deviceOnline() const {
+        return device_last_seen_.load() != 0 &&
+               std::chrono::duration_cast<std::chrono::seconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                       .count() -
+                   device_last_seen_.load() <
+                   10;
+    }
+
 private:
     void registerRoutes();
 
@@ -51,6 +64,7 @@ private:
     std::function<void()> quit_handler_;
     httplib::Server* svr_ = nullptr;
     bool running_ = false;
+    std::atomic<long long> device_last_seen_{0};  // 秒（steady_clock）
 };
 
 } // namespace dutyon::backend

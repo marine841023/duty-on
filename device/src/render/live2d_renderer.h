@@ -56,6 +56,8 @@ public:
     void render();
 
     void setViewport(int x, int y, int w, int h);
+    // 垂直对齐：true=居中（单任务/相框模式），false=贴底（多任务模式，默认）
+    void setCenterV(bool center) { center_v_ = center; }
 
     // 左右翻转（对应 1.x flipHorizontal）
     void setFlip(bool flip);
@@ -72,6 +74,7 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+    bool center_v_ = false;  // 垂直居中（单任务/相框模式）
 };
 
 } // namespace dutyon

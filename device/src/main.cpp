@@ -18,6 +18,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <thread>
 
 // GL 函数声明：PC 用 GLEW（桌面 OpenGL），设备用 GLES3
@@ -31,6 +32,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <map>
 #include <string>
@@ -49,6 +51,10 @@
 #include "ui/ui_renderer.h"
 #ifdef _WIN32
 #include "backend/backend_service.h"  // 单进程后端（原 duty-on.exe 职责）
+#else
+#include "net/usb_link.h"             // USB 直连链路监视（租约发现 PC）
+#include "render/prompt_banner.h"     // 开机引导横幅（未插线提示）
+#include "ui/task_panel.h"            // 下半屏任务列表（项目名 + 状态）
 #endif
 
 using namespace dutyon;
@@ -150,9 +156,10 @@ int main() {
     const int initial_h = BASE_MODEL_AREA_H + 90;  // 状态栏首帧高度估算，之后自动校正
 #else
     const char* platform = "ARM Linux (EGL/GLES2)";
-    const char* api_url = kApiBaseUrl;
+    const char* api_url = "USB 直连（usb0 租约自动发现）";
     const int WIN_W = kDisplayWidth;
-    const int MODEL_AREA_H = kDisplayHeight;
+    // 竖屏上下对半：上半屏角色，下半屏任务列表（面板高度按内容自适应）
+    const int MODEL_AREA_H = kDisplayHeight / 2;
     constexpr int FPS = kTargetFps;
     const int initial_h = kDisplayHeight;
 #endif
@@ -279,10 +286,30 @@ int main() {
                 .lexically_normal()
                 .string());
     }
+#else
+    // 设备端：固定部署目录（见 config.h kModelDir），布局同内置模型根，
+    // 让 listModels 统一扫描（含 *.model3.json 枚举），无需用户目录。
+    builtin_roots.push_back(kModelDir);
 #endif
 
     std::vector<ModelEntry> model_entries = UserConfigStore::listModels(builtin_roots);
     std::string current_model_key;  // 1.x activeCharacterId（Live2D 模型唯一键）
+#ifndef _WIN32
+    // 最近一次状态动作（模型热切换后重放，避免新模型停在待机）
+    std::string dev_motion_group;
+    int dev_motion_idx = 0;
+    // 硬件屏布局模式（PC 经 /api/status 下发；断连后保持最近值）：
+    // multi=角色半屏+任务列表 / single=角色全屏+大时钟 / frame=相框全屏轮播
+    std::string device_mode = "multi";
+    // 相框模式轮播状态：动作列表签名（形象变化重建）+ 当前序号 + 计时
+    std::string frame_sig;
+    int frame_idx = 0;
+    float frame_timer = 0.f;
+    // 时钟跟随 PC（设备无 RTC/NTP 不可信）：轮询到的 PC epoch 秒 +
+    // steady_clock 基准，两次轮询间自行推进
+    double clock_epoch = 0;
+    std::chrono::steady_clock::time_point clock_sync_tp{};
+#endif
     {
         // 自定义形象优先（1.x getCharacters：active 匹配 custom id）
         for (const auto& c : cfg.custom_characters) {
@@ -292,7 +319,7 @@ int main() {
                 const std::string file =
                     gifFileFor(c, "sleeping");  // 初始状态 sleeping
                 if (!file.empty() &&
-                    gif.load(UserConfigStore::animationsDir() + "\\" + file)) {
+                    gif.load(UserConfigStore::animationsDir() + "/" +file)) {
                     printf("GIF character: %s (%s)\n", c.name.c_str(), c.id.c_str());
                 } else {
                     using_gif = false;
@@ -333,6 +360,17 @@ int main() {
     ui.setScale(ui_scale);  // init 内部只取了 DPI，补上分辨率归一系数
 #else
     ui.init(WIN_W, MODEL_AREA_H);
+
+    // USB 直连接线（仅设备端）：链路监视（每帧 poll，内部 1s 节流）+
+    // 引导横幅（未插线时屏底提示"请通过 USB 连接电脑"；GL 上下文已就绪）
+    UsbLink usb_link;
+    bool usb_connected = false;
+    PromptBanner prompt_banner;
+    prompt_banner.load(kPromptBannerPath);
+
+    // 任务列表面板（下半屏）：字体加载失败时只画底色无文字，不阻断运行
+    TaskPanel task_panel;
+    task_panel.init(kFontPath);
 #endif
 
     // 1.x 配置生效：翻转 / 迷你 / 监控显隐
@@ -360,7 +398,8 @@ int main() {
     backend.setMonitorActive(cfg.monitor_enabled);  // 面板关 = 采样零开销
     auto& api = backend;  // 方法面与 ApiClient 兼容（takeStatus/菜单动作）
 #else
-    ApiClient api(api_url);
+    // 初始地址为空 = 轮询暂停；插线后由租约发现经 setBaseUrl 接入（见主循环）
+    ApiClient api("");
 #endif
     StateMachine state_machine;
 
@@ -382,6 +421,53 @@ int main() {
             state_machine.setMotionFor(state, gi.first, gi.second);
     };
     apply_state_motions();
+
+#ifndef _WIN32
+    // 相框模式轮播：遍历当前形象全部动作（GIF=三个状态动画；
+    // Live2D=所有动作组的全部动作），15 秒一个循环推进
+    auto frame_motion_count = [&]() -> int {
+        if (using_gif) {
+            if (!gif_char) return 0;
+            int n = 0;
+            for (const auto& f :
+                 {gif_char->sleeping, gif_char->working, gif_char->alert})
+                if (!f.empty()) n++;
+            return n;
+        }
+        int n = 0;
+        for (const auto& g : renderer.motionGroups()) n += g.count;
+        return n;
+    };
+    auto play_frame_motion = [&](int idx) {
+        const int n = frame_motion_count();
+        if (n <= 0) return;
+        frame_idx = ((idx % n) + n) % n;
+        if (using_gif) {
+            if (!gif_char) return;
+            const std::string files[3] = {gif_char->sleeping,
+                                          gif_char->working, gif_char->alert};
+            int k = 0;
+            for (const auto& f : files) {
+                if (f.empty()) continue;
+                if (k == frame_idx) {
+                    gif.load(UserConfigStore::animationsDir() + "/" + f);
+                    break;
+                }
+                k++;
+            }
+        } else {
+            int k = 0;
+            for (const auto& g : renderer.motionGroups())
+                for (int i = 0; i < g.count; i++) {
+                    if (k == frame_idx) {
+                        renderer.setLoopMotion(g.group, i);
+                        return;
+                    }
+                    k++;
+                }
+        }
+    };
+#endif
 
     if (!using_gif) {
         auto [init_group, init_idx] = state_machine.currentMotion();
@@ -478,7 +564,7 @@ int main() {
                 me.checked = using_gif && gif_char && gif_char->id == c.id;
                 const std::string f = gifFileFor(c, "sleeping");
                 if (!f.empty())
-                    me.thumb = UserConfigStore::animationsDir() + "\\" + f;
+                    me.thumb = UserConfigStore::animationsDir() + "/" +f;
                 out.push_back(std::move(me));
             }
             return out;
@@ -543,6 +629,15 @@ int main() {
                 UserConfigStore::saveLanguage(code);
             }
         }
+        // ---- 硬件显示端模式（菜单"设备模式"三选一）----
+        else if (id.rfind("device-mode:", 0) == 0) {
+            const std::string mode = id.substr(12);
+            if (mode == "single" || mode == "multi" || mode == "frame") {
+                cfg.device_mode = mode;
+                UserConfigStore::saveDeviceMode(mode);
+                // 立即生效（设备端下一次 /api/status 轮询 ≤2s 收到）
+            }
+        }
         // ---- 形象 / 动作 ----
         else if (id.rfind("model:", 0) == 0) {
             const std::string key = id.substr(6);
@@ -574,7 +669,7 @@ int main() {
                 auto [g, i] = state_machine.currentMotion();
                 const std::string file = gifFileFor(c, g.empty() ? "sleeping" : g);
                 if (file.empty() ||
-                    !gif.load(UserConfigStore::animationsDir() + "\\" + file)) {
+                    !gif.load(UserConfigStore::animationsDir() + "/" +file)) {
                     using_gif = false;
                     gif_char = nullptr;
                     fprintf(stderr, "GIF load failed: %s\n", file.c_str());
@@ -597,7 +692,7 @@ int main() {
                     if (gif_char) {
                         const std::string file = gifFileFor(*gif_char, group);
                         if (!file.empty())
-                            gif.load(UserConfigStore::animationsDir() + "\\" + file);
+                            gif.load(UserConfigStore::animationsDir() + "/" +file);
                     }
                 } else {
                     renderer.playMotion(group, atoi(id.c_str() + p + 1));
@@ -634,24 +729,41 @@ int main() {
 #endif
         } else if (id == "install-hooks") {
 #ifdef _WIN32
-            std::string j = api.installHooks();
-            const wchar_t* msg = j.empty()
-                ? L"安装失败：无法连接后端服务"
-                : (j.find("\"installed\":true") != std::string::npos ||
-                   j.find("\"installed\": true") != std::string::npos)
-                    ? L"IDE 集成安装完成"
-                    : L"IDE 集成安装失败，请重试";
-            MessageBoxW(nullptr, msg, L"Duty On", MB_OK | MB_ICONINFORMATION);
-            refresh_menu_caches();
+            // 不能在 UI 线程同步跑：HTTP（最长 15s）+ 模态弹窗会把渲染循环
+            // 卡死，且无属主的 MessageBox 可能藏在别的窗口后面 —— 观感就是
+            // “点了没反应/卡死”。后台线程执行；菜单缓存下次开菜单时由
+            // on_menu_open 自动刷新。返回 JSON 是 InstallResult（"success"），
+            // 旧代码查的 "installed" 字段不存在，装成了也报失败。
+            static std::atomic<bool> installing{false};
+            if (!installing.exchange(true)) {
+                std::thread([&]() {
+                    const std::string j = api.installHooks();
+                    const wchar_t* msg =
+                        j.empty() ? L"安装失败：无法连接后端服务"
+                        : (j.find("\"success\":true") != std::string::npos ||
+                           j.find("\"success\": true") != std::string::npos)
+                            ? L"IDE 集成安装完成"
+                            : L"IDE 集成安装失败，请重试";
+                    MessageBoxW(nullptr, msg, L"Duty On", MB_OK | MB_ICONINFORMATION);
+                    installing = false;
+                }).detach();
+            }
 #endif
         } else if (id == "hook-status") {
 #ifdef _WIN32
-            std::string j = api.getHooks();
-            std::wstring msg = j.empty() ? L"无法连接后端服务"
-                                         : L"Hook 状态：\n" +
-                                           std::wstring(j.begin(), j.end());
-            MessageBoxW(nullptr, msg.c_str(), L"Duty On — Hook 状态",
-                        MB_OK | MB_ICONINFORMATION);
+            // 同上：GET + 弹窗异步化，避免 UI 线程停摆
+            static std::atomic<bool> querying{false};
+            if (!querying.exchange(true)) {
+                std::thread([&]() {
+                    const std::string j = api.getHooks();
+                    std::wstring msg = j.empty() ? L"无法连接后端服务"
+                                                 : L"Hook 状态：\n" +
+                                                   std::wstring(j.begin(), j.end());
+                    MessageBoxW(nullptr, msg.c_str(), L"Duty On — Hook 状态",
+                                MB_OK | MB_ICONINFORMATION);
+                    querying = false;
+                }).detach();
+            }
 #endif
         } else if (id == "autostart") {
             api.setAutostart(autostart_cache != 1);
@@ -776,22 +888,145 @@ int main() {
 #endif
 
         // 8. 消费后台轮询结果（非阻塞读取缓存）
+#ifndef _WIN32
+        // USB 直连链路检测（UsbLink 内部 1s 节流）：拿到租约 → 更新轮询地址；
+        // 拔线 → 清空地址（ApiClient 自动暂停请求），画面切回引导横幅。
+        // setBaseUrl 内部仅在地址变化时生效，每帧调用无额外开销。
+        {
+            const auto url = usb_link.poll();
+            usb_connected = url.has_value();
+            api.setBaseUrl(url.value_or(""));
+        }
+#endif
         if (auto status = api.takeStatus()) {
             current_status = std::move(*status);
-            auto [group, idx] = state_machine.onStatus(current_status);
-            if (!group.empty()) {
-                printf("[State] %s -> %s[%d]\n",
-                       current_status.overall_state.c_str(), group.c_str(), idx);
-                if (using_gif) {
-                    // 1.x updateCustomAnimation：按状态切 GIF（带回退链）
-                    if (gif_char) {
-                        const std::string file = gifFileFor(*gif_char, group);
-                        if (!file.empty())
-                            gif.load(UserConfigStore::animationsDir() + "\\" + file);
+#ifndef _WIN32
+            // 布局模式同步（single/multi/frame；断连后保持最近值）
+            if (!current_status.device_mode.empty() &&
+                current_status.device_mode != device_mode) {
+                device_mode = current_status.device_mode;
+                printf("[Mode] device mode -> %s\n", device_mode.c_str());
+                if (device_mode == "frame") {
+                    frame_timer = 0.f;  // 进入相框模式立即从头轮播
+                }
+            }
+            // 时钟同步：记录 PC 时间与本地单调钟基准，两次轮询间自行推进
+            if (current_status.server_time > 0) {
+                clock_epoch = current_status.server_time;
+                clock_sync_tp = std::chrono::steady_clock::now();
+            }
+            // 形象与 PC 设定同步：/api/status 随快照下发 activeCharacter
+            //（"char_xxx" = 自定义 GIF；否则 Live2D 模型 key）。
+            // 覆盖四种切换：GIF→GIF（本地没有则从 PC 下载）、GIF→Live2D、
+            // Live2D→GIF、Live2D→Live2D。
+            {
+                const std::string& ac = current_status.active_character;
+                const std::string cur_key =
+                    using_gif ? (gif_char ? gif_char->id : std::string())
+                              : current_model_key;
+                if (!ac.empty() && ac != cur_key) {
+                    bool switched = false;
+                    if (ac.rfind("char_", 0) == 0) {
+                        // 目标是自定义 GIF 形象
+                        const CustomCharacter* cc = nullptr;
+                        for (const auto& c : cfg.custom_characters)
+                            if (c.id == ac) { cc = &c; break; }
+                        if (!cc) {
+                            // 本地没有该角色：从 PC 拉定义 + 下载动画文件
+                            //（阻塞主线程约 1-3s，仅首次发生，可接受）
+                            CustomCharacter nc = api.fetchCharacter(ac);
+                            if (!nc.id.empty()) {
+                                bool ok = true;
+                                const std::string files[] = {nc.sleeping,
+                                                             nc.working, nc.alert};
+                                for (const auto& f : files) {
+                                    if (f.empty()) continue;
+                                    const std::string dst =
+                                        UserConfigStore::animationsDir() + "/" + f;
+                                    if (!std::filesystem::exists(dst) &&
+                                        !api.downloadAnimation(f, dst)) {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                                if (ok) {
+                                    cfg.custom_characters.push_back(nc);
+                                    UserConfigStore::saveCustomCharacters(cfg);
+                                    cc = &cfg.custom_characters.back();
+                                }
+                            }
+                        }
+                        if (cc) {
+                            // 切到目标状态的动画（状态不变时也会加载正确文件）
+                            const std::string file = gifFileFor(
+                                *cc, current_status.overall_state.empty()
+                                         ? "sleeping"
+                                         : current_status.overall_state);
+                            if (!file.empty() &&
+                                gif.load(UserConfigStore::animationsDir() + "/" +
+                                         file)) {
+                                using_gif = true;
+                                gif_char = cc;
+                                switched = true;
+                                apply_state_motions();
+                                printf("[Char] sync from PC: GIF %s (%s)\n",
+                                       cc->name.c_str(), cc->id.c_str());
+                            }
+                        }
+                    } else {
+                        // 目标是 Live2D 模型
+                        for (const auto& e : model_entries) {
+                            if (e.key != ac) continue;
+                            if (renderer.loadModelFile(e.dir, e.json)) {
+                                using_gif = false;
+                                gif_char = nullptr;
+                                current_model_key = e.key;
+                                apply_state_motions();
+                                // 重放当前状态动作，避免切换后停在 idle
+                                if (!dev_motion_group.empty())
+                                    renderer.setLoopMotion(dev_motion_group,
+                                                           dev_motion_idx);
+                                switched = true;
+                                printf("[Model] sync from PC: %s (%s)\n",
+                                       e.name.c_str(), e.key.c_str());
+                            }
+                            break;
+                        }
                     }
-                } else {
-                    // 状态动作为循环动作（对齐 1.x playStateMotion）
-                    renderer.setLoopMotion(group, idx);
+                    if (!switched)
+                        fprintf(stderr, "[Char] sync from PC failed: %s\n",
+                                ac.c_str());
+                }
+            }
+#endif
+#ifndef _WIN32
+            // 相框模式不响应任务状态（只轮播动作，见主循环 frame 轮播段）
+            if (device_mode == "frame") {
+                state_machine.onStatus(current_status);  // 仍推进状态机计时
+            } else
+#endif
+            {
+                auto [group, idx] = state_machine.onStatus(current_status);
+                if (!group.empty()) {
+                    printf("[State] %s -> %s[%d]\n",
+                           current_status.overall_state.c_str(), group.c_str(),
+                           idx);
+                    if (using_gif) {
+                        // 1.x updateCustomAnimation：按状态切 GIF（带回退链）
+                        if (gif_char) {
+                            const std::string file = gifFileFor(*gif_char, group);
+                            if (!file.empty())
+                                gif.load(UserConfigStore::animationsDir() +
+                                         "/" + file);
+                        }
+                    } else {
+                        // 状态动作为循环动作（对齐 1.x playStateMotion）
+                        renderer.setLoopMotion(group, idx);
+#ifndef _WIN32
+                        dev_motion_group = group;  // 记录供模型热切换后重放
+                        dev_motion_idx = idx;
+#endif
+                    }
                 }
             }
         }
@@ -915,8 +1150,35 @@ int main() {
                                 canvas_gl_w, canvas_gl_h);
             }
 #else
-            // 设备端：整屏渲染
-            renderer.setViewport(0, 0, WIN_W, MODEL_AREA_H);
+            // 设备端：multi=上半屏+贴底；single/frame=全屏+垂直居中
+            if (device_mode == "multi") {
+                // 上半屏渲染角色（GL 原点左下，视口 y 从半屏线起）
+                renderer.setCenterV(false);
+                gif.setCenterV(false);
+                renderer.setViewport(0, MODEL_AREA_H, WIN_W, MODEL_AREA_H);
+                gif.setViewport(0, MODEL_AREA_H, WIN_W, MODEL_AREA_H);
+            } else {
+                renderer.setCenterV(true);
+                gif.setCenterV(true);
+                renderer.setViewport(0, 0, WIN_W, kDisplayHeight);
+                gif.setViewport(0, 0, WIN_W, kDisplayHeight);
+            }
+            // 相框模式轮播：形象变化从头开始，此后 15s 换下一个动作
+            if (device_mode == "frame") {
+                const std::string sig =
+                    using_gif ? (gif_char ? gif_char->id : std::string("?"))
+                              : current_model_key;
+                if (sig != frame_sig) {
+                    frame_sig = sig;
+                    frame_timer = 0.f;
+                    play_frame_motion(0);
+                }
+                frame_timer += delta;
+                if (frame_timer >= 15.f) {
+                    frame_timer = 0.f;
+                    play_frame_motion(frame_idx + 1);
+                }
+            }
 #endif
 
             if (using_gif) {
@@ -939,28 +1201,103 @@ int main() {
                 ui.setModelRect(cr, !using_gif);
             }
 
-            // 11. UI 叠加（迷你模式保留半宽状态栏 + 头顶特效，隐藏监控）
+            // 11. UI 叠加（迷你模式保留半宽状态栏 + 头顶特效，隐藏监控；
+            //     设备端未插 USB 时不画状态栏，改画引导横幅）
+#ifdef _WIN32
+            // 硬件显示端状态（菜单"设备模式"分组显示/隐藏 + 当前模式勾选）
+            ui.setDeviceStatus(backend.deviceOnline(), cfg.device_mode);
             ui.beginFrame();
             ui.renderStatus(current_status);
             if (!mini_mode && has_metrics) ui.renderMetrics(current_metrics);
             ui.renderHeadEffect(current_status);
             ui.renderMenu();
             ui.endFrame();
+#else
+            // 叠加层用全屏坐标系：恢复全屏视口（角色渲染用的半屏视口会影响
+            // 后续绘制的 NDC->窗口映射，不复位面板会被压进上半屏）
+            glViewport(0, 0, WIN_W, kDisplayHeight);
+            if (device_mode == "multi") {
+                if (usb_connected) {
+                    // 下半屏任务列表（面板充满下半屏，顶贴角色区、底贴屏幕底）
+                    task_panel.render(current_status, WIN_W, kDisplayHeight,
+                                      (float)MODEL_AREA_H);
+                } else {
+                    // 引导画面：宠物待机动画（上半屏已渲染）+ 底部提示横幅
+                    prompt_banner.render(WIN_W, kDisplayHeight);
+                }
+            }
+            // 顶部时钟 + 日期（所有模式都显示；字号随模式）。
+            // 优先用 PC 下发时间（设备本地钟不可信），断连兜底本地时间
+            {
+                char time_buf[16] = {};
+                char date_buf[40] = {};
+                static const char* kWeek[] = {"日", "一", "二", "三",
+                                              "四", "五", "六"};
+                time_t local_sec = 0;  // 本地日期用（含时区偏移的 epoch）
+                if (clock_epoch > 0) {
+                    const double t =
+                        clock_epoch +
+                        std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - clock_sync_tp)
+                            .count() +
+                        current_status.utc_offset_min * 60.0;
+                    const long secs = ((long)t % 86400 + 86400) % 86400;
+                    snprintf(time_buf, sizeof(time_buf), "%02ld:%02ld:%02ld",
+                             secs / 3600, secs / 60 % 60, secs % 60);
+                    local_sec = (time_t)t;
+                } else {
+                    local_sec = time(nullptr);
+                    strftime(time_buf, sizeof(time_buf), "%H:%M:%S",
+                             localtime(&local_sec));
+                }
+                // 日期（年月日+星期）：local_sec 已是含时区偏移的 epoch，
+                // 用 gmtime 取其"本地"日历分量
+                struct tm tmv = {};
+                gmtime_r(&local_sec, &tmv);
+                snprintf(date_buf, sizeof(date_buf),
+                         "%d年%d月%d日 星期%s", tmv.tm_year + 1900,
+                         tmv.tm_mon + 1, tmv.tm_mday, kWeek[tmv.tm_wday]);
+
+                const float clock_size =
+                    (device_mode == "multi") ? 56.f : 92.f;
+                // 时钟顶部留白：不贴屏幕顶边（multi 12px，大时钟 22px）
+                const float clock_top = (float)kDisplayHeight -
+                                        ((device_mode == "multi") ? 12.f : 22.f);
+                task_panel.renderClock(time_buf, clock_top, clock_size,
+                                       WIN_W, kDisplayHeight);
+                // 日期行放屏幕底部（GL 原点左下，y 向上）：留 14px 底边距。
+                // 仅单任务/相框模式（多任务模式底部是任务列表，会重叠）
+                if (device_mode != "multi") {
+                    task_panel.renderDate(date_buf, 30.f * 1.35f + 14.f, 30.f,
+                                          WIN_W, kDisplayHeight);
+                }
+            }
+#endif
         }
 
         // ---- 一次性 GL 诊断（第 90 帧左右，稳定后）----
         {
             static int diag_frame = 0;
             if (++diag_frame == 90) {
+#ifdef _WIN32
                 GLFWwindow* gw = static_cast<GLFWwindow*>(window->nativeHandle());
                 int fw = 0, fh = 0;
                 glfwGetFramebufferSize(gw, &fw, &fh);
+#else
+                // 设备端无 GLFW：全屏 framebuffer，尺寸即窗口尺寸
+                const int fw = window->width(), fh = window->height();
+#endif
                 printf("[GLDiag] renderer=%s\n", glGetString(GL_RENDERER));
+                int tex2d_en = 0;
+#ifdef _WIN32
+                // GLES 下 GL_TEXTURE_2D 不是 glIsEnabled 的合法枚举（误报 0x500）
+                tex2d_en = glIsEnabled(GL_TEXTURE_2D);
+#endif
                 printf("[GLDiag] fb=%dx%d scissor=%d blend=%d depth=%d cull=%d tex2d=%d\n",
                        fw, fh,
                        glIsEnabled(GL_SCISSOR_TEST), glIsEnabled(GL_BLEND),
                        glIsEnabled(GL_DEPTH_TEST), glIsEnabled(GL_CULL_FACE),
-                       glIsEnabled(GL_TEXTURE_2D));
+                       tex2d_en);
                 GLint sci[4] = {0, 0, 0, 0};
                 glGetIntegerv(GL_SCISSOR_BOX, sci);
                 printf("[GLDiag] scissorBox=(%d,%d,%d,%d)\n", sci[0], sci[1], sci[2],
@@ -978,6 +1315,23 @@ int main() {
                     printf("[GLDiag] %-13s (%4d,%4d) RGBA=(%3d,%3d,%3d,%3d)\n", pt.tag,
                            pt.x, pt.y, px[0], px[1], px[2], px[3]);
                 }
+#ifndef _WIN32
+                // 时钟区诊断：扫顶部 120px 高的中央条，统计非透明/青色像素
+                {
+                    int cyan = 0, dark = 0, opaque = 0, total = 0;
+                    for (int y = fh - 120; y < fh; y += 6)
+                        for (int x = fw / 2 - 100; x < fw / 2 + 100; x += 6) {
+                            GLubyte px[4] = {0, 0, 0, 0};
+                            glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                            total++;
+                            if (px[3] > 20) opaque++;
+                            if (px[2] > 150 && px[1] > 100) cyan++;      // 青蓝
+                            if (px[0] < 40 && px[1] < 40 && px[2] < 60) dark++;  // 深背板
+                        }
+                    printf("[GLDiag] clock-area: total=%d opaque=%d cyan=%d dark=%d\n",
+                           total, opaque, cyan, dark);
+                }
+#endif
             }
         }
 
@@ -1006,9 +1360,13 @@ int main() {
             }
             if (snap_env && *snap_env && dbg_frame >= 90 &&
                 (dbg_frame - 90) % 120 == 0) {
+#ifdef _WIN32
                 GLFWwindow* gw = static_cast<GLFWwindow*>(window->nativeHandle());
                 int fw = 0, fh = 0;
                 glfwGetFramebufferSize(gw, &fw, &fh);
+#else
+                const int fw = window->width(), fh = window->height();
+#endif
                 std::vector<unsigned char> px((size_t)fw * fh * 4);
                 glReadPixels(0, 0, fw, fh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
                 // 32 位 BMP：BGRA、行序自底向上（与 GL 原点一致），保留 alpha
