@@ -2,7 +2,7 @@
 
 // 设备端任务列表面板（屏幕下半屏）：会话行 = 状态色圆点 + 项目名 + 状态文字，
 // 配色/文案对齐 PC 端状态栏（ui_renderer.cpp StyleFor / StatusText）。
-// 面板高度按行数自适应，不要求填满下半屏。
+// 行块贴角色区下方堆叠成半透明黑圆角卡片（与角色留一线距离），未占区域保持透明黑。
 
 #ifndef _WIN32
 
@@ -21,7 +21,7 @@ public:
     bool init(const std::string& font_path);
 
     // 在下半屏绘制：area_top = 面板区顶边（布局约定为 screen_h/2），
-    // 面板充满该区（顶边贴角色区、底边贴屏幕底）
+    // 行块自角色区下方（留隙）向下堆叠（卡片高度按行数自适应）
     void render(const PetStatus& status, int screen_w, int screen_h, float area_top);
 
     // 顶部时钟（HH:MM:SS 居中）：y_top = 文本区顶边（GL 坐标），
@@ -29,7 +29,7 @@ public:
     void renderClock(const std::string& text, float y_top, float size,
                      int screen_w, int screen_h);
 
-    // 顶部日期行（YYYY年M月D日 星期X 居中）：时钟下方，同款字体/配色、
+    // 底部日期行（YYYY年M月D日 星期X 居中，屏幕下缘）：同款字体/配色、
     // 字号更小；过宽自动缩字号保证一行放下
     void renderDate(const std::string& text, float y_top, float size,
                     int screen_w, int screen_h);

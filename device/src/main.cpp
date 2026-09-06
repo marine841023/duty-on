@@ -55,6 +55,7 @@
 #include "net/usb_link.h"             // USB 直连链路监视（租约发现 PC）
 #include "render/prompt_banner.h"     // 开机引导横幅（未插线提示）
 #include "ui/task_panel.h"            // 下半屏任务列表（项目名 + 状态）
+#include "audio/sound_player.h"       // 事件提示音（开始/结束/提醒）
 #endif
 
 using namespace dutyon;
@@ -301,6 +302,10 @@ int main() {
     // 硬件屏布局模式（PC 经 /api/status 下发；断连后保持最近值）：
     // multi=角色半屏+任务列表 / single=角色全屏+大时钟 / frame=相框全屏轮播
     std::string device_mode = "multi";
+    // 提示音边沿检测基准（首帧仅记录不发声，避免开机误报）
+    std::string snd_prev_overall;
+    bool snd_prev_confirm = false;
+    bool snd_seen = false;
     // 相框模式轮播状态：动作列表签名（形象变化重建）+ 当前序号 + 计时
     std::string frame_sig;
     int frame_idx = 0;
@@ -371,6 +376,8 @@ int main() {
     // 任务列表面板（下半屏）：字体加载失败时只画底色无文字，不阻断运行
     TaskPanel task_panel;
     task_panel.init(kFontPath);
+    // 事件提示音（后台线程播放；无可用声音设备时静默）
+    SoundPlayer sound_player;
 #endif
 
     // 1.x 配置生效：翻转 / 迷你 / 监控显隐
@@ -910,6 +917,21 @@ int main() {
                     frame_timer = 0.f;  // 进入相框模式立即从头轮播
                 }
             }
+            // 事件提示音：提醒（待确认）播 3 次，开始/结束各 1 次；边沿触发
+            if (snd_seen) {
+                if (!snd_prev_confirm && current_status.has_confirmation)
+                    sound_player.play(SoundPlayer::Event::Reminder);
+                if (snd_prev_overall != current_status.overall_state) {
+                    if (current_status.overall_state == "working")
+                        sound_player.play(SoundPlayer::Event::TaskStart);
+                    else if (snd_prev_overall == "working" &&
+                             current_status.overall_state == "sleeping")
+                        sound_player.play(SoundPlayer::Event::TaskEnd);
+                }
+            }
+            snd_prev_overall = current_status.overall_state;
+            snd_prev_confirm = current_status.has_confirmation;
+            snd_seen = true;
             // 时钟同步：记录 PC 时间与本地单调钟基准，两次轮询间自行推进
             if (current_status.server_time > 0) {
                 clock_epoch = current_status.server_time;

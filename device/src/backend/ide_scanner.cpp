@@ -210,8 +210,23 @@ std::optional<bool> windowOwnedByIde(HWND hwnd) {
     return false;
 }
 
-// SendMessageTimeoutW 读窗口标题（250ms 硬超时）。超时/空标题返回 nullopt。
+// 读窗口标题。首选 GetWindowTextW —— 对跨进程窗口它直接返回 OS 缓存的标题
+// （由目标 SetWindowText 同步写入），不向目标进程投递任何消息，因此目标 UI
+// 线程再忙、甚至被判"未响应"都读得到。这修掉一个间歇性 bug：Qoder CN 单个
+// 进程同时开多个 IDE 窗口时，进程一忙（AI 流式生成/索引/渲染），下面那条
+// SendMessageTimeoutW(WM_GETTEXT) 会对该进程名下所有窗口集体超时或被 SMTO_
+// ABORTIFHUNG 中止，一轮扫描漏掉全部窗口 —— 而纯窗口占位会话是"一次没扫到
+// 就立即删除"，于是宠物项目列表瞬间清空、几秒后又恢复（用户反馈"空闲时项目
+// 时有时无"）。仅当缓存标题为空时才回退到 250ms 硬超时的消息读，保留兜底。
 std::optional<std::string> readTitleTimeout(HWND hwnd) {
+    // 首选：非阻塞读 OS 缓存标题（不依赖目标进程的消息泵，忙/挂起也能读到）
+    const int glen = GetWindowTextLengthW(hwnd);
+    if (glen > 0) {
+        std::wstring buf((size_t)glen + 1, L'\0');
+        const int got = GetWindowTextW(hwnd, buf.data(), (int)buf.size());
+        if (got > 0) return utf16ToUtf8(buf.data(), (size_t)got);
+    }
+    // 回退：向窗口发消息读取（250ms 硬超时，忙死窗口不会卡住扫描循环）
     DWORD_PTR len = 0;
     const LRESULT r1 = SendMessageTimeoutW(hwnd, WM_GETTEXTLENGTH, 0, 0, SMTO_ABORTIFHUNG,
                                            kTitleQueryTimeoutMs, &len);

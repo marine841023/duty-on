@@ -256,15 +256,24 @@ public:
         }
     }
 
-    // 设置状态循环动作（组不存在时回退 Idle）
+    // 设置状态循环动作（组不存在时回退 Idle）。
+    // 循环动作变化时立即强制切换：打断尚未播完的旧动作，马上淡入新动作，
+    // 而不是等 UpdateModel 里 IsFinished() 后才重触发 —— 否则会出现"空闲
+    // 哈欠没播完，切到思考状态却要干等"（用户反馈）。Force 优先级与菜单
+    // 点播 PlayMotionGroup 同一机制，会停掉当前动作并淡入新动作。
     void SetLoopMotion(const std::string& group, int index) {
         if (_setting && _setting->GetMotionCount(group.c_str()) <= 0) {
+            // 目标组无效：回到 Idle 随机待机；之前有循环动作则立即打断
+            const bool was_looping = !_loopGroup.empty();
             _loopGroup.clear();
             _loopIndex = 0;
+            if (was_looping) StartRandomMotion("Idle", MotionPriorityForce);
             return;
         }
+        const bool changed = (group != _loopGroup) || (index != _loopIndex);
         _loopGroup = group;
         _loopIndex = index;
+        if (changed) StartMotion(_loopGroup.c_str(), _loopIndex, MotionPriorityForce);
     }
 
     // 动作目录（播放动作/动作设定菜单数据源，对应 1.x refreshMotionGroups）

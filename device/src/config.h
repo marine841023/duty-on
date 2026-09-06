@@ -19,6 +19,12 @@ constexpr const char* kFontPath = "/opt/dutyon/assets/font-noto-sc.otf";
 // 轮询间隔（毫秒）
 constexpr int kPollIntervalMs = 500;
 
+// 提示音输出 ALSA 设备（aplay -D）：default=系统默认；接 I2S/USB 声卡后
+// 可用环境变量 DUTYON_AUDIODEV 覆盖（如 "hw:1,0" 指向 I2S DAC）
+constexpr const char* kAudioDevice = "default";
+// 提示音采样率（Hz，mono S16LE，正弦合成）
+constexpr int kAudioSampleRate = 22050;
+
 // 渲染目标帧率（Native 路径轻松 60fps，这里保守取 30 平衡功耗）
 constexpr int kTargetFps = 30;
 

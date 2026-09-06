@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(dutyon-2.0 VERSION 2.0.6 LANGUAGES CXX)
+project(dutyon-2.0 VERSION 2.0.7 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -202,6 +202,7 @@ else()
     # text_renderer/task_panel = 下半屏任务列表（字形图集文字 + 面板）
     list(APPEND SOURCES
         src/api/client.cpp
+        src/audio/sound_player.cpp
         src/net/usb_link.cpp
         src/platform/egl_window.cpp
         src/render/gles_context.cpp

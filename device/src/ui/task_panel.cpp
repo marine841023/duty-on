@@ -160,6 +160,13 @@ constexpr float kBadgeSize = 26.f;     // IDE 徽标边长
 constexpr float kBadgeFont = 20.f;     // IDE 徽标字母字号
 constexpr float kBorderW = 4.f;        // 行左边框宽
 constexpr int kMaxRows = 6;            // 下半屏最多可容纳行数（6*60=360≤400）
+// 顶部紧凑卡片：行块贴角色区下方堆叠（与角色留一线距离），未占区域保持透明黑
+constexpr float kTopGap = 24.f;        // 卡片顶边距角色区底（半屏线）的空隙
+constexpr float kCardRadius = 16.f;    // 卡片圆角
+constexpr float kCardAlpha = 0.42f;    // 卡片半透明黑浓度
+constexpr float kRowInsetX = 6.f;      // 行底/行内容相对卡片左右内缩
+constexpr float kRowInsetY = 3.f;      // 行底相对行上下内缩
+constexpr float kRowRadius = 10.f;     // 行底圆角
 
 } // namespace
 
@@ -292,22 +299,26 @@ void TaskPanel::render(const PetStatus& status, int screen_w, int screen_h,
     const int total = (int)status.sessions.size();
     const int shown = std::min(total, kMaxRows);
 
-    // 面板充满下半屏（无上下留白）：顶边贴角色区、底边贴屏幕底
+    // 卡片不再铺满下半屏：行块贴屏幕底堆叠，未占区域保持透明黑（无底栏）
     const float x0 = kPanelMargin;
     const float x1 = screen_w - kPanelMargin;
-    const float y_top = std::min(area_top, (float)screen_h);
-    const float y_bottom = 0.f;
+    const float rx0 = x0 + kRowInsetX;  // 行底/行内容相对卡片内缩
+    const float rx1 = x1 - kRowInsetX;
 
-    // 面板底色（深灰半透明，对齐 PC 端状态栏底色观感）
-    p->fillRect(x0, y_bottom, x1, y_top, 0.08f, 0.09f, 0.13f, 0.90f,
-                screen_w, screen_h);
+    const float block_top = area_top - kTopGap;  // 角色区下方留一线距离
+    float block_bottom = block_top - (shown > 0 ? shown : 1) * kRowH;
+    if (block_bottom < 0.f) block_bottom = 0.f;
+
+    // 卡片底：半透明黑圆角，仅包裹行块（任务少时是紧凑小卡片，非整屏底栏）
+    p->fillRoundedRect(x0, block_bottom, x1, block_top, kCardRadius, 0.f, 0.f,
+                       0.f, kCardAlpha, screen_w, screen_h);
 
     if (shown == 0) {
         if (p->text.isLoaded()) {
             const std::string empty = "暂无任务";
             const float w = p->text.measureWidth(empty, kNameSize);
             const float lh = p->text.lineHeight(kNameSize);
-            const float cy = (y_top + y_bottom) * 0.5f;
+            const float cy = (block_top + block_bottom) * 0.5f;
             p->text.draw(empty, (x0 + x1) * 0.5f - w * 0.5f, cy + lh * 0.5f,
                          kNameSize, 0.55f, 0.58f, 0.65f, 1.0f,
                          screen_w, screen_h);
@@ -329,24 +340,29 @@ void TaskPanel::render(const PetStatus& status, int screen_w, int screen_h,
         const SessionInfo& s = status.sessions[i];
         const RowStyle& st = styleFor(s.status);
 
-        const float row_top = y_top - i * kRowH;
+        const float row_top = block_top - i * kRowH;
         const float row_bottom = row_top - kRowH;
         const float cy = row_top - kRowH * 0.5f;  // 行中心（GL y）
 
-        // 行背景（活动状态整行淡色底；confirm 呼吸红）
+        // 行底（活动状态圆角淡色；confirm 呼吸红），内缩避免压卡片圆角
         if (st.breathing)
-            p->fillRect(x0, row_bottom, x1, row_top, st.bg[0], st.bg[1],
-                        st.bg[2], breathe, screen_w, screen_h);
+            p->fillRoundedRect(rx0, row_bottom + kRowInsetY, rx1,
+                               row_top - kRowInsetY, kRowRadius, st.bg[0],
+                               st.bg[1], st.bg[2], breathe, screen_w,
+                               screen_h);
         else if (st.bg[3] > 0.f)
-            p->fillRect(x0, row_bottom, x1, row_top, st.bg[0], st.bg[1],
-                        st.bg[2], st.bg[3], screen_w, screen_h);
+            p->fillRoundedRect(rx0, row_bottom + kRowInsetY, rx1,
+                               row_top - kRowInsetY, kRowRadius, st.bg[0],
+                               st.bg[1], st.bg[2], st.bg[3], screen_w,
+                               screen_h);
 
-        // 左边框（状态色，PC 端 3px → 屏幕 2 倍宽取 4px）
-        p->fillRect(x0, row_bottom, x0 + kBorderW, row_top, st.border[0],
-                    st.border[1], st.border[2], 1.0f, screen_w, screen_h);
+        // 左边框（状态色圆角竖条）
+        p->fillRoundedRect(rx0, row_bottom + 8.f, rx0 + kBorderW, row_top - 8.f,
+                           2.f, st.border[0], st.border[1], st.border[2], 1.0f,
+                           screen_w, screen_h);
 
         // 状态圆点
-        const float dot_x = x0 + kPad + kDotR;
+        const float dot_x = rx0 + kPad + kDotR;
         p->fillCircle(dot_x, cy, kDotR, st.dot[0], st.dot[1], st.dot[2], 1.0f,
                       screen_w, screen_h);
 
@@ -369,7 +385,7 @@ void TaskPanel::render(const PetStatus& status, int screen_w, int screen_h,
         const char* st_txt = I18n::t(st.i18n_key);
         const float st_w = p->text.measureWidth(st_txt, kStatusSize);
         const float st_lh = p->text.lineHeight(kStatusSize);
-        const float st_x = x1 - kPad - st_w;
+        const float st_x = rx1 - kPad - st_w;
         if (p->text.isLoaded())
             p->text.draw(st_txt, st_x, cy + st_lh * 0.5f, kStatusSize,
                          st.txt[0], st.txt[1], st.txt[2], 1.0f,
