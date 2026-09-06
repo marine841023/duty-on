@@ -27,9 +27,11 @@ Thumbs.db
 # ImGui runtime window-layout dump
 imgui.ini
 
-# .userdata: 设备部署脚手架脚本与凭据，不入库（仅 test-notification.ps1 历史保留）
-.userdata/*
-!.userdata/test-notification.ps1
+# .userdata: 设备部署/构建脚本随库共享（供后继开发者）；真实凭据与抓帧快照不入库
+# 脚本从环境变量或同目录 deploy.env 读取设备 SSH 凭据，模板见 deploy.env.example
+.userdata/deploy.env
+.userdata/*.bmp
+.userdata/*.png
 
 # 2.0 packaging toolchain & output (NSIS portable auto-downloaded)
 tools/nsis/

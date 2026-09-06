@@ -1,0 +1,8 @@
+# 换行符规范 —— 本仓库开发机 core.autocrlf=true（Windows）。
+# Shell 脚本与被 bash source 的 env 文件必须强制 LF：否则克隆/检出会被转成 CRLF，
+# 在 WSL / 设备端 bash 运行时导致 "#!/bin/bash\r" 坏解释器错误，或 source
+# deploy.env 时口令带上 \r 尾字符致 SSH 认证失败。
+*.sh text eol=lf
+*.env text eol=lf
+*.env.example text eol=lf
+.gitattributes text eol=lf
