@@ -8,7 +8,6 @@ device/third_party/
 
 # Logs
 *.log
-.userdata/*.log
 
 # IDE / Editor
 .vscode/
@@ -25,10 +24,12 @@ Thumbs.db
 
 # Scratch files from debugging sessions
 *.tmp
-.userdata/*.png
-.userdata/*.bmp
 # ImGui runtime window-layout dump
 imgui.ini
+
+# .userdata: 设备部署脚手架脚本与凭据，不入库（仅 test-notification.ps1 历史保留）
+.userdata/*
+!.userdata/test-notification.ps1
 
 # 2.0 packaging toolchain & output (NSIS portable auto-downloaded)
 tools/nsis/
