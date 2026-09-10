@@ -31,9 +31,9 @@ $api  = "https://api.github.com/repos/$repo"
 $up   = "https://uploads.github.com/repos/$repo"
 
 $releases = @(
-  @{ Tag = 'v2.0.7'; Name = 'DutyOn v2.0.7 - Stable project detection & instant motion switch'
-     Notes = 'D:\src\dutyOn\docs\release-notes\v2.0.7.md'
-     Zip   = 'D:\src\dutyOn\tools\dist\DutyOn-v2.0.7.zip'
+  @{ Tag = 'v2.0.8'; Name = 'DutyOn v2.0.8 - Custom characters & dynamic device layout'
+     Notes = 'D:\src\traeSprite\docs\release-notes\v2.0.8.md'
+     Zip   = 'D:\src\traeSprite\tools\dist\DutyOn-v2.0.8.zip'
      Latest = $true }
 )
 
