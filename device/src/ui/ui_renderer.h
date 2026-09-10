@@ -107,9 +107,11 @@ public:
     void setMenuLeft(bool left);
     // 硬件显示端状态（主循环每帧注入）：在线时菜单显示"设备模式"分组
     //（单任务/多任务/电子相框三选一，menu_activate 收 "device-mode:<m>"）
-    void setDeviceStatus(bool online, const std::string& mode) {
+    void setDeviceStatus(bool online, const std::string& mode,
+                         const std::string& clock_color = "amber") {
         device_online_ = online;
         device_mode_ = mode;
+        clock_color_ = clock_color;
     }
     // 客户区坐标是否落在菜单矩形内（右键菜单区域时不触发开/关切换）
     bool isPointInMenu(float x, float y) const;
@@ -179,6 +181,7 @@ private:
     // 硬件显示端状态（setDeviceStatus 注入；渲染线程同循环读，无并发）
     bool device_online_ = false;
     std::string device_mode_ = "multi";
+    std::string clock_color_ = "amber";
 };
 
 } // namespace dutyon

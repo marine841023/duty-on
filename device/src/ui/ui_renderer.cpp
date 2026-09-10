@@ -630,6 +630,8 @@ enum MenuView {
     kMenuSettings,
     kMenuLanguage,
     kMenuVisibility,
+    kMenuCharManage,  // 自定义角色管理列表
+    kMenuCharEdit,    // 单个自定义角色的状态动画编辑
 };
 
 struct UIRenderer::Impl {
@@ -697,6 +699,7 @@ struct UIRenderer::Impl {
     bool menu_left = false;  // 向左展开（右侧屏幕空间不足，对齐 1.x menu-left）
     int menu_view = kMenuMain;
     std::string assign_state;  // 动作设定的目标状态（sleeping/working/alert）
+    std::string edit_char;     // 角色编辑视图正在编辑的自定义角色 id（char_xxx）
     int hover_motion = -1;     // 动作列表悬停项（预览）
     float menu_h = 0.0f;       // 上一帧菜单实测高（点击关闭区域判定）
 
@@ -1466,6 +1469,7 @@ void UIRenderer::openMenu() {
 void UIRenderer::closeMenu() {
     impl_->menu_open = false;
     impl_->hover_motion = -1;
+    impl_->menu_h = 0.0f;  // 下次打开重新测量，避免沿用旧视图高度
 }
 
 void UIRenderer::openMenuView(const std::string& view) {
@@ -1496,8 +1500,11 @@ bool UIRenderer::isPointInMenu(float x, float y) const {
         (impl_->menu_view == kMenuModels ? 280.0f : 218.0f) * S;
     const float base_w = impl_->mini ? 130.0f * S : 260.0f * S;   // 常规窗口宽
     const float mx = impl_->menu_left ? 8.0f * S : base_w + 8.0f * S;
-    return x >= mx && x <= mx + menu_w && y >= 4.0f * S &&
-           y <= (float)impl_->win_h - 4.0f * S;
+    // 高度按实测菜单高（自适应内容）；首帧未测量时回退整窗高
+    const float mh = impl_->menu_h > 0.0f
+                         ? impl_->menu_h
+                         : (float)impl_->win_h - 8.0f * S;
+    return x >= mx && x <= mx + menu_w && y >= 4.0f * S && y <= 4.0f * S + mh;
 }
 
 bool UIRenderer::isPointClickable(float x, float y) const {
@@ -2226,18 +2233,26 @@ void UIRenderer::renderMenu() {
     const float menu_x = p->menu_left ? 8.0f * S : base_w + 8.0f * S;
 
     // ---- 菜单关闭条件：窗口内菜单矩形外点击（1.x 点击空白处关菜单）----
+    // 命中区域按上一帧实测菜单高（menu_h），不再按整窗——否则菜单短于窗口时
+    // 下方空白区点击不关菜单
     if (ImGui::IsMouseClicked(0)) {
         const ImVec2 m = ImGui::GetIO().MouseClickedPos[0];
+        const float menu_bottom =
+            4.0f * S + (p->menu_h > 0.0f ? p->menu_h
+                                         : (float)p->win_h - 8.0f * S);
         if (m.x < menu_x || m.x > menu_x + menu_w || m.y < 4.0f * S ||
-            m.y > (float)p->win_h - 4.0f * S) {
+            m.y > menu_bottom) {
             closeMenu();
             return;
         }
     }
 
     ImGui::SetNextWindowPos(ImVec2(menu_x, 4.0f * S), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(menu_w, (float)p->win_h - 8.0f * S),
-                             ImGuiCond_Always);
+    // 高度按内容自适应（height=0 走 ImGui auto-fit），上限为窗口高-8：
+    // 内容短 -> 菜单紧凑无底部空白；内容超长 -> 才出现滚动条
+    ImGui::SetNextWindowSizeConstraints(
+        ImVec2(menu_w, 0.0f), ImVec2(menu_w, (float)p->win_h - 8.0f * S));
+    ImGui::SetNextWindowSize(ImVec2(menu_w, 0.0f), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.95f);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, Rgb(30, 30, 40));
     ImGui::PushStyleColor(ImGuiCol_Border, Rgb(255, 255, 255, 26));
@@ -2264,6 +2279,7 @@ void UIRenderer::renderMenu() {
     };
 
     if (ImGui::Begin("##ctxmenu", nullptr, flags)) {
+        p->menu_h = ImGui::GetWindowHeight();  // 实测高供命中判定（下一帧生效）
         switch (p->menu_view) {
         case kMenuMain: {
             // ==== 主菜单（对齐 1.x #menu-main-view）====
@@ -2293,6 +2309,9 @@ void UIRenderer::renderMenu() {
             if (p->MenuRow("autostart", I18n::t("menu.autoLaunch"),
                         checked("autostart"), false, nullptr, false).clicked)
                 activate("autostart");
+            if (p->MenuRow("lang", I18n::t("menu.language"), false, false,
+                        nullptr, true).clicked)
+                go(kMenuLanguage);
             // ---- 硬件显示端（USB 连接后显示模式选择）----
             p->MenuDivider();
             if (device_online_) {
@@ -2309,12 +2328,35 @@ void UIRenderer::renderMenu() {
                             device_mode_ == "frame", false, nullptr,
                             false).clicked)
                     activate("device-mode:frame");
+                // 时钟颜色（五选一，config.json clockColor 经 /api/status 下发）
+                p->MenuLabel(I18n::t("menu.clockColor"));
+                if (p->MenuRow("dcolor-amber", I18n::t("menu.colorAmber"),
+                            clock_color_ == "amber", false, nullptr,
+                            false).clicked)
+                    activate("clock-color:amber");
+                if (p->MenuRow("dcolor-ice", I18n::t("menu.colorIce"),
+                            clock_color_ == "ice", false, nullptr,
+                            false).clicked)
+                    activate("clock-color:ice");
+                if (p->MenuRow("dcolor-white", I18n::t("menu.colorWhite"),
+                            clock_color_ == "white", false, nullptr,
+                            false).clicked)
+                    activate("clock-color:white");
+                if (p->MenuRow("dcolor-green", I18n::t("menu.colorGreen"),
+                            clock_color_ == "green", false, nullptr,
+                            false).clicked)
+                    activate("clock-color:green");
+                if (p->MenuRow("dcolor-pink", I18n::t("menu.colorPink"),
+                            clock_color_ == "pink", false, nullptr,
+                            false).clicked)
+                    activate("clock-color:pink");
+                // 推送本机仓库最新源码到设备：设备端增量编译并覆盖部署
+                if (p->MenuRow("device-sync", I18n::t("menu.syncDevice"),
+                            false, false, nullptr, false).clicked)
+                    activate("device-sync");
             } else {
                 p->MenuLabel(I18n::t("menu.deviceOffline"));
             }
-            if (p->MenuRow("lang", I18n::t("menu.language"), false, false,
-                        nullptr, true).clicked)
-                go(kMenuLanguage);
             p->MenuDivider();
             if (p->MenuRow("install", I18n::t("menu.installHooks"), false, false,
                         nullptr, false).clicked) {
@@ -2373,6 +2415,59 @@ void UIRenderer::renderMenu() {
                 }
                 ImGui::EndChild();
                 ImGui::PopStyleVar(1);
+            }
+            // ---- 自定义角色：新建 / 编辑入口（网格下方）----
+            bool has_custom = false;
+            for (const auto& e : models)
+                if (e.id.rfind("char:", 0) == 0) { has_custom = true; break; }
+            p->MenuDivider();
+            if (p->MenuRow("charnew", I18n::t("menu.newChar"), false, false,
+                        nullptr, false).clicked)
+                activate("charnew");  // 弹文件选择器；返回后网格自动含新角色
+            if (has_custom &&
+                p->MenuRow("charmanage", I18n::t("menu.manageChar"), false,
+                        false, nullptr, true).clicked)
+                go(kMenuCharManage);
+            break;
+        }
+        case kMenuCharManage: {
+            // ==== 自定义角色管理列表（点角色进编辑视图）====
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false, nullptr, false).clicked)
+                go(kMenuModels);
+            p->MenuLabel(I18n::t("menu.manageChar"));
+            p->MenuDivider();
+            std::vector<MenuEntry> chars =
+                menu_collect ? menu_collect("charmanage")
+                             : std::vector<MenuEntry>();
+            for (const auto& e : chars) {
+                if (p->MenuRow(e.id.c_str(), e.label.c_str(), false, false,
+                            nullptr, true).clicked) {
+                    p->edit_char = e.id.substr(9);  // "charedit:<charid>"
+                    go(kMenuCharEdit);
+                }
+            }
+            break;
+        }
+        case kMenuCharEdit: {
+            // ==== 角色编辑：每状态一个动画文件（GIF/PNG/JPG）====
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false, nullptr, false).clicked)
+                go(kMenuCharManage);
+            p->MenuLabel(hint_of("charname:" + p->edit_char).c_str());
+            p->MenuDivider();
+            static const char* kStates[3] = {"sleeping", "working", "alert"};
+            for (int i = 0; i < 3; i++) {
+                const std::string st = kStates[i];
+                if (p->SettingsRow(("charset:" + st).c_str(),
+                            I18n::t((std::string("settings.") + st).c_str()),
+                            hint_of("charfile:" + p->edit_char + ":" + st).c_str()).clicked) {
+                    activate("charset:" + p->edit_char + ":" + st);
+                }
+            }
+            p->MenuDivider();
+            if (p->MenuRow("chardelete", I18n::t("menu.deleteChar"), false,
+                        true, nullptr, false).clicked) {
+                activate("chardelete:" + p->edit_char);
+                closeMenu();  // 列表已变，直接关菜单
             }
             break;
         }

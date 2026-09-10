@@ -173,6 +173,9 @@ constexpr float kRowRadius = 10.f;     // 行底圆角
 struct TaskPanel::Impl {
     TextRenderer text;        // 任务列表（Noto SC，含 CJK）
     TextRenderer clock_font;  // 时钟专用（圆润卡通字体，仅数字/冒号）
+    // 时钟颜色主题（setClockColor 设定；glow=光晕色，body=数字主体色）
+    float glow_r = 0.72f, glow_g = 0.48f, glow_b = 0.16f;  // amber 默认
+    float body_r = 0.80f, body_g = 0.55f, body_b = 0.20f;
     GLuint program = 0;
     std::vector<float> verts;
 
@@ -281,6 +284,30 @@ TaskPanel::TaskPanel() : impl_(new Impl) {}
 TaskPanel::~TaskPanel() {
     if (impl_->program) glDeleteProgram(impl_->program);
     delete impl_;
+}
+
+// multi 模式动态分屏：面板高 = 行数×kRowH + kTopGap（与 render 的布局
+// 常量一致，卡片底贴屏幕底边）。行数截到 [1, kMaxRows]
+float TaskPanel::heightForSessions(int session_count) {
+    const int rows = std::max(1, std::min(session_count, kMaxRows));
+    return (float)(rows * kRowH + kTopGap);
+}
+
+void TaskPanel::setClockColor(const std::string& name) {
+    // glow 略暗于 body，保持柔光在主体外围的层次；未知名字回退 amber
+    struct Preset { const char* name; float gr, gg, gb, br, bg, bb; };
+    static const Preset kPresets[] = {
+        {"amber", 0.72f, 0.48f, 0.16f, 0.80f, 0.55f, 0.20f},  // 琥珀橙(默认)
+        {"ice",   0.35f, 0.55f, 0.70f, 0.45f, 0.68f, 0.82f},  // 冰晶蓝
+        {"white", 0.60f, 0.55f, 0.45f, 0.78f, 0.74f, 0.66f},  // 暖白
+        {"green", 0.28f, 0.58f, 0.30f, 0.38f, 0.72f, 0.40f},  // 翠竹绿
+        {"pink",  0.66f, 0.38f, 0.56f, 0.78f, 0.48f, 0.68f},  // 樱花粉
+    };
+    const Preset* p = &kPresets[0];
+    for (const auto& k : kPresets)
+        if (name == k.name) { p = &k; break; }
+    impl_->glow_r = p->gr; impl_->glow_g = p->gg; impl_->glow_b = p->gb;
+    impl_->body_r = p->br; impl_->body_g = p->bg; impl_->body_b = p->bb;
 }
 
 bool TaskPanel::init(const std::string& font_path) {
@@ -420,8 +447,8 @@ void TaskPanel::renderClock(const std::string& text, float y_top, float size,
     const float x = ((float)screen_w - w) * 0.5f;
     const float ty = y_top;  // 文字顶边（GL y 向上）
 
-    // 柔和光晕：暗橙黄、低透明度（柔光衬托，不刺眼）
-    const float glow_r = 0.72f, glow_g = 0.48f, glow_b = 0.16f;
+    // 柔和光晕：setClockColor 设定的主题色（柔光衬托，不刺眼）
+    const float glow_r = p->glow_r, glow_g = p->glow_g, glow_b = p->glow_b;
     struct Glow { float dx, dy, a; };
     const Glow glows[] = {
         // 外圈（半径大、最淡）
@@ -438,8 +465,8 @@ void TaskPanel::renderClock(const std::string& text, float y_top, float size,
         font.draw(text, x + g.dx, ty + g.dy, size, glow_r, glow_g, glow_b,
                   g.a, screen_w, screen_h);
 
-    // 主体数字：暗橙黄（柔和暖色、低亮度不刺眼），加粗卡通字形
-    font.drawBold(text, x, ty, size, 0.80f, 0.55f, 0.20f, 1.0f,
+    // 主体数字：setClockColor 设定的主题色，加粗卡通字形
+    font.drawBold(text, x, ty, size, p->body_r, p->body_g, p->body_b, 1.0f,
                   screen_w, screen_h, size * 0.022f);
 }
 
@@ -458,8 +485,8 @@ void TaskPanel::renderDate(const std::string& text, float y_top, float size,
     const float x = ((float)screen_w - w) * 0.5f;
     const float ty = y_top;
 
-    // 同款暗橙黄柔光（缩小版光晕：层数/半径随字号减小）
-    const float glow_r = 0.72f, glow_g = 0.48f, glow_b = 0.16f;
+    // 同款主题色柔光（缩小版光晕：层数/半径随字号减小）
+    const float glow_r = p->glow_r, glow_g = p->glow_g, glow_b = p->glow_b;
     const float g1 = size * 0.05f, g2 = size * 0.09f;
     struct Glow { float dx, dy, a; };
     const Glow glows[] = {
@@ -470,8 +497,8 @@ void TaskPanel::renderDate(const std::string& text, float y_top, float size,
     for (const auto& g : glows)
         font.draw(text, x + g.dx, ty + g.dy, size, glow_r, glow_g, glow_b,
                   g.a, screen_w, screen_h);
-    // 主体（同色暗橙黄）
-    font.drawBold(text, x, ty, size, 0.80f, 0.55f, 0.20f, 1.0f,
+    // 主体（同色主题色）
+    font.drawBold(text, x, ty, size, p->body_r, p->body_g, p->body_b, 1.0f,
                   screen_w, screen_h, size * 0.020f);
 }
 
@@ -480,6 +507,42 @@ float TaskPanel::clockLineHeight(float pixel_size) const {
         impl_->clock_font.isLoaded() ? impl_->clock_font : impl_->text;
     return f.isLoaded() ? f.lineHeight(pixel_size) : pixel_size;
 }
+
+// 右上角 USB 状态插头（GL 原点左下，y 向上）：
+//   插脚x2 + 插头头(圆角) + 插头身 + 线缆。连接=绿色且线缆贴身；
+//   断开=红色且线缆与插头身之间留缝。所有模式都画（时钟居中，角上空闲）
+void TaskPanel::renderUsbStatus(bool connected, int screen_w, int screen_h) {
+    auto* p = impl_;
+    if (screen_w <= 0 || screen_h <= 0) return;
+
+    const float x1 = (float)screen_w - 12.f;   // 右边距 12
+    const float x0 = x1 - 22.f;                // 图标宽 22
+    const float y1 = (float)screen_h - 12.f;   // 顶边距 12
+    const float y0 = y1 - 30.f;                // 图标高 30
+    const float cx = (x0 + x1) * 0.5f;
+
+    const float r = connected ? 0.25f : 0.95f;
+    const float g = connected ? 0.85f : 0.35f;
+    const float b = connected ? 0.45f : 0.30f;
+    const float a = 0.95f;
+
+    // 插脚（顶部两根）
+    p->fillRect(x0 + 5.f, y1 - 7.f, x0 + 8.5f, y1, r, g, b, a, screen_w,
+                screen_h);
+    p->fillRect(x1 - 8.5f, y1 - 7.f, x1 - 5.f, y1, r, g, b, a, screen_w,
+                screen_h);
+    // 插头头（圆角）
+    p->fillRoundedRect(x0 + 2.5f, y1 - 17.f, x1 - 2.5f, y1 - 7.f, 2.5f, r, g,
+                       b, a, screen_w, screen_h);
+    // 插头身（收窄）
+    p->fillRect(cx - 5.5f, y1 - 23.f, cx + 5.5f, y1 - 17.f, r, g, b, a,
+                screen_w, screen_h);
+    // 线缆：连接时贴着插头身；断开时下移 5px 留缝
+    const float cable_top = connected ? y1 - 23.f : y1 - 28.f;
+    p->fillRect(cx - 1.75f, y0, cx + 1.75f, cable_top, r, g, b, a, screen_w,
+                screen_h);
+}
+
 
 } // namespace dutyon
 

@@ -27,6 +27,7 @@ static std::optional<PetStatus> FetchStatus(cpr::Session& session) {
         s.overall_state = j.value("overallState", "sleeping");
         s.active_character = j.value("activeCharacter", std::string{});
         s.device_mode = j.value("deviceMode", "multi");
+        s.clock_color = j.value("clockColor", "amber");
         s.server_time = j.value("serverTime", 0.0);
         s.utc_offset_min = j.value("utcOffset", 0);
 

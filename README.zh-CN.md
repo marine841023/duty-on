@@ -8,7 +8,7 @@
 
 [English](README.md) · **简体中文**
 
-### 🚀 v2.0.5 — 原生 C++ 重写版！
+### 🚀 v2.0.8 — 自定义角色 + 设备端动态布局
 
 > **为中国 Trae 用户量身打造** — 原生 Trae CN / TraeCode CN 窗口标题识别，
 > 自动剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역），
@@ -19,28 +19,22 @@
 > 系统指标采样，用 GLFW + OpenGL + Cubism SDK 原生渲染 Live2D / GIF 精灵。
 > 与 1.x 可交替安装（共用 `~/.dutyon` 配置），也是移植到低成本 ARM 硬件设备的代码基线。
 >
-> **v2.0.5 更新：** 修复安装版 Live2D 精灵不显示——安装包此前遗漏了
-> Cubism 运行时所需的 `FrameworkShaders` 着色器目录，导致 v2.0.0~v2.0.4
-> 安装版 Live2D 模型渲染空白（GIF 形象不受影响）。现已打包齐全，
-> 受影响用户重新安装即可恢复。
+> **v2.0.8 更新：** 支持自定义角色——为 sleeping / working / alert 三个状态
+> 分别上传 GIF / PNG / JPG 动画并在宠物菜单中管理。硬件屏：未插 USB 开机
+> 直接进入电子相框模式；屏幕角落新增 USB 连接状态小插头（绿=已连接 /
+> 红=断开）；多任务模式按任务数动态分屏、角色垂直居中。右键菜单高度
+> 按内容自适应。
 >
-> **v2.0.4：** 关闭的项目秒级从任务列表消失。此前窗口扫描删除被
-> "同 IDE 其他窗口仍在"的条件抑制，关闭的项目最长会挂 10 分钟；现在
-> 窗口消失即视为确定性信号（仅 12 秒防闪烁宽限）。
+> **v2.0.7：** IDE 繁忙时项目检测不再闪断，状态动作即时切换（打断旧动作）。
+> 设备端：任务事件提示音（PCM 合成，无需音频文件）与紧凑任务卡片 UI。
 >
-> **v2.0.3：** 宠物完全后台运行——启动后任务栏不再出现图标，仅保留系统托盘。
->
-> **v2.0.2：** 修复跨显示器缩放——把宠物拖到低分辨率屏（如 1080p@100%）
-> 时角色和字体不再缩得过小，≤1440p 的屏与 1.x 尺寸完全一致。
->
-> **v2.0.1：** 模型正在生成长回复时宠物不再误显示"空闲"——LLM 思考期
-> 完全静默（无任何 hook 事件），实测可长达 3 分 52 秒，其超时兜底从 3 分钟
-> 放宽到 10 分钟（与 1.x v1.3.3 同源修复）。
+> **v2.0.5：** 修复安装版 Live2D 精灵不显示——安装包此前遗漏了
+> Cubism 运行时所需的 `FrameworkShaders` 着色器目录。
 >
 > **v1.3.x 系列（WebView 版，支持 macOS/Linux）：** 仍在 `master` 分支维护——
 > 最新 [v1.3.3](https://github.com/marine841023/duty-on/releases/tag/v1.3.3)。
 >
-> 下载 v2.0.5 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.5/DutyOn-v2.0.5.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.5/DutyOn-v2.0.5.zip)
+> 下载 v2.0.8 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.8/DutyOn-v2.0.8.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.8/DutyOn-v2.0.8.zip)
 
 </div>
 

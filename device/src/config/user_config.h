@@ -47,6 +47,11 @@ struct UserConfig {
     // 硬件显示端模式：single=单任务（角色全屏+大时钟）/ multi=多任务
     //（角色+任务列表）/ frame=电子相框（角色全屏循环播放动作）
     std::string device_mode = "multi";
+    // 硬件显示端时钟颜色：amber(默认)/ice/white/green/pink
+    std::string clock_color = "amber";
+    // 源码仓库根路径（菜单「同步程序到设备」的源码来源，手动写入 config.json
+    // 的 deviceRepo；为空时菜单点击给出配置指引）
+    std::string device_repo;
 };
 
 // 模型目录条目
@@ -78,6 +83,8 @@ public:
     static void saveCustomCharacters(const UserConfig& cfg);
     // 硬件显示端模式（single/multi/frame；PC 菜单选择后经 /api/status 下发）
     static void saveDeviceMode(const std::string& mode);
+    // 硬件显示端时钟颜色（amber/ice/white/green/pink；同上经 /api/status 下发）
+    static void saveClockColor(const std::string& color);
 
     // ---- 模型目录（内置 frontend/assets/live2d + 用户 ~/.dutyon/live2d）----
     // builtin_roots: 内置模型搜索目录（相对 exe 解析，main 传入）

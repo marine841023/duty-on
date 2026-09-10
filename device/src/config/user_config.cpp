@@ -115,6 +115,10 @@ UserConfig UserConfigStore::load() {
         cfg.active_character_id = j["activeCharacterId"].get<std::string>();
     if (j.contains("deviceMode") && j["deviceMode"].is_string())
         cfg.device_mode = j["deviceMode"].get<std::string>();
+    if (j.contains("clockColor") && j["clockColor"].is_string())
+        cfg.clock_color = j["clockColor"].get<std::string>();
+    if (j.contains("deviceRepo") && j["deviceRepo"].is_string())
+        cfg.device_repo = j["deviceRepo"].get<std::string>();
     if (j.contains("stateMotions") && j["stateMotions"].is_object()) {
         for (auto it = j["stateMotions"].begin(); it != j["stateMotions"].end(); ++it)
             cfg.state_motions[it.key()] = parseMotions(it.value());
@@ -215,6 +219,11 @@ void UserConfigStore::saveWindowPos(int x, int y) {
 void UserConfigStore::saveDeviceMode(const std::string& mode) {
     // 设备模式（single/multi/frame）；/api/status 每次轮询读文件下发
     updateConfig([&](json& j) { j["deviceMode"] = mode; });
+}
+
+void UserConfigStore::saveClockColor(const std::string& color) {
+    // 时钟颜色（amber/ice/white/green/pink）；同上经 /api/status 下发
+    updateConfig([&](json& j) { j["clockColor"] = color; });
 }
 
 void UserConfigStore::saveCustomCharacters(const UserConfig& cfg) {

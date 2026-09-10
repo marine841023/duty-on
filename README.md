@@ -11,7 +11,7 @@
 [![Built with C++](https://img.shields.io/badge/C%2B%2B-native%20%7C%20no%20WebView-00599C?logo=cplusplus&logoColor=white)]()
 [![Release](https://img.shields.io/github/v/release/marine841023/duty-on)](https://github.com/marine841023/duty-on/releases)
 
-### 🚀 v2.0.5 — Native C++ rewrite!
+### 🚀 v2.0.8 — Custom characters + dynamic device layout
 
 > **Made for Chinese Trae users** — native Trae CN / TraeCode CN window-title
 > detection, multi-root workspace suffix stripping (工作区 / Workspace /
@@ -24,34 +24,26 @@
 > Installs side-by-side with 1.x (shared `~/.dutyon` config), and is the
 > codebase we port to low-cost ARM hardware devices.
 >
-> **New in v2.0.5:** fixed Live2D pets rendering blank in installed
-> builds — the installer was missing the Cubism runtime's
-> `FrameworkShaders` directory, so Live2D models drew nothing in
-> v2.0.0–v2.0.4 installs (GIF pets were unaffected). The shaders are
-> now packaged; affected users just need to reinstall.
+> **New in v2.0.8:** create your own characters — upload GIF / PNG / JPG
+> animations for the sleeping / working / alert states and manage them
+> from the pet's menu. On the hardware display: boots straight into
+> photo-frame mode when USB isn't connected, a tiny USB plug icon in the corner
+> shows link status (green connected / red disconnected), and multi-task
+> mode now splits the screen dynamically by task count with the character
+> vertically centered. Right-click menu height is content-fitted.
 >
-> **v2.0.4:** closed projects now disappear from the task list in
-> seconds. Window-scan removal used to be suppressed whenever another
-> window of the same IDE stayed open, so a closed project could linger
-> for up to 10 minutes; window disappearance is now treated as a
-> definitive signal (12s anti-flicker grace only).
+> **v2.0.7:** project detection hardened against busy IDEs, and state
+> motions now switch instantly (old looping motion is force-interrupted).
+> Device: task-event chimes (PCM synthesized, no audio files) and a compact
+> task-card UI.
 >
-> **v2.0.3:** the pet now runs fully in the background — no more taskbar
-> button on startup; only the system-tray icon remains.
->
-> **v2.0.2:** multi-monitor scaling fixed — dragging the pet to a
-> lower-resolution monitor no longer shrinks the character and text below
-> 1.x size; monitors up to 1440p render at exactly the same size as 1.x.
->
-> **v2.0.1:** the pet no longer shows "idle" while the model is still
-> generating a long reply — the LLM thinking phase is completely silent
-> (no hook events, measured 3m52s in the wild); its timeout is now 10
-> minutes instead of 3 (same fix as v1.3.3 on the 1.x line).
+> **v2.0.5:** fixed Live2D pets rendering blank in installed builds — the
+> installer was missing the Cubism runtime's `FrameworkShaders` directory.
 >
 > **v1.3.x line (WebView-based, macOS/Linux):** still maintained on the
 > `master` branch — latest [v1.3.3](https://github.com/marine841023/duty-on/releases/tag/v1.3.3).
 >
-> Download v2.0.5 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.5/DutyOn-v2.0.5.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.5/DutyOn-v2.0.5.zip)
+> Download v2.0.8 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.8/DutyOn-v2.0.8.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.8/DutyOn-v2.0.8.zip)
 
 **English** · [简体中文](README.zh-CN.md)
 

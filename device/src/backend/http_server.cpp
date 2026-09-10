@@ -344,6 +344,7 @@ void HttpServer::registerRoutes() {
         if (json cfg = readConfigJson(); cfg.is_object()) {
             j["activeCharacter"] = cfg.value("activeCharacterId", std::string{});
             j["deviceMode"] = cfg.value("deviceMode", "multi");
+            j["clockColor"] = cfg.value("clockColor", "amber");
         }
         // PC 时间（设备无 RTC/网络不可信，时钟跟随 PC）：epoch 秒 +
         // 本地时区偏移分钟（东八区=480），设备端 steady_clock 自行推进
@@ -409,8 +410,14 @@ void HttpServer::registerRoutes() {
         }
         const fs::path file_path = fs::path(home) / ".dutyon" / "animations" / name;
         if (auto bytes = readFileIfExists(file_path)) {
+            // 动画文件现支持 GIF/PNG/JPG（自定义角色静态图）；按扩展名给 MIME
+            std::string ext = file_path.extension().string();
+            for (auto& ch : ext) ch = (char)tolower((unsigned char)ch);
+            const char* mime = ext == ".png"  ? "image/png"
+                               : ext == ".jpg" || ext == ".jpeg" ? "image/jpeg"
+                                                                 : "image/gif";
             res.status = 200;
-            res.set_content(*bytes, "image/gif");
+            res.set_content(*bytes, mime);
         } else {
             res.status = 404;
             res.set_content("not found", "text/plain");

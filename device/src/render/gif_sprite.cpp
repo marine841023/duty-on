@@ -652,17 +652,25 @@ bool GifSprite::load(const std::string& path_utf8) {
         fprintf(stderr, "GIF load failed (empty): %s\n", path_utf8.c_str());
         return false;
     }
-    // stb 与浏览器/WIC 的语义差异：首帧未覆盖的像素会被
-    // GIF 逻辑屏幕背景色强制不透明填充（绿幕 GIF 因此出现绿色边框）。
-    // 置 bgindex=0 让 stb 跳过该填充，与 PC 端 WIC 渲染（背景视为透明）一致。
-    if (buf.size() > 11 && buf[0] == 'G' && buf[1] == 'I' && buf[2] == 'F' &&
-        buf[11] != 0)
-        buf[11] = 0;
+    const bool is_gif =
+        buf.size() > 3 && buf[0] == 'G' && buf[1] == 'I' && buf[2] == 'F';
     int w = 0, h = 0, z = 0;
     int* delays_ms = nullptr;
-    // req_comp=4：统一 RGBA；stb 内部按 disposal 逐帧合成到全画布
-    unsigned char* data = stbi_load_gif_from_memory(
-        buf.data(), (int)buf.size(), &delays_ms, &w, &h, &z, nullptr, 4);
+    unsigned char* data = nullptr;
+    if (is_gif) {
+        // stb 与浏览器/WIC 的语义差异：首帧未覆盖的像素会被
+        // GIF 逻辑屏幕背景色强制不透明填充（绿幕 GIF 因此出现绿色边框）。
+        // 置 bgindex=0 让 stb 跳过该填充，与 PC 端 WIC 渲染一致。
+        if (buf.size() > 11 && buf[11] != 0) buf[11] = 0;
+        // req_comp=4：统一 RGBA；stb 内部按 disposal 逐帧合成到全画布
+        data = stbi_load_gif_from_memory(buf.data(), (int)buf.size(),
+                                         &delays_ms, &w, &h, &z, nullptr, 4);
+    } else {
+        // 静态图（PNG/JPG 等）：单帧，帧时长拉长让 update 自然停留
+        z = 1;
+        data = stbi_load_from_memory(buf.data(), (int)buf.size(), &w, &h,
+                                     nullptr, 4);
+    }
     if (!data || z <= 0) {
         fprintf(stderr, "GIF load failed: %s (%s)\n", path_utf8.c_str(),
                 stbi_failure_reason());
@@ -674,12 +682,17 @@ bool GifSprite::load(const std::string& path_utf8) {
     const size_t frame_bytes = (size_t)w * h * 4;
     impl_->frames.assign(data, data + frame_bytes * z);
     impl_->delays.resize(z);
-    for (int i = 0; i < z; ++i) {
-        const int ms = delays_ms ? delays_ms[i] : 0;
-        // <=10ms 按浏览器惯例兜底 100ms（同 Windows 版）
-        impl_->delays[i] = ms > 10 ? ms / 1000.0f : 0.1f;
+    if (is_gif) {
+        for (int i = 0; i < z; ++i) {
+            const int ms = delays_ms ? delays_ms[i] : 0;
+            // <=10ms 按浏览器惯例兜底 100ms（同 Windows 版）
+            impl_->delays[i] = ms > 10 ? ms / 1000.0f : 0.1f;
+        }
+    } else {
+        impl_->delays[0] = 3600.0f;  // 静态图：单帧长驻
     }
-    stbi_image_free(data);  // 释放 stb 缓冲（含 delays）
+    stbi_image_free(data);
+    if (delays_ms) stbi_image_free(delays_ms);  // delays 是独立分配
     impl_->w = w;
     impl_->h = h;
     impl_->n = z;

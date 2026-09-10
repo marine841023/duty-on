@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(dutyon-2.0 VERSION 2.0.7 LANGUAGES CXX)
+project(dutyon-2.0 VERSION 2.0.8 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -247,6 +247,7 @@ if(WIN32)
         user32
         gdi32
         psapi         # EnumProcessModules（崩溃诊断）
+        comdlg32      # GetOpenFileNameW（自定义角色动画上传选择器）
     )
     # 子系统 WINDOWS：启动不弹控制台黑窗。入口仍是 main()，需显式指定
     # mainCRTStartup（否则链接器找 WinMain 报错）。调试要看 printf 日志时

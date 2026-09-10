@@ -39,6 +39,9 @@ struct PetStatus {
     // single=单任务（角色全屏+大时钟）/ multi=多任务（角色+任务列表，默认）/
     // frame=电子相框（角色全屏循环播放动作，不响应任务状态）
     std::string device_mode;
+    // 时钟颜色主题（PC 菜单设定，config.json clockColor）：
+    // amber=暗橙(默认)/ice=冰蓝/white=暖白/green=翠绿/pink=粉紫
+    std::string clock_color;
     // PC 时间（设备无 RTC/NTP 不可信，时钟跟随 PC）：epoch 秒 + PC 本地
     // 时区偏移分钟；设备端取到后用 steady_clock 自行推进直到下次轮询覆盖
     double server_time = 0;

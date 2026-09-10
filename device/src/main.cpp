@@ -25,6 +25,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
+#include <commdlg.h>  // GetOpenFileNameW（自定义角色动画上传）
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>  // glfwGetFramebufferSize（视口 DPI 换算）
 #else
@@ -34,6 +35,7 @@
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <string>
 #include <utility>
@@ -121,6 +123,26 @@ int main() {
 #ifdef _WIN32
     if (getenv("DUTYON_FT_PROBE") && getenv("DUTYON_FT_PROBE")[0] == '1')
         dutyon::FtProbe();
+
+    // 单实例互斥：已有实例在运行则提示后退出。
+    // 背景：曾因双实例共存出故障 —— 两个进程靠 SO_REUSEADDR 同时绑定
+    // 17521 端口，IDE hook 事件被随机分流到不同实例，状态撕裂导致桌宠
+    // "没反应"。句柄保持到进程退出由 OS 自动释放。
+    const HANDLE kSingleInstanceMutex =
+        CreateMutexA(nullptr, TRUE, "DutyOn.SingleInstance");
+    if (kSingleInstanceMutex != nullptr &&
+        GetLastError() == ERROR_ALREADY_EXISTS) {
+        // 必须 MessageBoxW：项目按 /utf-8 编译，窄字符串走 ANSI(GBK) 解码会
+        // 把 UTF-8 中文渲染成乱码
+        MessageBoxW(nullptr,
+                    L"DutyOn 已经在运行中，请勿重复启动。\r\n\r\n"
+                    L"DutyOn is already running.\r\n"
+                    L"Check the desktop for the existing pet window.",
+                    L"DutyOn", MB_OK | MB_ICONINFORMATION);
+        CloseHandle(kSingleInstanceMutex);
+        return 0;
+    }
+    // nullptr（创建失败，如权限异常）时失败放行：宁可双实例也不误拒启动
 #endif
 
     signal(SIGINT, signalHandler);
@@ -300,8 +322,11 @@ int main() {
     std::string dev_motion_group;
     int dev_motion_idx = 0;
     // 硬件屏布局模式（PC 经 /api/status 下发；断连后保持最近值）：
-    // multi=角色半屏+任务列表 / single=角色全屏+大时钟 / frame=相框全屏轮播
-    std::string device_mode = "multi";
+    // multi=角色半屏+任务列表 / single=角色全屏+大时钟 / frame=相框全屏轮播。
+    // 初始 frame：未插 USB 开机时当电子相框用（插线后 PC 下发模式覆盖）
+    std::string device_mode = "frame";
+    // 时钟颜色主题（PC 菜单下发；断连保持最近值）
+    std::string clock_color = "amber";
     // 提示音边沿检测基准（首帧仅记录不发声，避免开机误报）
     std::string snd_prev_overall;
     bool snd_prev_confirm = false;
@@ -551,6 +576,23 @@ int main() {
             auto [g, i] = state_machine.motionForState(id.substr(7));
             return g + "[" + std::to_string(i) + "]";
         }
+        // charname:<charid> —— 角色编辑视图标题（角色显示名）
+        if (id.rfind("charname:", 0) == 0) {
+            const std::string cid = id.substr(9);
+            for (const auto& c : cfg.custom_characters)
+                if (c.id == cid) return c.name;
+            return {};
+        }
+        // charfile:<charid>:<state> —— 编辑行右侧的当前动画文件名
+        if (id.rfind("charfile:", 0) == 0) {
+            const size_t p1 = id.find(':', 9);
+            if (p1 == std::string::npos) return {};
+            const std::string cid = id.substr(9, p1 - 9);
+            const std::string state = id.substr(p1 + 1);
+            for (const auto& c : cfg.custom_characters)
+                if (c.id == cid) return gifFileFor(c, state);
+            return {};
+        }
         return {};
     };
 
@@ -587,6 +629,13 @@ int main() {
             }
             return out;
         }
+        // 自定义角色管理列表（编辑视图入口）
+        if (key == "charmanage") {
+            std::vector<UIRenderer::MenuEntry> out;
+            for (const auto& c : cfg.custom_characters)
+                out.push_back({"charedit:" + c.id, c.name, false, {}});
+            return out;
+        }
         return {};
     };
 
@@ -604,6 +653,70 @@ int main() {
         backend.setMonitorActive(ui.showMetrics);  // 面板开关联动采样线程
 #endif
     };
+
+#ifdef _WIN32
+    // 自定义角色动画文件选择器（模态；属主=桌宠窗口，防被置顶窗遮挡）
+    const HWND pet_hwnd = static_cast<HWND>(window->nativeWinHandle());
+    auto pick_animation_file = [&]() -> std::string {
+        wchar_t buf[MAX_PATH] = L"";
+        OPENFILENAMEW ofn{};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = pet_hwnd;
+        ofn.lpstrFilter =
+            L"GIF/PNG/JPEG (*.gif;*.png;*.jpg;*.jpeg)\0*.gif;*.png;*.jpg;*.jpeg\0";
+        ofn.lpstrFile = buf;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.lpstrTitle = L"选择动画 / 图片文件";
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (!GetOpenFileNameW(&ofn)) return {};  // 取消/失败同按空处理
+        const int len = WideCharToMultiByte(CP_UTF8, 0, buf, -1, nullptr, 0,
+                                            nullptr, nullptr);
+        if (len <= 1) return {};
+        std::string out((size_t)len - 1, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, buf, -1, out.data(), len, nullptr,
+                            nullptr);
+        return out;
+    };
+
+    // 把选中的源文件复制进 ~/.dutyon/animations/ 并挂到角色的某个状态。
+    // 文件名带毫秒时间戳：替换后文件名必变 —— 设备端按文件名比对自动重下
+    //（/api/character 只下发文件名，无内容哈希）。旧文件随之删除。
+    auto install_char_file = [&](CustomCharacter& c, const std::string& state,
+                                 const std::string& src) -> bool {
+        namespace fs = std::filesystem;
+        std::string ext = fs::path(src).extension().string();
+        for (auto& ch : ext) ch = (char)tolower((unsigned char)ch);
+        if (ext != ".gif" && ext != ".png" && ext != ".jpg" && ext != ".jpeg") {
+            MessageBoxW(pet_hwnd, L"仅支持 GIF / PNG / JPG 文件",
+                        L"Duty On", MB_OK | MB_ICONWARNING);
+            return false;
+        }
+        const long long ms = std::chrono::duration_cast<
+            std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+        const std::string fname =
+            c.id + "_" + state + "_" + std::to_string(ms) + ext;
+        const fs::path dst = fs::path(UserConfigStore::animationsDir()) / fname;
+        std::error_code ec;
+        fs::create_directories(dst.parent_path(), ec);
+        fs::copy_file(fs::path(src), dst,
+                      fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            MessageBoxW(pet_hwnd, L"文件复制失败，请重试", L"Duty On",
+                        MB_OK | MB_ICONWARNING);
+            return false;
+        }
+        std::string& slot = state == "sleeping"   ? c.sleeping
+                            : state == "working" ? c.working
+                                                 : c.alert;
+        if (!slot.empty() && slot != fname) {
+            std::error_code ec2;  // 旧文件删除失败不阻塞流程
+            fs::remove(fs::path(UserConfigStore::animationsDir()) / slot, ec2);
+        }
+        slot = fname;
+        return true;
+    };
+#endif
 
     ui.menu_activate = [&](const std::string& id) {
         // ---- 显示隐藏（vis-*）----
@@ -644,6 +757,100 @@ int main() {
                 UserConfigStore::saveDeviceMode(mode);
                 // 立即生效（设备端下一次 /api/status 轮询 ≤2s 收到）
             }
+        }
+        // ---- 硬件显示端时钟颜色（菜单"时钟颜色"五选一）----
+        else if (id.rfind("clock-color:", 0) == 0) {
+            const std::string color = id.substr(12);
+            if (color == "amber" || color == "ice" || color == "white" ||
+                color == "green" || color == "pink") {
+                cfg.clock_color = color;
+                UserConfigStore::saveClockColor(color);
+                // 立即生效（设备端下一次 /api/status 轮询 ≤2s 收到）
+            }
+        }
+        // ---- 同步最新程序到设备（菜单「同步程序到设备」）----
+        else if (id == "device-sync") {
+#ifdef _WIN32
+            // 全流程（tar 推源码 → 设备端增量编译 → 部署重启服务）要数分钟，
+            // 必须后台线程执行（同 install-hooks 模式），否则渲染循环卡死
+            static std::atomic<bool> syncing{false};
+            const std::filesystem::path script =
+                std::filesystem::path(cfg.device_repo) / ".userdata" /
+                "sync-device.ps1";
+            if (cfg.device_repo.empty() ||
+                !std::filesystem::exists(script)) {
+                MessageBoxW(
+                    nullptr,
+                    L"尚未配置源码仓库路径，无法同步。\r\n\r\n"
+                    L"请在 C:\\Users\\<用户名>\\.dutyon\\config.json 中增加：\r\n"
+                    L"\"deviceRepo\": \"<仓库根目录，如 d:/src/traeSprite>\"",
+                    L"Duty On", MB_OK | MB_ICONINFORMATION);
+            } else if (!syncing.exchange(true)) {
+                const std::string repo = cfg.device_repo;
+                std::thread([repo]() {
+                    wchar_t tmp[MAX_PATH];
+                    GetTempPathW(MAX_PATH, tmp);
+                    const std::wstring log =
+                        std::wstring(tmp) + L"dutyon-device-sync.log";
+                    const std::wstring repoW(repo.begin(), repo.end());
+                    const std::wstring scriptW =
+                        repoW + L"\\.userdata\\sync-device.ps1";
+                    std::wstring cmd =
+                        L"powershell.exe -NoProfile -ExecutionPolicy Bypass"
+                        L" -File \"" + scriptW + L"\" -Repo \"" + repoW +
+                        L"\" -LogFile \"" + log + L"\"";
+                    STARTUPINFOW si{sizeof(si)};
+                    PROCESS_INFORMATION pi{};
+                    std::wstring result;
+                    if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr,
+                                       FALSE, CREATE_NO_WINDOW, nullptr,
+                                       nullptr, &si, &pi)) {
+                        // 设备端全量编译最坏 ~10 分钟，留足余量
+                        WaitForSingleObject(pi.hProcess, 20 * 60 * 1000);
+                        DWORD rc = 1;
+                        GetExitCodeProcess(pi.hProcess, &rc);
+                        CloseHandle(pi.hThread);
+                        CloseHandle(pi.hProcess);
+                        // 日志尾巴随结果展示（成功回执/失败原因都在末尾）
+                        std::string tail;
+                        std::ifstream f(log, std::ios::binary);
+                        if (f) {
+                            f.seekg(0, std::ios::end);
+                            const auto sz = f.tellg();
+                            const auto n =
+                                std::min<std::streamoff>(sz, 1200);
+                            f.seekg(sz - n);
+                            tail.resize(static_cast<size_t>(n));
+                            f.read(tail.data(), n);
+                        }
+                        // 日志统一 UTF-8 写入（见 sync-device.ps1 Log()）
+                        const int wlen = MultiByteToWideChar(
+                            CP_UTF8, 0, tail.data(), (int)tail.size(),
+                            nullptr, 0);
+                        std::wstring tailW(wlen, L'\0');
+                        MultiByteToWideChar(CP_UTF8, 0, tail.data(),
+                                            (int)tail.size(), tailW.data(),
+                                            wlen);
+                        result = (rc == 0)
+                            ? L"同步完成，设备端程序已更新并重启。\r\n\r\n" +
+                                  tailW
+                            : L"同步失败（退出码 " + std::to_wstring(rc) +
+                                  L"）。\r\n\r\n" + tailW;
+                    } else {
+                        result = L"无法启动同步脚本：\r\n" + scriptW;
+                    }
+                    MessageBoxW(nullptr, result.c_str(),
+                                L"Duty On — 同步程序到设备",
+                                MB_OK | MB_ICONINFORMATION);
+                    syncing = false;
+                }).detach();
+                MessageBoxW(
+                    nullptr,
+                    L"已开始向设备同步最新程序。\r\n"
+                    L"设备端编译需要几分钟，完成后会弹出结果提示。",
+                    L"Duty On", MB_OK | MB_ICONINFORMATION);
+            }
+#endif
         }
         // ---- 形象 / 动作 ----
         else if (id.rfind("model:", 0) == 0) {
@@ -688,6 +895,129 @@ int main() {
                 printf("GIF character: %s (%s)\n", c.name.c_str(), c.id.c_str());
                 break;
             }
+        }
+        // ---- 自定义角色：新建（选文件，三状态共用；逐状态可在编辑视图换）----
+        else if (id == "charnew") {
+#ifdef _WIN32
+            const std::string src = pick_animation_file();
+            if (!src.empty()) {
+                CustomCharacter ch;
+                const long long ms = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+                ch.id = "char_" + std::to_string(ms);
+                ch.name = std::filesystem::path(src).stem().string();
+                if (ch.name.empty()) ch.name = "自定义角色";
+                bool okc = true;
+                for (const char* st : {"sleeping", "working", "alert"})
+                    okc = install_char_file(ch, st, src) && okc;
+                if (okc) {
+                    // push_back 可能搬移 vector 存储：先存活动角色 id，
+                    // 之后重建指针防 gif_char 悬空
+                    const std::string active_id =
+                        (using_gif && gif_char) ? gif_char->id : std::string();
+                    cfg.custom_characters.push_back(std::move(ch));
+                    UserConfigStore::saveCustomCharacters(cfg);
+                    if (!active_id.empty()) {
+                        gif_char = nullptr;
+                        for (const auto& cc : cfg.custom_characters)
+                            if (cc.id == active_id) { gif_char = &cc; break; }
+                    }
+                }
+            }
+#endif
+        }
+        // ---- 自定义角色：更换某状态的动画文件（charset:<id>:<state>）----
+        else if (id.rfind("charset:", 0) == 0) {
+#ifdef _WIN32
+            const size_t p1 = id.find(':', 8);
+            if (p1 != std::string::npos) {
+                const std::string cid = id.substr(8, p1 - 8);
+                const std::string state = id.substr(p1 + 1);
+                const std::string src = pick_animation_file();
+                if (!src.empty()) {
+                    for (auto& c : cfg.custom_characters) {
+                        if (c.id != cid) continue;
+                        if (install_char_file(c, state, src)) {
+                            UserConfigStore::saveCustomCharacters(cfg);
+                            // 正在显示该角色且被改的恰是当前状态 → 立即生效
+                            if (using_gif && gif_char && gif_char->id == cid) {
+                                auto [g, gi] = state_machine.currentMotion();
+                                const std::string cur =
+                                    g.empty() ? "sleeping" : g;
+                                if (cur == state) {
+                                    const std::string f = gifFileFor(c, state);
+                                    if (!f.empty())
+                                        gif.load(UserConfigStore::
+                                                     animationsDir() +
+                                                 "/" + f);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+#endif
+        }
+        // ---- 自定义角色：删除（chardelete:<id>；确认后连文件一起删）----
+        else if (id.rfind("chardelete:", 0) == 0) {
+#ifdef _WIN32
+            const std::string cid = id.substr(11);
+            for (size_t ci = 0; ci < cfg.custom_characters.size(); ci++) {
+                const CustomCharacter& c = cfg.custom_characters[ci];
+                if (c.id != cid) continue;
+                // 确认框（角色名 UTF-8 → UTF-16）
+                const int wlen = MultiByteToWideChar(
+                    CP_UTF8, 0, c.name.c_str(), -1, nullptr, 0);
+                std::wstring wname((size_t)wlen, L'\0');
+                MultiByteToWideChar(CP_UTF8, 0, c.name.c_str(), -1,
+                                    wname.data(), wlen);
+                const std::wstring q = L"确定删除角色「" + wname +
+                                       L"」吗？\r\n对应的动画文件会一并删除。";
+                if (MessageBoxW(pet_hwnd, q.c_str(), L"Duty On",
+                                MB_YESNO | MB_ICONQUESTION) != IDYES)
+                    break;
+                const bool was_active =
+                    using_gif && gif_char && gif_char->id == cid;
+                std::error_code ec;
+                for (const char* st : {"sleeping", "working", "alert"}) {
+                    const std::string f = gifFileFor(c, st);
+                    if (!f.empty())
+                        std::filesystem::remove(
+                            std::filesystem::path(
+                                UserConfigStore::animationsDir()) /
+                                f,
+                            ec);
+                }
+                cfg.custom_characters.erase(cfg.custom_characters.begin() +
+                                            (ptrdiff_t)ci);
+                UserConfigStore::saveCustomCharacters(cfg);
+                if (was_active) {
+                    // 删的是当前角色 → 切回第一个 Live2D 模型
+                    using_gif = false;
+                    gif_char = nullptr;
+                    gif.unload();
+                    if (!model_entries.empty()) {
+                        const auto& e = model_entries.front();
+                        if (renderer.loadModelFile(e.dir, e.json)) {
+                            current_model_key = e.key;
+                            cfg.active_character_id = e.key;
+                            UserConfigStore::saveActiveCharacter(e.key);
+                            apply_state_motions();
+                            motions_dirty = true;
+                            auto [g2, gi2] = state_machine.currentMotion();
+                            renderer.setLoopMotion(g2, gi2);
+                        }
+                    } else {
+                        cfg.active_character_id.clear();
+                        UserConfigStore::saveActiveCharacter("");
+                    }
+                }
+                break;
+            }
+#endif
         } else if (id.rfind("motion:", 0) == 0 || id.rfind("preview:", 0) == 0) {
             // motion:<组>:<序号> 一次性播放；preview:<组>:<序号> 悬停预览
             const size_t off = id.find(':') + 1;
@@ -916,6 +1246,13 @@ int main() {
                 if (device_mode == "frame") {
                     frame_timer = 0.f;  // 进入相框模式立即从头轮播
                 }
+            }
+            // 时钟颜色同步（amber/ice/white/green/pink；断连后保持最近值）
+            if (!current_status.clock_color.empty() &&
+                current_status.clock_color != clock_color) {
+                clock_color = current_status.clock_color;
+                task_panel.setClockColor(clock_color);
+                printf("[Mode] clock color -> %s\n", clock_color.c_str());
             }
             // 事件提示音：提醒（待确认）播 3 次，开始/结束各 1 次；边沿触发
             if (snd_seen) {
@@ -1172,13 +1509,21 @@ int main() {
                                 canvas_gl_w, canvas_gl_h);
             }
 #else
-            // 设备端：multi=上半屏+贴底；single/frame=全屏+垂直居中
+            // 设备端：multi=动态分屏（按任务数）+角色区居中；single/frame=全屏+垂直居中
+            float panel_h = 0.f;  // multi 面板区高度（下方渲染面板用）
             if (device_mode == "multi") {
-                // 上半屏渲染角色（GL 原点左下，视口 y 从半屏线起）
-                renderer.setCenterV(false);
-                gif.setCenterV(false);
-                renderer.setViewport(0, MODEL_AREA_H, WIN_W, MODEL_AREA_H);
-                gif.setViewport(0, MODEL_AREA_H, WIN_W, MODEL_AREA_H);
+                // 面板高度随任务数伸缩：任务少时角色区更大，避免半屏空黑
+                panel_h = TaskPanel::heightForSessions(
+                    usb_connected ? (int)current_status.sessions.size() : 0);
+                // 角色区 = 时钟下沿 ~ 面板顶，内容在该区域内垂直居中（任务
+                // 少时不再贴底下沉）。时钟区预留：顶边距 26 + 字号 56×1.2
+                // 行高 + 与角色间隙 ≈ 110px
+                const int clock_reserve = 110;
+                const int char_h = kDisplayHeight - clock_reserve - (int)panel_h;
+                renderer.setCenterV(true);
+                gif.setCenterV(true);
+                renderer.setViewport(0, (int)panel_h, WIN_W, char_h);
+                gif.setViewport(0, (int)panel_h, WIN_W, char_h);
             } else {
                 renderer.setCenterV(true);
                 gif.setCenterV(true);
@@ -1227,7 +1572,8 @@ int main() {
             //     设备端未插 USB 时不画状态栏，改画引导横幅）
 #ifdef _WIN32
             // 硬件显示端状态（菜单"设备模式"分组显示/隐藏 + 当前模式勾选）
-            ui.setDeviceStatus(backend.deviceOnline(), cfg.device_mode);
+            ui.setDeviceStatus(backend.deviceOnline(), cfg.device_mode,
+                               cfg.clock_color);
             ui.beginFrame();
             ui.renderStatus(current_status);
             if (!mini_mode && has_metrics) ui.renderMetrics(current_metrics);
@@ -1240,9 +1586,9 @@ int main() {
             glViewport(0, 0, WIN_W, kDisplayHeight);
             if (device_mode == "multi") {
                 if (usb_connected) {
-                    // 下半屏任务列表（面板充满下半屏，顶贴角色区、底贴屏幕底）
+                    // 动态分屏：面板顶边 = 面板高度（卡片底贴屏幕底）
                     task_panel.render(current_status, WIN_W, kDisplayHeight,
-                                      (float)MODEL_AREA_H);
+                                      panel_h);
                 } else {
                     // 引导画面：宠物待机动画（上半屏已渲染）+ 底部提示横幅
                     prompt_banner.render(WIN_W, kDisplayHeight);
@@ -1282,9 +1628,10 @@ int main() {
 
                 const float clock_size =
                     (device_mode == "multi") ? 56.f : 92.f;
-                // 时钟顶部留白：不贴屏幕顶边（multi 12px，大时钟 22px）
+                // 时钟顶部留白：multi 26px（稍下沉，避免压住变大后的角色头顶）、
+                // 单任务/相框 22px
                 const float clock_top = (float)kDisplayHeight -
-                                        ((device_mode == "multi") ? 12.f : 22.f);
+                                        ((device_mode == "multi") ? 26.f : 22.f);
                 task_panel.renderClock(time_buf, clock_top, clock_size,
                                        WIN_W, kDisplayHeight);
                 // 日期行放屏幕底部（GL 原点左下，y 向上）：留 14px 底边距。
@@ -1294,6 +1641,8 @@ int main() {
                                           WIN_W, kDisplayHeight);
                 }
             }
+            // 右上角 USB 连接状态小插头：绿=已连 PC，红=未连接
+            task_panel.renderUsbStatus(usb_connected, WIN_W, kDisplayHeight);
 #endif
         }
 
