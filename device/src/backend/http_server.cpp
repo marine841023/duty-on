@@ -161,6 +161,32 @@ bool HttpServer::start() {
     }).detach();
     printf("[HttpServer] Listening on http://%s:%u%s\n", bind_host, (unsigned)bc::kPort,
            externalAccessEnabled() ? " (external access ON)" : "");
+
+    // USB 直连通告：设备端（NCM gadget，usb0=192.168.7.1）从 ARP 邻居表
+    // 发现 PC（net/usb_link.cpp），但 Windows 插入后若一直无人向该网段
+    // 发包（IP 是静态/DHCP 已缓存时不会主动广播），设备会无限等不到 ARP
+    // 条目 —— 实测插线 5 分钟仍显示「请连接电脑」。这里每 2s 向设备固定
+    // 地址发一个 UDP 报文迫使 Windows 发出 ARP 解析，设备即可秒级发现。
+    // 无 USB 网卡时 sendto 报错忽略，开销可忽略。
+    std::thread([] {
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return;
+        SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock == INVALID_SOCKET) {
+            WSACleanup();
+            return;
+        }
+        sockaddr_in dst{};
+        dst.sin_family = AF_INET;
+        dst.sin_port = htons(9);  // discard 端口，报文到达即被丢弃
+        inet_pton(AF_INET, "192.168.7.1", &dst.sin_addr);
+        char buf[1] = {0};
+        for (;;) {
+            (void)sendto(sock, buf, sizeof(buf), 0,
+                         reinterpret_cast<sockaddr*>(&dst), sizeof(dst));
+            Sleep(2000);
+        }
+    }).detach();
     return true;
 }
 
@@ -345,6 +371,7 @@ void HttpServer::registerRoutes() {
             j["activeCharacter"] = cfg.value("activeCharacterId", std::string{});
             j["deviceMode"] = cfg.value("deviceMode", "multi");
             j["clockColor"] = cfg.value("clockColor", "amber");
+            j["deviceBrightness"] = cfg.value("deviceBrightness", 100);
         }
         // PC 时间（设备无 RTC/网络不可信，时钟跟随 PC）：epoch 秒 +
         // 本地时区偏移分钟（东八区=480），设备端 steady_clock 自行推进

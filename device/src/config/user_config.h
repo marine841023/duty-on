@@ -49,6 +49,9 @@ struct UserConfig {
     std::string device_mode = "multi";
     // 硬件显示端时钟颜色：amber(默认)/ice/white/green/pink
     std::string clock_color = "amber";
+    // 硬件显示端屏幕亮度：10-100（百分比）。当前屏无内核背光接口时，
+    // 设备端以渲染层整屏压暗实现；有 sysfs 背光则直接写背光
+    int device_brightness = 100;
     // 源码仓库根路径（菜单「同步程序到设备」的源码来源，手动写入 config.json
     // 的 deviceRepo；为空时菜单点击给出配置指引）
     std::string device_repo;
@@ -85,6 +88,8 @@ public:
     static void saveDeviceMode(const std::string& mode);
     // 硬件显示端时钟颜色（amber/ice/white/green/pink；同上经 /api/status 下发）
     static void saveClockColor(const std::string& color);
+    // 硬件显示端屏幕亮度（10-100；同上经 /api/status 下发）
+    static void saveDeviceBrightness(int v);
 
     // ---- 模型目录（内置 frontend/assets/live2d + 用户 ~/.dutyon/live2d）----
     // builtin_roots: 内置模型搜索目录（相对 exe 解析，main 传入）

@@ -54,6 +54,7 @@
 #ifdef _WIN32
 #include "backend/backend_service.h"  // 单进程后端（原 duty-on.exe 职责）
 #else
+#include <nlohmann/json.hpp>            // 用户模型 model3.json 解析（PC 同步）
 #include "net/usb_link.h"             // USB 直连链路监视（租约发现 PC）
 #include "render/prompt_banner.h"     // 开机引导横幅（未插线提示）
 #include "ui/task_panel.h"            // 下半屏任务列表（项目名 + 状态）
@@ -81,6 +82,119 @@ static std::string gifFileFor(const CustomCharacter& c, const std::string& state
     if (!f && !c.alert.empty()) f = &c.alert;
     return f ? *f : std::string();
 }
+
+#ifndef _WIN32
+// ---------------------------------------------------------------------------
+// 用户 Live2D 模型从 PC 同步：PC 下发的 activeCharacter 对用户模型是 HTTP
+// 路由键（http://127.0.0.1:17521/live2d/<相对路径>），设备本地无此文件。
+// 下载 model3.json 并解析 FileReferences 引用的全部文件（moc3/贴图/物理/
+// 动作/表情等），按原目录结构落到本地 ~/.dutyon/live2d/ 后按本地文件加载。
+// 已存在的文件跳过（中断后续传）；失败返回 nullopt（由调用方节流重试）。
+// ---------------------------------------------------------------------------
+static std::optional<ModelEntry> fetchUserModelFromPC(ApiClient& api,
+                                                      const std::string& key) {
+    static const std::string kPrefix = "http://127.0.0.1:17521/live2d/";
+    if (key.rfind(kPrefix, 0) != 0) return std::nullopt;
+    const std::string rel = key.substr(kPrefix.size());
+    if (rel.empty()) return std::nullopt;
+    // 路径安全：拒绝 .. 段（与 PC 端 /live2d 路由校验一致）
+    const std::filesystem::path rel_path(rel);
+    for (const auto& seg : rel_path)
+        if (seg == "..") return std::nullopt;
+    const std::filesystem::path user_root(UserConfigStore::userModelsDir());
+    const std::filesystem::path json_path = user_root / rel_path;
+    if (json_path.filename().string().size() <= 12) return std::nullopt;
+
+    // 1. model3.json 本体
+    if (!std::filesystem::exists(json_path) &&
+        !api.downloadLive2dFile(rel, json_path.generic_string())) {
+        fprintf(stderr, "[Model] fetch failed: %s\n", rel.c_str());
+        return std::nullopt;
+    }
+
+    // 2. 解析 FileReferences 收集引用文件（相对模型目录）。
+    //    required = moc3/贴图（渲染必需，缺失判整体失败重下）；
+    //    物理/表情/动作/声音等可选，缺失仅告警（Cubism 容忍）
+    std::vector<std::pair<std::string, bool>> refs;
+    {
+        std::ifstream in(json_path);
+        nlohmann::json j;
+        try {
+            in >> j;
+        } catch (...) {
+            // 本地文件截断残留：删除让下次重试重新下载
+            std::error_code ec;
+            std::filesystem::remove(json_path, ec);
+            return std::nullopt;
+        }
+        auto add = [&refs](const nlohmann::json& v, bool required) {
+            if (v.is_string()) {
+                const std::string s = v.get<std::string>();
+                if (!s.empty()) refs.emplace_back(s, required);
+            }
+        };
+        if (j.contains("FileReferences") && j["FileReferences"].is_object()) {
+            const auto& fr = j["FileReferences"];
+            if (fr.contains("Moc")) add(fr["Moc"], true);
+            for (const char* k : {"Physics", "Pose", "UserData",
+                                  "DisplayInfo"})
+                if (fr.contains(k)) add(fr[k], false);
+            if (fr.contains("Textures") && fr["Textures"].is_array())
+                for (const auto& t : fr["Textures"]) add(t, true);
+            if (fr.contains("Expressions") && fr["Expressions"].is_array())
+                for (const auto& e : fr["Expressions"])
+                    if (e.is_object() && e.contains("File"))
+                        add(e["File"], false);
+            if (fr.contains("Motions") && fr["Motions"].is_object())
+                for (auto it = fr["Motions"].begin(); it != fr["Motions"].end();
+                     ++it)
+                    if (it.value().is_array())
+                        for (const auto& m : it.value())
+                            if (m.is_object()) {
+                                if (m.contains("File")) add(m["File"], false);
+                                if (m.contains("Sound")) add(m["Sound"], false);
+                            }
+        }
+        std::sort(refs.begin(), refs.end());
+        refs.erase(std::unique(refs.begin(), refs.end()), refs.end());
+    }
+
+    // 3. 逐个下载引用文件（已存在跳过；引用可向上级相对，但必须落在
+    //    用户模型根内，与 PC 路由的 .. 拒绝策略一致）
+    const std::filesystem::path model_dir = json_path.parent_path();
+    int missing_opt = 0;
+    for (const auto& [ref, required] : refs) {
+        const std::filesystem::path local =
+            (model_dir / std::filesystem::path(ref)).lexically_normal();
+        const std::string rel_ref =
+            local.lexically_relative(user_root).generic_string();
+        if (rel_ref.empty() || rel_ref.rfind("..", 0) == 0 ||
+            (!std::filesystem::exists(local) &&
+             !api.downloadLive2dFile(rel_ref, local.generic_string()))) {
+            fprintf(stderr, "[Model] fetch ref failed: %s\n", rel_ref.c_str());
+            if (required) {
+                // 必需文件缺失：删 model3.json 让下轮重试整套
+                //（调用方节流），避免留下永远加载不了的半残模型
+                std::error_code ec;
+                std::filesystem::remove(json_path, ec);
+                return std::nullopt;
+            }
+            ++missing_opt;
+        }
+    }
+    if (missing_opt > 0)
+        fprintf(stderr, "[Model] %s: %d optional ref(s) missing\n",
+                rel.c_str(), missing_opt);
+
+    ModelEntry e;
+    e.json = json_path.filename().string();
+    e.name = e.json.substr(0, e.json.size() - 12);
+    e.dir = model_dir.generic_string();
+    e.key = key;  // 与 PC 同键，后续轮询/重启直接命中本地
+    e.builtin = false;
+    return e;
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // 崩溃诊断：未处理异常时打印出错地址与所在模块（区分自身 bug / 驱动崩溃）
@@ -327,6 +441,9 @@ int main() {
     std::string device_mode = "frame";
     // 时钟颜色主题（PC 菜单下发；断连保持最近值）
     std::string clock_color = "amber";
+    // 屏幕亮度（PC 菜单"设备→亮度"下发，10-100）：有 sysfs 背光写背光，
+    // 否则渲染层整屏压暗（renderDim）
+    int device_brightness = 100;
     // 提示音边沿检测基准（首帧仅记录不发声，避免开机误报）
     std::string snd_prev_overall;
     bool snd_prev_confirm = false;
@@ -766,6 +883,15 @@ int main() {
                 cfg.clock_color = color;
                 UserConfigStore::saveClockColor(color);
                 // 立即生效（设备端下一次 /api/status 轮询 ≤2s 收到）
+            }
+        }
+        // ---- 硬件显示端亮度（菜单"设备→亮度"五档）----
+        else if (id.rfind("device-brightness:", 0) == 0) {
+            const int v = atoi(id.c_str() + 18);
+            if (v >= 10 && v <= 100) {
+                cfg.device_brightness = v;
+                UserConfigStore::saveDeviceBrightness(v);
+                // 设备端下一次 /api/status 轮询 ≤2s 收到
             }
         }
         // ---- 同步最新程序到设备（菜单「同步程序到设备」）----
@@ -1241,10 +1367,32 @@ int main() {
             // 布局模式同步（single/multi/frame；断连后保持最近值）
             if (!current_status.device_mode.empty() &&
                 current_status.device_mode != device_mode) {
+                const std::string prev_mode = device_mode;
                 device_mode = current_status.device_mode;
                 printf("[Mode] device mode -> %s\n", device_mode.c_str());
                 if (device_mode == "frame") {
                     frame_timer = 0.f;  // 进入相框模式立即从头轮播
+                    frame_sig.clear();  // 强制下次轮播段重建并从头播放
+                } else if (prev_mode == "frame") {
+                    // 离开相框模式：相框期间状态机持续推进但动作被丢弃，
+                    // onStatus 已无切换输出 → 按当前状态强制重放动作恢复联动
+                    const auto [g, i] = state_machine.currentMotion();
+                    if (!g.empty()) {
+                        printf("[State] resume from frame -> %s[%d]\n",
+                               g.c_str(), i);
+                        if (using_gif) {
+                            if (gif_char) {
+                                const std::string f = gifFileFor(*gif_char, g);
+                                if (!f.empty())
+                                    gif.load(UserConfigStore::animationsDir() +
+                                             "/" + f);
+                            }
+                        } else {
+                            renderer.setLoopMotion(g, i);
+                            dev_motion_group = g;
+                            dev_motion_idx = i;
+                        }
+                    }
                 }
             }
             // 时钟颜色同步（amber/ice/white/green/pink；断连后保持最近值）
@@ -1253,6 +1401,34 @@ int main() {
                 clock_color = current_status.clock_color;
                 task_panel.setClockColor(clock_color);
                 printf("[Mode] clock color -> %s\n", clock_color.c_str());
+            }
+            // 亮度同步（10-100）：优先写 sysfs 背光；当前屏无背光接口，
+            // 由渲染循环末尾 renderDim 整屏压暗实现
+            if (current_status.device_brightness > 0 &&
+                current_status.device_brightness != device_brightness) {
+                device_brightness = current_status.device_brightness;
+                bool wrote_backlight = false;
+                std::error_code bec;
+                for (auto& e :
+                     std::filesystem::directory_iterator("/sys/class/backlight",
+                                                         bec)) {
+                    int max_b = 0;
+                    FILE* mf = fopen((e.path() / "max_brightness").c_str(), "r");
+                    if (mf) {
+                        if (fscanf(mf, "%d", &max_b) != 1) max_b = 0;
+                        fclose(mf);
+                    }
+                    FILE* f = fopen((e.path() / "brightness").c_str(), "w");
+                    if (!f || max_b <= 0) {
+                        if (f) fclose(f);
+                        continue;
+                    }
+                    fprintf(f, "%d", device_brightness * max_b / 100);
+                    fclose(f);
+                    wrote_backlight = true;
+                }
+                printf("[Mode] brightness -> %d (%s)\n", device_brightness,
+                       wrote_backlight ? "backlight" : "software dim");
             }
             // 事件提示音：提醒（待确认）播 3 次，开始/结束各 1 次；边沿触发
             if (snd_seen) {
@@ -1333,7 +1509,31 @@ int main() {
                             }
                         }
                     } else {
-                        // 目标是 Live2D 模型
+                        // 目标是 Live2D 模型；用户模型（PC HTTP 键）本地
+                        // 没有时先从 PC 同步整套模型文件到 ~/.dutyon/live2d/
+                        bool known = false;
+                        for (const auto& e : model_entries)
+                            if (e.key == ac) { known = true; break; }
+                        if (!known && ac.rfind("http://", 0) == 0) {
+                            // 失败节流：同一键 10s 内不重复整套拉取
+                            //（下载阻塞渲染线程，文件多时卡顿明显）
+                            static std::string dl_fail_key;
+                            static auto dl_fail_at = Clock::now();
+                            const bool throttled =
+                                ac == dl_fail_key &&
+                                Clock::now() - dl_fail_at <
+                                    std::chrono::seconds(10);
+                            if (!throttled) {
+                                if (auto e = fetchUserModelFromPC(api, ac)) {
+                                    model_entries.push_back(std::move(*e));
+                                    printf("[Model] synced from PC: %s\n",
+                                           ac.c_str());
+                                } else {
+                                    dl_fail_key = ac;
+                                    dl_fail_at = Clock::now();
+                                }
+                            }
+                        }
                         for (const auto& e : model_entries) {
                             if (e.key != ac) continue;
                             if (renderer.loadModelFile(e.dir, e.json)) {
@@ -1352,9 +1552,20 @@ int main() {
                             break;
                         }
                     }
-                    if (!switched)
-                        fprintf(stderr, "[Char] sync from PC failed: %s\n",
-                                ac.c_str());
+                    if (!switched) {
+                        // 失败日志 10s 节流（下载尝试本身已有 10s 节流，
+                        // 这里避免节流等待期每 0.5s 轮询都刷一条）
+                        static std::string last_fail_key;
+                        static auto last_fail_at = Clock::now();
+                        if (ac != last_fail_key ||
+                            Clock::now() - last_fail_at >=
+                                std::chrono::seconds(10)) {
+                            last_fail_key = ac;
+                            last_fail_at = Clock::now();
+                            fprintf(stderr, "[Char] sync from PC failed: %s\n",
+                                    ac.c_str());
+                        }
+                    }
                 }
             }
 #endif
@@ -1573,7 +1784,7 @@ int main() {
 #ifdef _WIN32
             // 硬件显示端状态（菜单"设备模式"分组显示/隐藏 + 当前模式勾选）
             ui.setDeviceStatus(backend.deviceOnline(), cfg.device_mode,
-                               cfg.clock_color);
+                               cfg.clock_color, cfg.device_brightness);
             ui.beginFrame();
             ui.renderStatus(current_status);
             if (!mini_mode && has_metrics) ui.renderMetrics(current_metrics);
@@ -1643,6 +1854,8 @@ int main() {
             }
             // 右上角 USB 连接状态小插头：绿=已连 PC，红=未连接
             task_panel.renderUsbStatus(usb_connected, WIN_W, kDisplayHeight);
+            // 软件亮度：整屏压暗叠层（brightness<100 时生效）
+            task_panel.renderDim(device_brightness, WIN_W, kDisplayHeight);
 #endif
         }
 

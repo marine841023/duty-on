@@ -294,14 +294,16 @@ float TaskPanel::heightForSessions(int session_count) {
 }
 
 void TaskPanel::setClockColor(const std::string& name) {
-    // glow 略暗于 body，保持柔光在主体外围的层次；未知名字回退 amber
+    // glow 略暗于 body，保持柔光在主体外围的层次；未知名字回退 amber。
+    // 基础色整体偏亮一档（+15% 向白）：100% 亮度下文字更醒目，
+    // 夜间场景交给亮度调节（渲染层压暗）覆盖，动态范围更大
     struct Preset { const char* name; float gr, gg, gb, br, bg, bb; };
     static const Preset kPresets[] = {
-        {"amber", 0.72f, 0.48f, 0.16f, 0.80f, 0.55f, 0.20f},  // 琥珀橙(默认)
-        {"ice",   0.35f, 0.55f, 0.70f, 0.45f, 0.68f, 0.82f},  // 冰晶蓝
-        {"white", 0.60f, 0.55f, 0.45f, 0.78f, 0.74f, 0.66f},  // 暖白
-        {"green", 0.28f, 0.58f, 0.30f, 0.38f, 0.72f, 0.40f},  // 翠竹绿
-        {"pink",  0.66f, 0.38f, 0.56f, 0.78f, 0.48f, 0.68f},  // 樱花粉
+        {"amber", 0.76f, 0.56f, 0.29f, 0.83f, 0.62f, 0.32f},  // 琥珀橙(默认)
+        {"ice",   0.45f, 0.62f, 0.74f, 0.53f, 0.73f, 0.85f},  // 冰晶蓝
+        {"white", 0.66f, 0.62f, 0.53f, 0.81f, 0.78f, 0.71f},  // 暖白
+        {"green", 0.39f, 0.64f, 0.41f, 0.47f, 0.76f, 0.49f},  // 翠竹绿
+        {"pink",  0.71f, 0.47f, 0.63f, 0.81f, 0.56f, 0.73f},  // 樱花粉
     };
     const Preset* p = &kPresets[0];
     for (const auto& k : kPresets)
@@ -347,7 +349,7 @@ void TaskPanel::render(const PetStatus& status, int screen_w, int screen_h,
             const float lh = p->text.lineHeight(kNameSize);
             const float cy = (block_top + block_bottom) * 0.5f;
             p->text.draw(empty, (x0 + x1) * 0.5f - w * 0.5f, cy + lh * 0.5f,
-                         kNameSize, 0.55f, 0.58f, 0.65f, 1.0f,
+                         kNameSize, 0.62f, 0.64f, 0.70f, 1.0f,
                          screen_w, screen_h);
         }
         return;
@@ -511,6 +513,15 @@ float TaskPanel::clockLineHeight(float pixel_size) const {
 // 右上角 USB 状态插头（GL 原点左下，y 向上）：
 //   插脚x2 + 插头头(圆角) + 插头身 + 线缆。连接=绿色且线缆贴身；
 //   断开=红色且线缆与插头身之间留缝。所有模式都画（时钟居中，角上空闲）
+void TaskPanel::renderDim(int brightness, int screen_w, int screen_h) {
+    // 整屏叠黑色矩形压暗：alpha = 1 - 亮度/100（SRC_ALPHA 混合 =
+    // 各像素乘以亮度系数），100% 时直接跳过
+    if (brightness >= 100 || screen_w <= 0 || screen_h <= 0) return;
+    const int b = brightness < 10 ? 10 : brightness;
+    impl_->fillRect(0.f, 0.f, (float)screen_w, (float)screen_h, 0.f, 0.f, 0.f,
+                    1.0f - (float)b / 100.0f, screen_w, screen_h);
+}
+
 void TaskPanel::renderUsbStatus(bool connected, int screen_w, int screen_h) {
     auto* p = impl_;
     if (screen_w <= 0 || screen_h <= 0) return;

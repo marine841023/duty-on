@@ -42,6 +42,9 @@ struct PetStatus {
     // 时钟颜色主题（PC 菜单设定，config.json clockColor）：
     // amber=暗橙(默认)/ice=冰蓝/white=暖白/green=翠绿/pink=粉紫
     std::string clock_color;
+    // 屏幕亮度（10-100，PC 菜单"设备→亮度"设定）：设备端优先写 sysfs
+    // 背光，无背光接口时以渲染层整屏压暗实现
+    int device_brightness = 100;
     // PC 时间（设备无 RTC/NTP 不可信，时钟跟随 PC）：epoch 秒 + PC 本地
     // 时区偏移分钟；设备端取到后用 steady_clock 自行推进直到下次轮询覆盖
     double server_time = 0;
@@ -114,6 +117,12 @@ public:
     // 下载自定义形象动画文件（/api/animations/<file>）到 save_path。
     // GIF 数 MB 走 USB 直连约 1s；调用方应避免每帧触发
     bool downloadAnimation(const std::string& file_name, const std::string& save_path);
+
+    // 下载用户 Live2D 模型文件（GET /live2d/<rel>，rel 相对 PC 端
+    // ~/.dutyon/live2d/，可含子目录）到 save_path。路径按段百分号编码，
+    // 支持中文/空格目录名；model3.json 引用文件由调用方解析后逐个拉取
+    bool downloadLive2dFile(const std::string& rel_path,
+                            const std::string& save_path);
 
 private:
     struct Impl;

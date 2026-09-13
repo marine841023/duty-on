@@ -46,6 +46,11 @@ public:
     // 未连接=红色插头与线缆之间留缝（断开态）。纯色几何绘制，无贴图依赖
     void renderUsbStatus(bool connected, int screen_w, int screen_h);
 
+    // 全屏压暗叠层（软件亮度）：brightness 10-100，>=100 不画。
+    // 当前屏无 /sys/class/backlight 内核接口时的亮度实现；
+    // 有背光 sysfs 的量产屏由 main 优先写背光，此叠层不生效
+    void renderDim(int brightness, int screen_w, int screen_h);
+
     // 时钟字体行高（用于日期行垂直定位；卡通字体加载失败回退主字体行高）
     float clockLineHeight(float pixel_size) const;
 

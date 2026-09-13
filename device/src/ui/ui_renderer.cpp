@@ -630,6 +630,7 @@ enum MenuView {
     kMenuSettings,
     kMenuLanguage,
     kMenuVisibility,
+    kMenuDevice,      // 设备子页：模式/时钟颜色/亮度/同步程序
     kMenuCharManage,  // 自定义角色管理列表
     kMenuCharEdit,    // 单个自定义角色的状态动画编辑
 };
@@ -2312,51 +2313,13 @@ void UIRenderer::renderMenu() {
             if (p->MenuRow("lang", I18n::t("menu.language"), false, false,
                         nullptr, true).clicked)
                 go(kMenuLanguage);
-            // ---- 硬件显示端（USB 连接后显示模式选择）----
+            // ---- 硬件显示端：全部设备功能收进"设备"子页 ----
             p->MenuDivider();
-            if (device_online_) {
-                p->MenuLabel(I18n::t("menu.deviceOnline"));
-                if (p->MenuRow("dmode-single", I18n::t("menu.modeSingle"),
-                            device_mode_ == "single", false, nullptr,
-                            false).clicked)
-                    activate("device-mode:single");
-                if (p->MenuRow("dmode-multi", I18n::t("menu.modeMulti"),
-                            device_mode_ == "multi", false, nullptr,
-                            false).clicked)
-                    activate("device-mode:multi");
-                if (p->MenuRow("dmode-frame", I18n::t("menu.modeFrame"),
-                            device_mode_ == "frame", false, nullptr,
-                            false).clicked)
-                    activate("device-mode:frame");
-                // 时钟颜色（五选一，config.json clockColor 经 /api/status 下发）
-                p->MenuLabel(I18n::t("menu.clockColor"));
-                if (p->MenuRow("dcolor-amber", I18n::t("menu.colorAmber"),
-                            clock_color_ == "amber", false, nullptr,
-                            false).clicked)
-                    activate("clock-color:amber");
-                if (p->MenuRow("dcolor-ice", I18n::t("menu.colorIce"),
-                            clock_color_ == "ice", false, nullptr,
-                            false).clicked)
-                    activate("clock-color:ice");
-                if (p->MenuRow("dcolor-white", I18n::t("menu.colorWhite"),
-                            clock_color_ == "white", false, nullptr,
-                            false).clicked)
-                    activate("clock-color:white");
-                if (p->MenuRow("dcolor-green", I18n::t("menu.colorGreen"),
-                            clock_color_ == "green", false, nullptr,
-                            false).clicked)
-                    activate("clock-color:green");
-                if (p->MenuRow("dcolor-pink", I18n::t("menu.colorPink"),
-                            clock_color_ == "pink", false, nullptr,
-                            false).clicked)
-                    activate("clock-color:pink");
-                // 推送本机仓库最新源码到设备：设备端增量编译并覆盖部署
-                if (p->MenuRow("device-sync", I18n::t("menu.syncDevice"),
-                            false, false, nullptr, false).clicked)
-                    activate("device-sync");
-            } else {
-                p->MenuLabel(I18n::t("menu.deviceOffline"));
-            }
+            if (p->MenuRow("device", I18n::t("menu.device"), false, false,
+                        device_online_ ? I18n::t("menu.deviceOnline")
+                                       : I18n::t("menu.deviceOffline"),
+                        true).clicked)
+                go(kMenuDevice);
             p->MenuDivider();
             if (p->MenuRow("install", I18n::t("menu.installHooks"), false, false,
                         nullptr, false).clicked) {
@@ -2374,6 +2337,69 @@ void UIRenderer::renderMenu() {
                 activate("quit");
                 closeMenu();
             }
+            break;
+        }
+        case kMenuDevice: {
+            // ==== 设备子页：模式 / 时钟颜色 / 亮度 / 同步程序 ====
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                        nullptr, false).clicked)
+                go(kMenuMain);
+            if (!device_online_) {
+                p->MenuLabel(I18n::t("menu.deviceOffline"));
+                break;
+            }
+            // 模式（三选一，config.json deviceMode 经 /api/status 下发）
+            if (p->MenuRow("dmode-single", I18n::t("menu.modeSingle"),
+                        device_mode_ == "single", false, nullptr,
+                        false).clicked)
+                activate("device-mode:single");
+            if (p->MenuRow("dmode-multi", I18n::t("menu.modeMulti"),
+                        device_mode_ == "multi", false, nullptr,
+                        false).clicked)
+                activate("device-mode:multi");
+            if (p->MenuRow("dmode-frame", I18n::t("menu.modeFrame"),
+                        device_mode_ == "frame", false, nullptr,
+                        false).clicked)
+                activate("device-mode:frame");
+            // 时钟颜色（五选一，config.json clockColor 经 /api/status 下发）
+            p->MenuLabel(I18n::t("menu.clockColor"));
+            if (p->MenuRow("dcolor-amber", I18n::t("menu.colorAmber"),
+                        clock_color_ == "amber", false, nullptr,
+                        false).clicked)
+                activate("clock-color:amber");
+            if (p->MenuRow("dcolor-ice", I18n::t("menu.colorIce"),
+                        clock_color_ == "ice", false, nullptr,
+                        false).clicked)
+                activate("clock-color:ice");
+            if (p->MenuRow("dcolor-white", I18n::t("menu.colorWhite"),
+                        clock_color_ == "white", false, nullptr,
+                        false).clicked)
+                activate("clock-color:white");
+            if (p->MenuRow("dcolor-green", I18n::t("menu.colorGreen"),
+                        clock_color_ == "green", false, nullptr,
+                        false).clicked)
+                activate("clock-color:green");
+            if (p->MenuRow("dcolor-pink", I18n::t("menu.colorPink"),
+                        clock_color_ == "pink", false, nullptr,
+                        false).clicked)
+                activate("clock-color:pink");
+            // 亮度（五档；设备端有 sysfs 背光则写背光，否则渲染层压暗）
+            p->MenuLabel(I18n::t("menu.brightness"));
+            for (int v : {30, 50, 70, 85, 100}) {
+                const std::string row_id = "dbr-" + std::to_string(v);
+                const std::string act_id =
+                    "device-brightness:" + std::to_string(v);
+                if (p->MenuRow(row_id.c_str(),
+                            (std::to_string(v) + "%").c_str(),
+                            device_brightness_ == v, false, nullptr,
+                            false).clicked)
+                    activate(act_id);
+            }
+            p->MenuDivider();
+            // 推送本机仓库最新源码到设备：设备端增量编译并覆盖部署
+            if (p->MenuRow("device-sync", I18n::t("menu.syncDevice"),
+                        false, false, nullptr, false).clicked)
+                activate("device-sync");
             break;
         }
         case kMenuModels: {

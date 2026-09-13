@@ -28,6 +28,7 @@ static std::optional<PetStatus> FetchStatus(cpr::Session& session) {
         s.active_character = j.value("activeCharacter", std::string{});
         s.device_mode = j.value("deviceMode", "multi");
         s.clock_color = j.value("clockColor", "amber");
+        s.device_brightness = j.value("deviceBrightness", 100);
         s.server_time = j.value("serverTime", 0.0);
         s.utc_offset_min = j.value("utcOffset", 0);
 
@@ -321,6 +322,49 @@ bool ApiClient::downloadAnimation(const std::string& file_name,
     if (base.empty() || file_name.empty() || save_path.empty()) return false;
     try {
         auto r = cpr::Get(cpr::Url{base + "/api/animations/" + file_name},
+                          cpr::ConnectTimeout{2000}, cpr::Timeout{30000},
+                          cpr::Proxies{{"http", ""}, {"https", ""}});
+        if (r.status_code != 200 || r.text.empty()) return false;
+        std::error_code ec;
+        std::filesystem::create_directories(
+            std::filesystem::path(save_path).parent_path(), ec);
+        std::ofstream out(save_path, std::ios::binary);
+        if (!out) return false;
+        out.write(r.text.data(), (std::streamsize)r.text.size());
+        return out.good();
+    } catch (...) {
+        return false;
+    }
+}
+
+// URL 路径逐字节百分号编码（'/' 分段保留；中文/空格目录名必须编码，
+// 否则请求行非法。PC 端 httplib 路由前 decode_url 还原）
+static std::string UrlEncodePath(const std::string& path) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(path.size());
+    for (const unsigned char c : path) {
+        const bool unreserved =
+            (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
+            c == '~';
+        if (unreserved || c == '/') {
+            out += (char)c;
+        } else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 0xF];
+        }
+    }
+    return out;
+}
+
+bool ApiClient::downloadLive2dFile(const std::string& rel_path,
+                                   const std::string& save_path) {
+    const std::string base = impl_->snapshotUrl();
+    if (base.empty() || rel_path.empty() || save_path.empty()) return false;
+    try {
+        auto r = cpr::Get(cpr::Url{base + "/live2d/" + UrlEncodePath(rel_path)},
                           cpr::ConnectTimeout{2000}, cpr::Timeout{30000},
                           cpr::Proxies{{"http", ""}, {"https", ""}});
         if (r.status_code != 200 || r.text.empty()) return false;

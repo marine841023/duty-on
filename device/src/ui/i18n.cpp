@@ -52,6 +52,8 @@ static const Entry kEntries[] = {
     {"menu.modeMulti",     "多任务模式",  "多任務模式",  "Multi Task",              "マルチタスク",  "다중 작업", "Multi-tâches",             "Mehrfachaufgabe",   "Multitarea"},
     {"menu.modeFrame",     "电子相框模式", "電子相框模式", "Photo Frame",            "フォトフレーム","포토 프레임","Cadre photo",            "Fotorahmen",        "Marco digital"},
     {"menu.clockColor",    "时钟颜色",    "時鐘顏色",    "Clock Color",             "時計の色",    "시계 색상", "Couleur de l'horloge",    "Uhrenfarbe",        "Color del reloj"},
+    {"menu.device",        "设备",        "設備",        "Device",                  "デバイス",    "장치",      "Appareil",                "Gerät",             "Dispositivo"},
+    {"menu.brightness",    "亮度",        "亮度",        "Brightness",              "明るさ",      "밝기",      "Luminosité",              "Helligkeit",        "Brillo"},
     {"menu.colorAmber",    "琥珀橙",      "琥珀橙",      "Amber",                   "アンバー",    "앰버",     "Ambre",                    "Bernstein",         "Ámbar"},
     {"menu.colorIce",      "冰晶蓝",      "冰晶藍",      "Ice Blue",                "アイスブルー","아이스 블루","Bleu glace",             "Eisblau",           "Azul hielo"},
     {"menu.colorWhite",    "暖白",        "暖白",        "Warm White",              "ウォームホワイト","웜 화이트","Blanc chaud",            "Warmweiß",          "Blanco cálido"},

@@ -117,6 +117,9 @@ UserConfig UserConfigStore::load() {
         cfg.device_mode = j["deviceMode"].get<std::string>();
     if (j.contains("clockColor") && j["clockColor"].is_string())
         cfg.clock_color = j["clockColor"].get<std::string>();
+    if (j.contains("deviceBrightness") && j["deviceBrightness"].is_number())
+        cfg.device_brightness =
+            std::clamp(j["deviceBrightness"].get<int>(), 10, 100);
     if (j.contains("deviceRepo") && j["deviceRepo"].is_string())
         cfg.device_repo = j["deviceRepo"].get<std::string>();
     if (j.contains("stateMotions") && j["stateMotions"].is_object()) {
@@ -224,6 +227,11 @@ void UserConfigStore::saveDeviceMode(const std::string& mode) {
 void UserConfigStore::saveClockColor(const std::string& color) {
     // 时钟颜色（amber/ice/white/green/pink）；同上经 /api/status 下发
     updateConfig([&](json& j) { j["clockColor"] = color; });
+}
+
+void UserConfigStore::saveDeviceBrightness(int v) {
+    // 屏幕亮度（10-100）；同上经 /api/status 下发
+    updateConfig([&](json& j) { j["deviceBrightness"] = v; });
 }
 
 void UserConfigStore::saveCustomCharacters(const UserConfig& cfg) {
