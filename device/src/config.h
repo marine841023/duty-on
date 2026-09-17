@@ -16,6 +16,10 @@ constexpr const char* kPromptBannerPath = "/opt/dutyon/assets/prompt-usb.png";
 // 任务列表文字字体（Noto Sans SC Regular，OFL 开源；随部署包放到 assets）
 constexpr const char* kFontPath = "/opt/dutyon/assets/font-noto-sc.otf";
 
+// 事件提示音目录（wav：48kHz stereo，内容按 24kHz 生成以补偿 H616 codec
+// 在当前内核下 LRCK 只有标称一半的问题）。文件缺失时回退到正弦波合成。
+constexpr const char* kSoundDir = "/opt/dutyon/assets/sounds/";
+
 // 轮询间隔（毫秒）
 constexpr int kPollIntervalMs = 500;
 

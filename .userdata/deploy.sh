@@ -14,5 +14,9 @@ cp -r $SRC/frontend/assets/live2d $DST/assets/live2d
 cp $SRC/frontend/assets/device/prompt-usb.png $DST/assets/prompt-usb.png
 # 任务列表文字字体（见 config.h kFontPath）
 cp $SRC/frontend/assets/device/font-noto-sc.otf $DST/assets/font-noto-sc.otf
+# 事件提示音（见 config.h kSoundDir；缺失时 sound_player 自动回退正弦波合成）
+rm -rf $DST/assets/sounds
+cp -r $SRC/frontend/assets/device/sounds $DST/assets/sounds
 ls -la $DST; ls $DST/FrameworkShaders | head -3; ls $DST/assets/live2d | head -5
+ls -la $DST/assets/sounds
 echo "== DEPLOY DONE =="

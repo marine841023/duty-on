@@ -11,15 +11,17 @@ P=/opt/dutyon-src
 B="${DUTYON_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 SP="sshpass -p $DUTYON_DEVICE_PASS scp -o StrictHostKeyChecking=no"
 
-sshpass -p "$DUTYON_DEVICE_PASS" ssh -o StrictHostKeyChecking=no $D "mkdir -p $P/device/src/net $P/device/src/ui $P/frontend/assets/device"
+sshpass -p "$DUTYON_DEVICE_PASS" ssh -o StrictHostKeyChecking=no $D "mkdir -p $P/device/src/audio $P/device/src/net $P/device/src/ui $P/frontend/assets/device/sounds"
 
 $SP $B/device/CMakeLists.txt $D:$P/device/
 $SP $B/device/src/config.h $B/device/src/main.cpp $D:$P/device/src/
 $SP $B/device/src/api/client.h $B/device/src/api/client.cpp $D:$P/device/src/api/
+$SP $B/device/src/audio/sound_player.h $B/device/src/audio/sound_player.cpp $D:$P/device/src/audio/
 $SP $B/device/src/net/usb_link.h $B/device/src/net/usb_link.cpp $D:$P/device/src/net/
 $SP $B/device/src/render/prompt_banner.h $B/device/src/render/prompt_banner.cpp $B/device/src/render/text_renderer.h $B/device/src/render/text_renderer.cpp $D:$P/device/src/render/
 $SP $B/device/src/ui/task_panel.h $B/device/src/ui/task_panel.cpp $D:$P/device/src/ui/
 $SP $B/frontend/assets/device/prompt-usb.png $B/frontend/assets/device/font-noto-sc.otf $D:$P/frontend/assets/device/
+$SP $B/frontend/assets/device/sounds/*.wav $D:$P/frontend/assets/device/sounds/
 
 $SP $B/.userdata/build-device.sh $D:/tmp/
 sshpass -p "$DUTYON_DEVICE_PASS" ssh -o StrictHostKeyChecking=no $D 'bash /tmp/build-device.sh'

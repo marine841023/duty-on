@@ -32,6 +32,10 @@ imgui.ini
 .userdata/deploy.env
 .userdata/*.bmp
 .userdata/*.png
+# 会话临时探针/调试脚本（约定 `_` 前缀），不入库以防误提交凭据
+.userdata/_*
+# gen_voice_prompts.py 的生成产物目录；入库的正式副本在 frontend/assets/device/sounds/
+.userdata/sounds/
 
 # 2.0 packaging toolchain & output (NSIS portable auto-downloaded)
 tools/nsis/

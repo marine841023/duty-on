@@ -6,3 +6,8 @@
 *.env text eol=lf
 *.env.example text eol=lf
 .gitattributes text eol=lf
+
+# 二进制资源：显式声明，禁止任何行尾/编码转换（开发机 core.autocrlf=true）
+*.wav binary
+*.png binary
+*.otf binary
