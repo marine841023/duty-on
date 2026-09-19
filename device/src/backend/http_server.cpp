@@ -372,6 +372,27 @@ void HttpServer::registerRoutes() {
             j["deviceMode"] = cfg.value("deviceMode", "multi");
             j["clockColor"] = cfg.value("clockColor", "amber");
             j["deviceBrightness"] = cfg.value("deviceBrightness", 100);
+            // 状态音频（设备端状态切换时播放）：activeAudio = 当前角色
+            // {状态: 文件名}；soundMute = 完全静音；soundMutedStates =
+            // 当前角色被单独静音的状态列表（后端按 activeCharacterId 算好）
+            j["soundMute"] = cfg.value("soundMute", false);
+            const std::string akey = cfg.value("activeCharacterId", std::string{});
+            json audio = json::object();
+            if (auto sa = cfg.find("stateAudio");
+                sa != cfg.end() && sa->is_object()) {
+                if (auto it = sa->find(akey); it != sa->end() && it->is_object())
+                    audio = *it;
+            }
+            j["activeAudio"] = std::move(audio);
+            json muted = json::array();
+            if (auto sam = cfg.find("stateAudioMuted");
+                sam != cfg.end() && sam->is_object()) {
+                for (auto it = sam->begin(); it != sam->end(); ++it)
+                    if (it.value().is_boolean() && it.value().get<bool>() &&
+                        it.key().rfind(akey + ":", 0) == 0)
+                        muted.push_back(it.key().substr(akey.size() + 1));
+            }
+            j["soundMutedStates"] = std::move(muted);
         }
         // PC 时间（设备无 RTC/网络不可信，时钟跟随 PC）：epoch 秒 +
         // 本地时区偏移分钟（东八区=480），设备端 steady_clock 自行推进

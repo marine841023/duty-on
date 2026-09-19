@@ -684,6 +684,11 @@ int main() {
         if (id == "mini") return mini_mode;
         if (id == "autostart") return autostart_cache == 1;
         if (id.rfind("lang:", 0) == 0) return id.substr(5) == I18n::lang();
+        // 设备声音管理：完全静音 / 按状态静音（键=当前活动角色）
+        if (id == "sound-mute") return cfg.sound_mute;
+        if (id.rfind("sound-muted:", 0) == 0)
+            return cfg.state_audio_muted[cfg.active_character_id + ":" +
+                                         id.substr(12)];
         return false;
     };
 
@@ -709,6 +714,26 @@ int main() {
             for (const auto& c : cfg.custom_characters)
                 if (c.id == cid) return gifFileFor(c, state);
             return {};
+        }
+        // charaudio:<charid>:<state> —— 角色编辑页当前绑定的音频文件名
+        if (id.rfind("charaudio:", 0) == 0) {
+            const size_t p1 = id.find(':', 10);
+            if (p1 == std::string::npos) return {};
+            const std::string cid = id.substr(10, p1 - 10);
+            const std::string state = id.substr(p1 + 1);
+            auto it = cfg.state_audio.find(cid);
+            if (it == cfg.state_audio.end()) return {};
+            auto f = it->second.find(state);
+            return f == it->second.end() ? std::string() : f->second;
+        }
+        // stateaudio:<state> —— 当前活动角色绑定的音频文件名
+        //（动作设定页 / 声音管理页；键可能是含冒号的模型 URL，
+        //  故 action/hint 均不内嵌 key，处理时取 active_character_id）
+        if (id.rfind("stateaudio:", 0) == 0) {
+            auto it = cfg.state_audio.find(cfg.active_character_id);
+            if (it == cfg.state_audio.end()) return {};
+            auto f = it->second.find(id.substr(11));
+            return f == it->second.end() ? std::string() : f->second;
         }
         return {};
     };
@@ -831,6 +856,79 @@ int main() {
             fs::remove(fs::path(UserConfigStore::animationsDir()) / slot, ec2);
         }
         slot = fname;
+        return true;
+    };
+
+    // 状态音频文件选择器（设备端状态切换提示音；格式 wav/mp3/ogg/flac/m4a）
+    auto pick_audio_file = [&]() -> std::string {
+        wchar_t buf[MAX_PATH] = L"";
+        OPENFILENAMEW ofn{};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = pet_hwnd;
+        ofn.lpstrFilter =
+            L"音频 (*.wav;*.mp3;*.ogg;*.flac;*.m4a)\0*.wav;*.mp3;*.ogg;*.flac;*.m4a\0";
+        ofn.lpstrFile = buf;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.lpstrTitle = L"选择状态音频文件";
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (!GetOpenFileNameW(&ofn)) return {};  // 取消/失败同按空处理
+        const int len = WideCharToMultiByte(CP_UTF8, 0, buf, -1, nullptr, 0,
+                                            nullptr, nullptr);
+        if (len <= 1) return {};
+        std::string out((size_t)len - 1, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, buf, -1, out.data(), len, nullptr,
+                            nullptr);
+        return out;
+    };
+
+    // 把选中的音频复制进 ~/.dutyon/animations/ 并绑定到状态
+    //（key = 角色 id 或模型 URL）。文件名 = audio_<key安全化>_<状态>_<ms>.ext：
+    // 替换后文件名必变，设备端按文件名比对自动重下；旧文件随之删除。
+    auto install_audio_file = [&](const std::string& key,
+                                  const std::string& state,
+                                  const std::string& src) -> bool {
+        namespace fs = std::filesystem;
+        std::string ext = fs::path(src).extension().string();
+        for (auto& ch : ext) ch = (char)tolower((unsigned char)ch);
+        if (ext != ".wav" && ext != ".mp3" && ext != ".ogg" &&
+            ext != ".flac" && ext != ".m4a") {
+            MessageBoxW(pet_hwnd,
+                        L"仅支持 WAV / MP3 / OGG / FLAC / M4A 文件",
+                        L"Duty On", MB_OK | MB_ICONWARNING);
+            return false;
+        }
+        std::string safe;
+        for (const char ch : key)
+            safe += ((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') ||
+                     (ch >= 'A' && ch <= 'Z') || ch == '_')
+                        ? ch
+                        : '_';
+        const long long ms = std::chrono::duration_cast<
+            std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const std::string fname =
+            "audio_" + safe + "_" + state + "_" + std::to_string(ms) + ext;
+        const fs::path dst = fs::path(UserConfigStore::animationsDir()) / fname;
+        std::error_code ec;
+        fs::create_directories(dst.parent_path(), ec);
+        fs::copy_file(fs::path(src), dst,
+                      fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            MessageBoxW(pet_hwnd, L"文件复制失败，请重试", L"Duty On",
+                        MB_OK | MB_ICONWARNING);
+            return false;
+        }
+        auto kit = cfg.state_audio.find(key);
+        if (kit != cfg.state_audio.end()) {
+            auto fit = kit->second.find(state);
+            if (fit != kit->second.end() && fit->second != fname) {
+                std::error_code ec2;  // 旧文件删除失败不阻塞流程
+                fs::remove(fs::path(UserConfigStore::animationsDir()) /
+                               fit->second,
+                           ec2);
+            }
+        }
+        cfg.state_audio[key][state] = fname;
         return true;
     };
 #endif
@@ -1144,6 +1242,91 @@ int main() {
                 break;
             }
 #endif
+        }
+        // ---- 状态音频绑定：角色编辑页（charaudio:<id>:<state>）----
+        else if (id.rfind("charaudio:", 0) == 0 ||
+                 id.rfind("charaudioclear:", 0) == 0) {
+#ifdef _WIN32
+            const bool clear = id.rfind("charaudioclear:", 0) == 0;
+            const size_t off = clear ? 15 : 10;
+            const size_t p1 = id.find(':', off);
+            if (p1 != std::string::npos) {
+                const std::string cid = id.substr(off, p1 - off);
+                const std::string state = id.substr(p1 + 1);
+                for (const auto& c : cfg.custom_characters) {
+                    if (c.id != cid) continue;
+                    std::string fname;  // clear = 清除绑定并删文件
+                    if (!clear) {
+                        const std::string src = pick_audio_file();
+                        if (src.empty() ||
+                            !install_audio_file(cid, state, src))
+                            break;
+                        fname = cfg.state_audio[cid][state];
+                    } else {
+                        auto kit = cfg.state_audio.find(cid);
+                        if (kit != cfg.state_audio.end()) {
+                            auto fit = kit->second.find(state);
+                            if (fit != kit->second.end()) {
+                                std::error_code ec;
+                                std::filesystem::remove(
+                                    std::filesystem::path(
+                                        UserConfigStore::animationsDir()) /
+                                        fit->second,
+                                    ec);
+                            }
+                        }
+                    }
+                    UserConfigStore::saveStateAudio(cid, state, fname);
+                    break;
+                }
+            }
+#endif
+        }
+        // ---- 状态音频绑定：动作设定页（stateaudio:<state>；键=活动角色，
+        //      可能是含冒号的模型 URL，故不内嵌 key）----
+        else if (id.rfind("stateaudio:", 0) == 0 ||
+                 id.rfind("stateaudioclear:", 0) == 0) {
+            const bool clear = id.rfind("stateaudioclear:", 0) == 0;
+            const std::string state = id.substr(clear ? 16 : 11);
+            const std::string key = cfg.active_character_id;
+            if (!key.empty()) {
+#ifdef _WIN32
+                std::string fname;  // clear = 清除绑定并删文件
+                if (!clear) {
+                    const std::string src = pick_audio_file();
+                    if (!src.empty() && install_audio_file(key, state, src))
+                        fname = cfg.state_audio[key][state];
+                } else {
+                    auto kit = cfg.state_audio.find(key);
+                    if (kit != cfg.state_audio.end()) {
+                        auto fit = kit->second.find(state);
+                        if (fit != kit->second.end()) {
+                            std::error_code ec;
+                            std::filesystem::remove(
+                                std::filesystem::path(
+                                    UserConfigStore::animationsDir()) /
+                                    fit->second,
+                                ec);
+                        }
+                    }
+                }
+                if (clear || !fname.empty())
+                    UserConfigStore::saveStateAudio(key, state, fname);
+#endif
+            }
+        }
+        // ---- 设备声音管理：完全静音 / 按状态静音（经 /api/status 下发）----
+        else if (id == "sound-mute") {
+            cfg.sound_mute = !cfg.sound_mute;
+            UserConfigStore::saveSoundMute(cfg.sound_mute);
+        } else if (id.rfind("sound-mute-state:", 0) == 0) {
+            const std::string state = id.substr(17);
+            const std::string mk = cfg.active_character_id + ":" + state;
+            const bool muted = cfg.state_audio_muted.count(mk) != 0 &&
+                               cfg.state_audio_muted[mk];
+            cfg.state_audio_muted[mk] = !muted;
+            UserConfigStore::saveStateAudioMuted(cfg.active_character_id,
+                                                 state, !muted);
         } else if (id.rfind("motion:", 0) == 0 || id.rfind("preview:", 0) == 0) {
             // motion:<组>:<序号> 一次性播放；preview:<组>:<序号> 悬停预览
             const size_t off = id.find(':') + 1;
@@ -1430,16 +1613,29 @@ int main() {
                 printf("[Mode] brightness -> %d (%s)\n", device_brightness,
                        wrote_backlight ? "backlight" : "software dim");
             }
-            // 事件提示音：提醒（待确认）播 3 次，开始/结束各 1 次；边沿触发
+            // 事件提示音：提醒（待确认）播 3 次，开始/结束各 1 次；边沿触发。
+            // 对应状态绑定了自定义音频且未静音时，替代内置 beep
             if (snd_seen) {
+                // 状态音频就绪判定：未完全静音、该状态未被单独静音、有绑定
+                auto has_state_audio = [&](const std::string& st) {
+                    if (current_status.sound_mute) return false;
+                    for (const auto& m : current_status.sound_muted_states)
+                        if (m == st) return false;
+                    auto a = current_status.active_audio.find(st);
+                    return a != current_status.active_audio.end() &&
+                           !a->second.empty();
+                };
                 if (!snd_prev_confirm && current_status.has_confirmation)
                     sound_player.play(SoundPlayer::Event::Reminder);
                 if (snd_prev_overall != current_status.overall_state) {
-                    if (current_status.overall_state == "working")
-                        sound_player.play(SoundPlayer::Event::TaskStart);
-                    else if (snd_prev_overall == "working" &&
-                             current_status.overall_state == "sleeping")
-                        sound_player.play(SoundPlayer::Event::TaskEnd);
+                    if (current_status.overall_state == "working") {
+                        if (!has_state_audio("working"))
+                            sound_player.play(SoundPlayer::Event::TaskStart);
+                    } else if (snd_prev_overall == "working" &&
+                               current_status.overall_state == "sleeping") {
+                        if (!has_state_audio("sleeping"))
+                            sound_player.play(SoundPlayer::Event::TaskEnd);
+                    }
                 }
             }
             snd_prev_overall = current_status.overall_state;
@@ -1597,6 +1793,36 @@ int main() {
                         dev_motion_idx = idx;
 #endif
                     }
+#ifndef _WIN32
+                    // 状态音频：切换到的状态绑定了音频且未被静音 → 文件缺失
+                    // 时从 PC 补下（首次 ~1s），随后后台线程播放。相框模式
+                    // 不进入本分支（不响应任务状态，自然静音）
+                    if (!current_status.sound_mute) {
+                        bool st_muted = false;
+                        for (const auto& m : current_status.sound_muted_states)
+                            if (m == current_status.overall_state) {
+                                st_muted = true;
+                                break;
+                            }
+                        auto a = current_status.active_audio.find(
+                            current_status.overall_state);
+                        if (!st_muted && a != current_status.active_audio.end() &&
+                            !a->second.empty()) {
+                            const std::string dst =
+                                UserConfigStore::animationsDir() + "/" +
+                                a->second;
+                            std::error_code aec;
+                            if (!std::filesystem::exists(dst, aec) &&
+                                !api.downloadAnimation(a->second, dst)) {
+                                fprintf(stderr,
+                                        "[Sound] download %s failed\n",
+                                        a->second.c_str());
+                            } else {
+                                sound_player.playFile(dst);
+                            }
+                        }
+                    }
+#endif
                 }
             }
         }

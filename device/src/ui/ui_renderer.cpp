@@ -633,6 +633,7 @@ enum MenuView {
     kMenuDevice,      // 设备子页：模式/时钟颜色/亮度/同步程序
     kMenuCharManage,  // 自定义角色管理列表
     kMenuCharEdit,    // 单个自定义角色的状态动画编辑
+    kMenuSound,       // 设备声音管理：完全静音 / 按状态静音
 };
 
 struct UIRenderer::Impl {
@@ -2396,10 +2397,46 @@ void UIRenderer::renderMenu() {
                     activate(act_id);
             }
             p->MenuDivider();
+            // 声音管理（设备端状态音频播放与静音开关）
+            if (p->MenuRow("device-sound", I18n::t("menu.soundManage"),
+                        false, false, nullptr, true).clicked)
+                go(kMenuSound);
+            p->MenuDivider();
             // 推送本机仓库最新源码到设备：设备端增量编译并覆盖部署
             if (p->MenuRow("device-sync", I18n::t("menu.syncDevice"),
                         false, false, nullptr, false).clicked)
                 activate("device-sync");
+            break;
+        }
+        case kMenuSound: {
+            // ==== 设备声音管理：完全静音 + 当前角色按状态静音 ====
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                        nullptr, false).clicked)
+                go(kMenuDevice);
+            p->MenuLabel(I18n::t("menu.soundManage"));
+            if (p->MenuRow("snd-mute-all", I18n::t("menu.soundMuteAll"),
+                        checked("sound-mute"), false, nullptr,
+                        false).clicked)
+                activate("sound-mute");
+            p->MenuDivider();
+            // 只列出当前角色已绑定音频的状态（hint = 绑定的文件名）
+            static const char* kSndStates[3] = {"sleeping", "working", "alert"};
+            bool any_audio = false;
+            for (int i = 0; i < 3; i++) {
+                const std::string audio =
+                    hint_of(std::string("stateaudio:") + kSndStates[i]);
+                if (audio.empty()) continue;
+                any_audio = true;
+                const std::string rid = std::string("sndm-") + kSndStates[i];
+                const std::string cid = std::string("sound-muted:") + kSndStates[i];
+                if (p->MenuRow(rid.c_str(),
+                            I18n::t((std::string("settings.") + kSndStates[i])
+                                        .c_str()),
+                            checked(cid), false, audio.c_str(),
+                            false).clicked)
+                    activate("sound-mute-state:" + std::string(kSndStates[i]));
+            }
+            if (!any_audio) p->MenuLabel(I18n::t("menu.soundNoBinding"));
             break;
         }
         case kMenuModels: {
@@ -2488,6 +2525,20 @@ void UIRenderer::renderMenu() {
                             hint_of("charfile:" + p->edit_char + ":" + st).c_str()).clicked) {
                     activate("charset:" + p->edit_char + ":" + st);
                 }
+                // 状态音频绑定（点击选文件；已绑定时追加"清除音频"行）
+                const std::string audio =
+                    hint_of("charaudio:" + p->edit_char + ":" + st);
+                if (p->SettingsRow(("charaudio:" + st).c_str(),
+                            I18n::t("menu.audioBinding"),
+                            audio.c_str()).clicked) {
+                    activate("charaudio:" + p->edit_char + ":" + st);
+                }
+                if (!audio.empty() &&
+                    p->MenuRow(("charaudioclear:" + st).c_str(),
+                            I18n::t("menu.audioClear"), false, true, nullptr,
+                            false).clicked) {
+                    activate("charaudioclear:" + p->edit_char + ":" + st);
+                }
             }
             p->MenuDivider();
             if (p->MenuRow("chardelete", I18n::t("menu.deleteChar"), false,
@@ -2556,6 +2607,20 @@ void UIRenderer::renderMenu() {
                             hint_of(std::string("assign:") + kStates[i]).c_str()).clicked) {
                     p->assign_state = kStates[i];
                     go(kMenuMotionAssign);
+                }
+                // 状态音频绑定（键=当前活动角色；点击选文件，已绑定可清除）
+                const std::string audio =
+                    hint_of(std::string("stateaudio:") + kStates[i]);
+                if (p->SettingsRow(("stateaudio:" + std::string(kStates[i])).c_str(),
+                            I18n::t("menu.audioBinding"),
+                            audio.c_str()).clicked) {
+                    activate("stateaudio:" + std::string(kStates[i]));
+                }
+                if (!audio.empty() &&
+                    p->MenuRow(("stateaudioclear:" + std::string(kStates[i])).c_str(),
+                            I18n::t("menu.audioClear"), false, true, nullptr,
+                            false).clicked) {
+                    activate("stateaudioclear:" + std::string(kStates[i]));
                 }
             }
             p->MenuDivider();

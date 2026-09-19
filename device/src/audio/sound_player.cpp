@@ -4,12 +4,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -93,8 +95,10 @@ std::vector<int16_t> buildReminder() {
     return b;
 }
 
-// ---- wav 读取：只接受 16bit PCM 且格式与流一致，否则返回空由调用方兜底 -----
-std::vector<int16_t> loadWav(const std::string& path) {
+// ---- wav 读取：只接受 16bit PCM（任意采样率/声道数）。成功返回 interleaved
+// 样本并写回 rate/ch；非 wav 或压缩格式返回空由调用方处理 --------------------
+std::vector<int16_t> loadWavRaw(const std::string& path, uint32_t* out_rate,
+                                uint16_t* out_ch) {
     std::vector<int16_t> out;
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) return out;
@@ -133,13 +137,6 @@ std::vector<int16_t> loadWav(const std::string& path) {
             ch = nch;
             got_fmt = true;
         } else if (memcmp(id, "data", 4) == 0 && got_fmt) {
-            if (rate != (uint32_t)kStreamRate || ch != (uint16_t)kStreamCh) {
-                fprintf(stderr,
-                        "[Sound] %s: %uHz/%uch != stream %dHz/%dch, fallback\n",
-                        path.c_str(), rate, (unsigned)ch, kStreamRate,
-                        kStreamCh);
-                break;
-            }
             const size_t n = sz / sizeof(int16_t);
             out.resize(n);
             const size_t rd = fread(out.data(), sizeof(int16_t), n, f);
@@ -151,6 +148,84 @@ std::vector<int16_t> loadWav(const std::string& path) {
     }
 
     fclose(f);
+    if (out_rate) *out_rate = rate;
+    if (out_ch) *out_ch = ch;
+    return out;
+}
+
+// 资源语音文件（半速率约定：header 标 48k stereo、内容是 24k 采样），
+// 格式相符时样本按原样注入常驻流
+std::vector<int16_t> loadWav(const std::string& path) {
+    uint32_t rate = 0;
+    uint16_t ch = 0;
+    std::vector<int16_t> out = loadWavRaw(path, &rate, &ch);
+    if (!out.empty() &&
+        (rate != (uint32_t)kStreamRate || ch != (uint16_t)kStreamCh)) {
+        fprintf(stderr,
+                "[Sound] %s: %uHz/%uch != stream %dHz/%dch, fallback\n",
+                path.c_str(), rate, (unsigned)ch, kStreamRate, kStreamCh);
+        out.clear();
+    }
+    return out;
+}
+
+// 用户绑定 wav（任意采样率/声道数）转流内容格式（24k stereo）：
+// mono → stereo 复制，再线性重采样 rate → kContentRate —— 与常驻流同一
+// 半速率约定（DAC 实际 LRCK = 标称/2 = 24k，音调时长恢复正确）
+std::vector<int16_t> resampleToContent(const std::vector<int16_t>& in,
+                                       uint32_t rate, uint16_t ch) {
+    if (in.empty() || rate == 0 || (ch != 1 && ch != 2)) return {};
+    const size_t inFrames = in.size() / ch;
+    std::vector<int16_t> st;
+    if (ch == 1) {
+        st.resize(inFrames * 2);
+        for (size_t i = 0; i < inFrames; ++i) {
+            st[2 * i] = in[i];
+            st[2 * i + 1] = in[i];
+        }
+    } else {
+        st = in;
+    }
+    if (rate == (uint32_t)kContentRate) return st;
+    const double step = (double)rate / (double)kContentRate;
+    const size_t outFrames = (size_t)((double)inFrames / step);
+    if (outFrames == 0) return {};
+    std::vector<int16_t> out(outFrames * 2);
+    for (size_t i = 0; i < outFrames; ++i) {
+        const double pos = (double)i * step;
+        const size_t i0 = (size_t)pos;
+        const size_t i1 = (i0 + 1 < inFrames) ? i0 + 1 : i0;
+        const double t = pos - (double)i0;
+        for (int c = 0; c < 2; ++c) {
+            const double a = st[i0 * 2 + c];
+            const double b = st[i1 * 2 + c];
+            out[i * 2 + c] = (int16_t)(a + (b - a) * t + 0.5);
+        }
+    }
+    return out;
+}
+
+// ---- 外部命令与 shell 引用（playFile 压缩格式解码用） ----------------------
+bool haveCmd(const char* cmd) {
+    static std::map<std::string, bool> cache;
+    auto it = cache.find(cmd);
+    if (it != cache.end()) return it->second;
+    const std::string c = std::string("command -v ") + cmd + " >/dev/null 2>&1";
+    const bool ok = system(c.c_str()) == 0;
+    cache[cmd] = ok;
+    return ok;
+}
+
+// shell 单引号包裹并转义（路径由本程序生成通常安全，仍防御单引号）
+std::string shellQuote(const std::string& s) {
+    std::string out = "'";
+    for (char ch : s) {
+        if (ch == '\'')
+            out += "'\\''";
+        else
+            out += ch;
+    }
+    out += "'";
     return out;
 }
 
@@ -264,6 +339,47 @@ struct SoundPlayer::Impl {
         queue_.push_back(std::move(buf));
     }
 
+    // playFile 解码输出整段入队（不参与 cap-4 淘汰，避免长音频被挤掉）
+    void enqueueFull(std::vector<int16_t> buf) {
+        if (buf.empty()) return;
+        std::lock_guard<std::mutex> lk(mu_);
+        queue_.push_back(std::move(buf));
+    }
+
+    // playFile 工作体：按扩展名提取 PCM 后整段注入常驻流队列。
+    // wav 直接解析 + 重采样；压缩格式统一走 ffmpeg（24k stereo S16LE），
+    // 缺 ffmpeg 时告警一次后忽略（mpg123 的重采样/声道 CLI 管道不可控，
+    // 不再兜底）。解码在 detached 线程执行，避免阻塞渲染主线程
+    void decodeFile(const std::string& path) {
+        uint32_t rate = 0;
+        uint16_t ch = 0;
+        std::vector<int16_t> pcm = loadWavRaw(path, &rate, &ch);
+        if (!pcm.empty()) {
+            enqueueFull(resampleToContent(pcm, rate, ch));
+            return;
+        }
+        // 非 16bit PCM wav 或压缩格式 → ffmpeg 解码
+        if (!haveCmd("ffmpeg")) {
+            if (!warn_once_) {
+                warn_once_ = true;
+                fprintf(stderr, "[Sound] no decoder (ffmpeg) for %s, skipped\n",
+                        path.c_str());
+            }
+            return;
+        }
+        const std::string cmd = "ffmpeg -v quiet -i " + shellQuote(path) +
+                                " -f s16le -ar 24000 -ac 2 - 2>/dev/null";
+        FILE* f = popen(cmd.c_str(), "r");
+        if (!f) return;
+        std::vector<int16_t> acc;
+        int16_t buf[4096];
+        size_t n;
+        while ((n = fread(buf, sizeof(int16_t), 4096, f)) > 0)
+            acc.insert(acc.end(), buf, buf + n);
+        pclose(f);
+        enqueueFull(std::move(acc));
+    }
+
     // 取提示音 PCM：优先读 wav 资源，缺失或格式不符则回退合成音
     std::vector<int16_t> acquire(const char* file,
                                  std::vector<int16_t> (*fallback)()) {
@@ -299,6 +415,14 @@ void SoundPlayer::play(Event ev) {
             impl_->enqueue(impl_->acquire("attention.wav", buildReminder));
             break;
     }
+}
+
+void SoundPlayer::playFile(const std::string& path) {
+    if (path.empty()) return;
+    // 解码/重采样可能耗时数十 ms 至数秒，detached 线程执行；PCM 注入常驻
+    // 流队列后播放时序由流保证。主进程退出时析构 SoundPlayer，此线程若
+    // 仍在解码会随进程终止（全局对象生命周期覆盖全部业务场景）
+    std::thread([path, this] { impl_->decodeFile(path); }).detach();
 }
 
 }  // namespace dutyon

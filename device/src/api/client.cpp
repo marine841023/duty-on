@@ -31,6 +31,18 @@ static std::optional<PetStatus> FetchStatus(cpr::Session& session) {
         s.device_brightness = j.value("deviceBrightness", 100);
         s.server_time = j.value("serverTime", 0.0);
         s.utc_offset_min = j.value("utcOffset", 0);
+        s.sound_mute = j.value("soundMute", false);
+        if (j.contains("activeAudio") && j["activeAudio"].is_object()) {
+            for (auto it = j["activeAudio"].begin(); it != j["activeAudio"].end();
+                 ++it)
+                if (it.value().is_string())
+                    s.active_audio[it.key()] = it.value().get<std::string>();
+        }
+        if (j.contains("soundMutedStates") && j["soundMutedStates"].is_array()) {
+            for (const auto& v : j["soundMutedStates"])
+                if (v.is_string())
+                    s.sound_muted_states.push_back(v.get<std::string>());
+        }
 
         if (j.contains("sessions") && j["sessions"].is_array()) {
             s.session_count = static_cast<int>(j["sessions"].size());

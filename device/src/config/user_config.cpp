@@ -122,6 +122,24 @@ UserConfig UserConfigStore::load() {
             std::clamp(j["deviceBrightness"].get<int>(), 10, 100);
     if (j.contains("deviceRepo") && j["deviceRepo"].is_string())
         cfg.device_repo = j["deviceRepo"].get<std::string>();
+    if (j.contains("soundMute") && j["soundMute"].is_boolean())
+        cfg.sound_mute = j["soundMute"].get<bool>();
+    if (j.contains("stateAudio") && j["stateAudio"].is_object()) {
+        for (auto kit = j["stateAudio"].begin(); kit != j["stateAudio"].end();
+             ++kit) {
+            if (!kit.value().is_object()) continue;
+            for (auto sit = kit.value().begin(); sit != kit.value().end(); ++sit)
+                if (sit.value().is_string())
+                    cfg.state_audio[kit.key()][sit.key()] =
+                        sit.value().get<std::string>();
+        }
+    }
+    if (j.contains("stateAudioMuted") && j["stateAudioMuted"].is_object()) {
+        for (auto it = j["stateAudioMuted"].begin(); it != j["stateAudioMuted"].end();
+             ++it)
+            if (it.value().is_boolean())
+                cfg.state_audio_muted[it.key()] = it.value().get<bool>();
+    }
     if (j.contains("stateMotions") && j["stateMotions"].is_object()) {
         for (auto it = j["stateMotions"].begin(); it != j["stateMotions"].end(); ++it)
             cfg.state_motions[it.key()] = parseMotions(it.value());
@@ -232,6 +250,43 @@ void UserConfigStore::saveClockColor(const std::string& color) {
 void UserConfigStore::saveDeviceBrightness(int v) {
     // 屏幕亮度（10-100）；同上经 /api/status 下发
     updateConfig([&](json& j) { j["deviceBrightness"] = v; });
+}
+
+void UserConfigStore::saveStateAudio(const std::string& key,
+                                     const std::string& state,
+                                     const std::string& file) {
+    // 状态音频绑定；file 为空串 = 清除该状态条目（键结构同 stateMotions）
+    updateConfig([&](json& j) {
+        if (!j.contains("stateAudio") || !j["stateAudio"].is_object())
+            j["stateAudio"] = json::object();
+        json& root = j["stateAudio"];
+        if (!root.contains(key) || !root[key].is_object())
+            root[key] = json::object();
+        if (file.empty())
+            root[key].erase(state);
+        else
+            root[key][state] = file;
+    });
+}
+
+void UserConfigStore::saveSoundMute(bool mute) {
+    // 完全静音；/api/status 每次轮询读文件下发
+    updateConfig([&](json& j) { j["soundMute"] = mute; });
+}
+
+void UserConfigStore::saveStateAudioMuted(const std::string& key,
+                                          const std::string& state,
+                                          bool muted) {
+    // 按状态静音；复合键 "<key>:<状态>"，取消静音即移除条目
+    updateConfig([&](json& j) {
+        if (!j.contains("stateAudioMuted") || !j["stateAudioMuted"].is_object())
+            j["stateAudioMuted"] = json::object();
+        const std::string k = key + ":" + state;
+        if (muted)
+            j["stateAudioMuted"][k] = true;
+        else
+            j["stateAudioMuted"].erase(k);
+    });
 }
 
 void UserConfigStore::saveCustomCharacters(const UserConfig& cfg) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -49,6 +50,14 @@ struct PetStatus {
     // 时区偏移分钟；设备端取到后用 steady_clock 自行推进直到下次轮询覆盖
     double server_time = 0;
     int utc_offset_min = 0;
+    // 状态音频（PC 菜单绑定，config.json stateAudio 按当前角色算好下发）：
+    // 状态 -> 音频文件名（相对 ~/.dutyon/animations/）
+    std::map<std::string, std::string> active_audio;
+    // 完全静音（config.json soundMute）：true 时设备端不播任何音频
+    bool sound_mute = false;
+    // 当前角色被单独静音的状态列表（config.json stateAudioMuted 按当前
+    // 角色键过滤后下发）
+    std::vector<std::string> sound_muted_states;
 };
 
 // 与 PC 端 /api/metrics 返回的 MetricsSnapshot 对应

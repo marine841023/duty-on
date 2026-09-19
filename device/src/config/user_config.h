@@ -55,6 +55,14 @@ struct UserConfig {
     // 源码仓库根路径（菜单「同步程序到设备」的源码来源，手动写入 config.json
     // 的 deviceRepo；为空时菜单点击给出配置指引）
     std::string device_repo;
+    // 状态音频绑定（stateAudio）：{ "<角色id或模型key>":
+    // { sleeping/working/alert: 音频文件名（相对 ~/.dutyon/animations/）} }，
+    // 设备端状态切换时同步下载并播放
+    std::map<std::string, std::map<std::string, std::string>> state_audio;
+    // 设备端完全静音（soundMute）：true 时不播任何音频（含事件提示音）
+    bool sound_mute = false;
+    // 按状态静音（stateAudioMuted）：{ "<key>:<状态>": true }，key 同上
+    std::map<std::string, bool> state_audio_muted;
 };
 
 // 模型目录条目
@@ -90,6 +98,14 @@ public:
     static void saveClockColor(const std::string& color);
     // 硬件显示端屏幕亮度（10-100；同上经 /api/status 下发）
     static void saveDeviceBrightness(int v);
+    // 状态音频绑定（file 为空串 = 清除该状态绑定）
+    static void saveStateAudio(const std::string& key, const std::string& state,
+                               const std::string& file);
+    // 设备端声音：完全静音开关
+    static void saveSoundMute(bool mute);
+    // 设备端声音：按状态静音开关（key 为角色 id 或模型 key）
+    static void saveStateAudioMuted(const std::string& key,
+                                    const std::string& state, bool muted);
 
     // ---- 模型目录（内置 frontend/assets/live2d + 用户 ~/.dutyon/live2d）----
     // builtin_roots: 内置模型搜索目录（相对 exe 解析，main 传入）

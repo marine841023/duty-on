@@ -26,6 +26,11 @@ public:
     // 非阻塞：提示音入队，由后台线程依次播放
     void play(Event ev);
 
+    // 非阻塞：播放音频文件（wav/mp3/ogg/flac/m4a，路径可为任意可读路径）。
+    // wav 直通 aplay；压缩格式优先 ffmpeg 解码管到 aplay，退 mpg123。
+    // 解码器缺失时忽略并告警一次（stderr）
+    void playFile(const std::string& path);
+
 private:
     struct Impl;
     Impl* impl_;
