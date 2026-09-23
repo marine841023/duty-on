@@ -26,19 +26,18 @@ namespace {
 // ---------------------------------------------------------------------------
 // 流格式约定
 //
-// H616 codec 在当前内核（6.18.45 / Armbian trunk）下 audio-codec-4x 时钟只有
-// 期望的一半，导致 LRCK = 标称/2 —— 按标称采样率播放会变慢一倍且音调降八度。
-// 对策是「半速率补偿」：aplay 流按 48000Hz 标称打开，但喂进去的 PCM 内容一律
-// 按 24000Hz 生成。assets/sounds/*.wav 遵循同一约定（header 标 48000、内容是
-// 24000 采样），因此直接取其 PCM 即可，无需重采样。
+// 音频经 HDMI 输出（card1 / plughw:1,0）：实测 3.000s 测试 wav 的 aplay 时长比
+// 为 1.005，即 HDMI 路径按真实 48000Hz 播放，不存在 H616 codec 那种 LRCK 减半
+// 的问题。因此取消半速率补偿：PCM 内容一律按 48000Hz 生成，与 aplay 流标称一致。
+// assets/sounds/*.wav 同样是真 48000Hz/2ch（内容与 header 一致），直接取其 PCM。
 //
-// 换 stable 内核后若 `time aplay` 实测时长比恢复 1.0，需同步取消补偿：
-// 把 kContentRate 改回 kStreamRate，并用 --no-compensate 重新生成 wav。
+// 若日后改回 H616 内置 codec（plughw:0,0，LRCK = 标称/2）或换回竖屏 I2S 方案，
+// 需恢复补偿：把 kContentRate 改回 24000，并用带补偿的 wav（内容 24k/header 48k）。
 // ---------------------------------------------------------------------------
 constexpr int kStreamRate = 48000;    // aplay raw 流标称采样率
 constexpr int kStreamCh = 2;          // stereo
-constexpr int kContentRate = 24000;   // PCM 内容真实采样率（半速率补偿）
-constexpr int kChunkFrames = 1200;    // 每块 50ms（@kContentRate）
+constexpr int kContentRate = 48000;   // PCM 内容真实采样率（= kStreamRate，无补偿）
+constexpr int kChunkFrames = 2400;    // 每块 50ms（@kContentRate）
 constexpr int kChunkSamples = kChunkFrames * kStreamCh;
 constexpr int kPrebufferChunks = 10;  // 启动预缓冲 500ms，防开局 underrun
 
@@ -153,8 +152,7 @@ std::vector<int16_t> loadWavRaw(const std::string& path, uint32_t* out_rate,
     return out;
 }
 
-// 资源语音文件（半速率约定：header 标 48k stereo、内容是 24k 采样），
-// 格式相符时样本按原样注入常驻流
+// 资源语音文件（真 48k stereo，内容与 header 一致），格式相符时样本按原样注入常驻流
 std::vector<int16_t> loadWav(const std::string& path) {
     uint32_t rate = 0;
     uint16_t ch = 0;
@@ -169,9 +167,9 @@ std::vector<int16_t> loadWav(const std::string& path) {
     return out;
 }
 
-// 用户绑定 wav（任意采样率/声道数）转流内容格式（24k stereo）：
-// mono → stereo 复制，再线性重采样 rate → kContentRate —— 与常驻流同一
-// 半速率约定（DAC 实际 LRCK = 标称/2 = 24k，音调时长恢复正确）
+// 用户绑定 wav（任意采样率/声道数）转流内容格式（48k stereo）：
+// mono → stereo 复制，再线性重采样 rate → kContentRate —— 与常驻流一致
+// （HDMI 真实 48000Hz 播放，音调时长正确）
 std::vector<int16_t> resampleToContent(const std::vector<int16_t>& in,
                                        uint32_t rate, uint16_t ch) {
     if (in.empty() || rate == 0 || (ch != 1 && ch != 2)) return {};
@@ -368,7 +366,8 @@ struct SoundPlayer::Impl {
             return;
         }
         const std::string cmd = "ffmpeg -v quiet -i " + shellQuote(path) +
-                                " -f s16le -ar 24000 -ac 2 - 2>/dev/null";
+                                " -f s16le -ar " + std::to_string(kContentRate) +
+                                " -ac 2 - 2>/dev/null";
         FILE* f = popen(cmd.c_str(), "r");
         if (!f) return;
         std::vector<int16_t> acc;

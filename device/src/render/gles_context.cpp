@@ -14,7 +14,10 @@
 #include <xf86drmMode.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <map>
+
+#include "config.h"
 
 namespace dutyon {
 
@@ -112,11 +115,16 @@ GlesContext::GlesContext() = default;
 GlesContext::~GlesContext() { destroy(); }
 
 bool GlesContext::init(int width, int height) {
-    width_ = width;
-    height_ = height;
+    log_w_ = width;
+    log_h_ = height;
+    if (!setupRotation()) return false;
+    // 旋转 90/270：物理面板宽高 = 逻辑高宽互换（竖屏画面横放扫描输出）
+    const bool swap_wh = (rotation_ == 90 || rotation_ == 270);
+    phys_w_ = swap_wh ? log_h_ : log_w_;
+    phys_h_ = swap_wh ? log_w_ : log_h_;
 
     drm_ = std::make_unique<DrmState>();
-    if (!initDrm(*drm_, width, height)) {
+    if (!initDrm(*drm_, phys_w_, phys_h_)) {
         fprintf(stderr, "[GlesContext] no connected DRM output\n");
         return false;
     }
@@ -179,13 +187,13 @@ bool GlesContext::init(int width, int height) {
         printf("[GlesContext] fallback to OpenGL ES 2.0\n");
     }
 
-    // GBM 表面（扫描输出 + 渲染两用；ARGB 不行退化 XRGB）
+    // GBM 表面（扫描输出 + 渲染两用；物理分辨率；ARGB 不行退化 XRGB）
     drm_->surf = gbm_surface_create(
-        drm_->dev, width_, height_, GBM_FORMAT_ARGB8888,
+        drm_->dev, phys_w_, phys_h_, GBM_FORMAT_ARGB8888,
         GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
     if (!drm_->surf) {
         drm_->surf = gbm_surface_create(
-            drm_->dev, width_, height_, GBM_FORMAT_XRGB8888,
+            drm_->dev, phys_w_, phys_h_, GBM_FORMAT_XRGB8888,
             GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
     }
     if (!drm_->surf) {
@@ -205,52 +213,231 @@ bool GlesContext::init(int width, int height) {
         return false;
     }
 
-    glViewport(0, 0, width_, height_);
+    // 离屏逻辑目标（竖屏 480x800）+ 旋转合成管线；bindLogicalTarget 绑定
+    // FBO 并置逻辑视口/混合态，此后所有渲染都画进 FBO，swapBuffers 时旋贴上屏
+    if (!createCompositeProgram()) return false;
+    if (!createLogicalTarget()) return false;
+    bindLogicalTarget();
+
+    printf("[GlesContext] context ready (logical %dx%d -> physical %dx%d, rotate %d)\n",
+           log_w_, log_h_, phys_w_, phys_h_, rotation_);
+    return true;
+}
+
+// 解析旋转角：环境变量 DUTYON_ROTATE（0/90/180/270）覆盖 config.h 默认值，
+// 无需重编译即可调显示器竖放朝向
+bool GlesContext::setupRotation() {
+    int r = kRotationDeg;
+    const char* env = getenv("DUTYON_ROTATE");
+    if (env && *env) {
+        const int v = atoi(env);
+        if (v == 0 || v == 90 || v == 180 || v == 270)
+            r = v;
+        else
+            fprintf(stderr, "[GlesContext] invalid DUTYON_ROTATE=%s, using %d\n",
+                    env, kRotationDeg);
+    }
+    rotation_ = r;
+    return true;
+}
+
+// 离屏逻辑目标：RGBA 颜色纹理 + FBO（逻辑分辨率，所有渲染画到这里）
+bool GlesContext::createLogicalTarget() {
+    glGenTextures(1, &fbo_tex_);
+    glBindTexture(GL_TEXTURE_2D, fbo_tex_);
+    // GL_RGBA（无尺寸）：ES2/ES3 上下文均可作颜色可渲染附件
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, log_w_, log_h_, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenFramebuffers(1, &fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           fbo_tex_, 0);
+    const GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (st != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "[GlesContext] logical FBO incomplete: 0x%x\n", st);
+        return false;
+    }
+    return true;
+}
+
+// 合成管线：把逻辑纹理按旋转角贴满物理屏的着色程序 + 全屏 quad。
+// 用 GLSL ES 1.00 语法（attribute/varying/texture2D），ES2/ES3 上下文均可编译。
+bool GlesContext::createCompositeProgram() {
+    static const char* kVS =
+        "attribute vec2 aPos;\n"
+        "attribute vec2 aUV;\n"
+        "varying vec2 vUV;\n"
+        "void main(){ vUV = aUV; gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+    static const char* kFS =
+        "precision mediump float;\n"
+        "varying vec2 vUV;\n"
+        "uniform sampler2D uTex;\n"
+        // 不透明输出：扫描输出无 alpha，逻辑透明区取黑底
+        "void main(){ gl_FragColor = vec4(texture2D(uTex, vUV).rgb, 1.0); }\n";
+
+    auto compile = [](GLenum type, const char* src) -> GLuint {
+        GLuint s = glCreateShader(type);
+        glShaderSource(s, 1, &src, nullptr);
+        glCompileShader(s);
+        GLint ok = 0;
+        glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            char log[512];
+            GLsizei n = 0;
+            glGetShaderInfoLog(s, sizeof(log), &n, log);
+            fprintf(stderr, "[GlesContext] composite shader fail: %s\n", log);
+        }
+        return s;
+    };
+    const GLuint vs = compile(GL_VERTEX_SHADER, kVS);
+    const GLuint fs = compile(GL_FRAGMENT_SHADER, kFS);
+    comp_prog_ = glCreateProgram();
+    glAttachShader(comp_prog_, vs);
+    glAttachShader(comp_prog_, fs);
+    glBindAttribLocation(comp_prog_, 0, "aPos");
+    glBindAttribLocation(comp_prog_, 1, "aUV");
+    glLinkProgram(comp_prog_);
+    GLint ok = 0;
+    glGetProgramiv(comp_prog_, GL_LINK_STATUS, &ok);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (!ok) {
+        fprintf(stderr, "[GlesContext] composite program link fail\n");
+        return false;
+    }
+
+    // 全屏 quad（NDC 位置固定 BL,BR,TR,TL），UV 按旋转角排布（逆时针）
+    const float pos[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+    float uv[4][2];
+    switch (rotation_) {
+        case 90:
+            uv[0][0] = 0; uv[0][1] = 1; uv[1][0] = 0; uv[1][1] = 0;
+            uv[2][0] = 1; uv[2][1] = 0; uv[3][0] = 1; uv[3][1] = 1;
+            break;
+        case 180:
+            uv[0][0] = 1; uv[0][1] = 1; uv[1][0] = 0; uv[1][1] = 1;
+            uv[2][0] = 0; uv[2][1] = 0; uv[3][0] = 1; uv[3][1] = 0;
+            break;
+        case 270:  // 逆时针 270 = 顺时针 90
+            uv[0][0] = 1; uv[0][1] = 0; uv[1][0] = 1; uv[1][1] = 1;
+            uv[2][0] = 0; uv[2][1] = 1; uv[3][0] = 0; uv[3][1] = 0;
+            break;
+        default:   // 0
+            uv[0][0] = 0; uv[0][1] = 0; uv[1][0] = 1; uv[1][1] = 0;
+            uv[2][0] = 1; uv[2][1] = 1; uv[3][0] = 0; uv[3][1] = 1;
+            break;
+    }
+    float verts[16];
+    for (int i = 0; i < 4; ++i) {
+        verts[i * 4 + 0] = pos[i][0];
+        verts[i * 4 + 1] = pos[i][1];
+        verts[i * 4 + 2] = uv[i][0];
+        verts[i * 4 + 3] = uv[i][1];
+    }
+    glGenVertexArrays(1, &comp_vao_);
+    glGenBuffers(1, &comp_vbo_);
+    glBindVertexArray(comp_vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, comp_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
+                          (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
+                          (void*)(2 * sizeof(float)));
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return true;
+}
+
+// 绑定逻辑 FBO + 视口 + 混合态（每帧起点、以及合成翻页后复位）
+void GlesContext::bindLogicalTarget() {
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    glViewport(0, 0, log_w_, log_h_);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_SCISSOR_TEST);
+}
 
-    printf("[GlesContext] OpenGL ES context ready (%dx%d)\n", width_, height_);
-    return true;
+// 把逻辑 FBO 旋转合成到默认帧缓冲（物理分辨率）：不透明贴图铺满整屏。
+// 渲染方遗留的 program/VAO/texture/scissor/blend/depth 均在此重置，不影响下帧。
+void GlesContext::compositeToScreen() {
+    if (!comp_prog_ || !fbo_tex_ || !comp_vao_) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, phys_w_, phys_h_);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);  // 不透明合成
+    glUseProgram(comp_prog_);
+    glBindVertexArray(comp_vao_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, fbo_tex_);
+    glUniform1i(glGetUniformLocation(comp_prog_, "uTex"), 0);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glBindVertexArray(0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
 }
 
 void GlesContext::swapBuffers() {
     if (display_ == EGL_NO_DISPLAY || surface_ == EGL_NO_SURFACE) return;
+
+    // 先把逻辑 FBO（竖屏）旋转合成到默认帧缓冲（物理横屏），再翻页
+    compositeToScreen();
     eglSwapBuffers(display_, surface_);
-    if (!drm_ || !drm_->surf) return;
 
-    gbm_bo* bo = gbm_surface_lock_front_buffer(drm_->surf);
-    if (!bo) return;
-    const uint32_t fb = fbIdForBo(*drm_, bo, width_, height_);
-    if (!fb) {
-        gbm_surface_release_buffer(drm_->surf, bo);
-        return;
-    }
-
-    if (!drm_->mode_set) {
-        // 首帧：直接点亮 CRTC
-        if (drmModeSetCrtc(drm_->fd, drm_->crtc_id, fb, 0, 0,
-                           &drm_->connector_id, 1, &drm_->mode) != 0) {
-            fprintf(stderr, "[GlesContext] drmModeSetCrtc failed\n");
+    if (drm_ && drm_->surf) {
+        gbm_bo* bo = gbm_surface_lock_front_buffer(drm_->surf);
+        if (bo) {
+            const uint32_t fb = fbIdForBo(*drm_, bo, phys_w_, phys_h_);
+            if (!fb) {
+                gbm_surface_release_buffer(drm_->surf, bo);
+            } else {
+                if (!drm_->mode_set) {
+                    // 首帧：直接点亮 CRTC
+                    if (drmModeSetCrtc(drm_->fd, drm_->crtc_id, fb, 0, 0,
+                                       &drm_->connector_id, 1, &drm_->mode) != 0) {
+                        fprintf(stderr, "[GlesContext] drmModeSetCrtc failed\n");
+                    }
+                    drm_->mode_set = true;
+                } else if (drmModePageFlip(drm_->fd, drm_->crtc_id, fb,
+                                           DRM_MODE_PAGE_FLIP_EVENT, nullptr) == 0) {
+                    waitForFlip(drm_->fd);
+                }
+                // 翻页完成后释放上一帧（含其 fb 注册）
+                if (drm_->shown_bo) {
+                    const auto it = drm_->fb_cache.find(drm_->shown_bo);
+                    if (it != drm_->fb_cache.end()) {
+                        drmModeRmFB(drm_->fd, it->second);
+                        drm_->fb_cache.erase(it);
+                    }
+                    gbm_surface_release_buffer(drm_->surf, drm_->shown_bo);
+                }
+                drm_->shown_bo = bo;
+            }
         }
-        drm_->mode_set = true;
-    } else if (drmModePageFlip(drm_->fd, drm_->crtc_id, fb,
-                               DRM_MODE_PAGE_FLIP_EVENT, nullptr) == 0) {
-        waitForFlip(drm_->fd);
     }
 
-    // 翻页完成后释放上一帧（含其 fb 注册）
-    if (drm_->shown_bo) {
-        const auto it = drm_->fb_cache.find(drm_->shown_bo);
-        if (it != drm_->fb_cache.end()) {
-            drmModeRmFB(drm_->fd, it->second);
-            drm_->fb_cache.erase(it);
-        }
-        gbm_surface_release_buffer(drm_->surf, drm_->shown_bo);
-    }
-    drm_->shown_bo = bo;
+    // 复位逻辑目标（绑定 FBO + 视口 + 混合态），供下一帧渲染
+    bindLogicalTarget();
 }
 
 void GlesContext::destroy() {
+    // GL 对象须在上下文仍 current 时删除
+    if (display_ != EGL_NO_DISPLAY && context_ != EGL_NO_CONTEXT) {
+        eglMakeCurrent(display_, surface_, surface_, context_);
+        if (fbo_) { glDeleteFramebuffers(1, &fbo_); fbo_ = 0; }
+        if (fbo_tex_) { glDeleteTextures(1, &fbo_tex_); fbo_tex_ = 0; }
+        if (comp_vbo_) { glDeleteBuffers(1, &comp_vbo_); comp_vbo_ = 0; }
+        if (comp_vao_) { glDeleteVertexArrays(1, &comp_vao_); comp_vao_ = 0; }
+        if (comp_prog_) { glDeleteProgram(comp_prog_); comp_prog_ = 0; }
+    }
     if (display_ != EGL_NO_DISPLAY) {
         eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         if (surface_ != EGL_NO_SURFACE) eglDestroySurface(display_, surface_);

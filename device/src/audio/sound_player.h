@@ -8,6 +8,7 @@
 #ifndef _WIN32
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace dutyon {

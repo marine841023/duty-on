@@ -41,12 +41,12 @@ async def synth(text: str, out_mp3: str, voice: str, rate: str, pitch: str) -> N
     await tts.save(out_mp3)
 
 
-def mp3_to_wav(mp3: str, wav: str, sr: int = 24000, ch: int = 2) -> None:
+def mp3_to_wav(mp3: str, wav: str, sr: int = 48000, ch: int = 2) -> None:
     """转成【内容采样率 = 硬件真实速率】的 stereo S16LE wav。
 
-    注意：H616 codec 在当前内核（6.18.45 / Armbian trunk）下 LRCK 实际只有
-    标称的一半，因此这里按 24000Hz 生成内容，随后由 rewrite_header_rate()
-    把 header 改成 48000Hz —— 播放时长与音调即可双双恢复正确。
+    音频经 HDMI 输出（card1 / plughw:1,0），实测时长比 1.0（真实 48000Hz），
+    因此默认按 48000Hz 生成内容且不做 header 补偿。若改回 H616 内置 codec
+    （LRCK = 标称/2），用 --compensate --content-sr 24000 --header-sr 48000。
     """
     subprocess.run(
         [FFMPEG, "-y", "-loglevel", "error",
@@ -145,10 +145,10 @@ async def main() -> None:
     ap.add_argument("--fade-ms", type=int, default=60)
     ap.add_argument("--pad-ms",  type=int, default=200)
     ap.add_argument("--peak",    type=float, default=0.92)
-    # 半速率补偿：当前内核 codec LRCK 只有标称一半，默认开启
-    ap.add_argument("--compensate", action="store_true", default=True)
+    # 半速率补偿：仅 H616 内置 codec（LRCK = 标称/2）需要；HDMI 真实 48k 默认关闭
+    ap.add_argument("--compensate", action="store_true", default=False)
     ap.add_argument("--no-compensate", dest="compensate", action="store_false")
-    ap.add_argument("--content-sr", type=int, default=24000,
+    ap.add_argument("--content-sr", type=int, default=48000,
                     help="PCM 内容实际采样率（= 硬件真实速率）")
     ap.add_argument("--header-sr", type=int, default=48000,
                     help="wav header 标称采样率")
