@@ -36,6 +36,10 @@ imgui.ini
 .userdata/_*
 # gen_voice_prompts.py 的生成产物目录；入库的正式副本在 frontend/assets/device/sounds/
 .userdata/sounds/
+# 本地调试/诊断/一次性脚本与临时草稿（设备排查期间产生，不入库）。注意：
+# gitignore 对已跟踪文件无效——上面列出的部署/构建脚本仍随库共享，不受影响；
+# 确需共享新脚本时用 git add -f 强制添加
+.userdata/*
 
 # 2.0 packaging toolchain & output (NSIS portable auto-downloaded)
 tools/nsis/
