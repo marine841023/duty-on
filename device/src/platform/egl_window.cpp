@@ -15,9 +15,11 @@ public:
     ~EglWindow() override { shutdown(); }
 
     bool init(int width, int height) override {
-        width_ = width;
-        height_ = height;
-        return ctx_.init(width, height);
+        if (!ctx_.init(width, height)) return false;
+        // 逻辑尺寸跟随实际选中的 DRM 模式（480x800 / 800x480 自适应）
+        width_ = ctx_.width();
+        height_ = ctx_.height();
+        return true;
     }
 
     bool pollEvents() override {

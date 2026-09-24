@@ -294,9 +294,12 @@ int main() {
 #else
     const char* platform = "ARM Linux (EGL/GLES2)";
     const char* api_url = "USB 直连（usb0 租约自动发现）";
-    const int WIN_W = kDisplayWidth;
+    // 直出模式：逻辑尺寸 = 实际选中的 DRM 模式尺寸（竖屏 480x800 /
+    // 横屏 800x480），init 后从 window 取回，布局全按实际尺寸自适应
+    int WIN_W = kDisplayWidth;
+    int WIN_H = kDisplayHeight;
     // 竖屏上下对半：上半屏角色，下半屏任务列表（面板高度按内容自适应）
-    const int MODEL_AREA_H = kDisplayHeight / 2;
+    int MODEL_AREA_H = WIN_H / 2;
     constexpr int FPS = kTargetFps;
     const int initial_h = kDisplayHeight;
 #endif
@@ -323,6 +326,16 @@ int main() {
         delete window;
         return 1;
     }
+
+#ifndef _WIN32
+    // 直出模式：逻辑尺寸回填为实际选中的 DRM 模式尺寸（init 内已按
+    // 480x800 优先匹配，无匹配模式时取首个模式 800x480）。fb 与 mode
+    // 尺寸一致 setCrtc 才不被拒；布局按实际尺寸自适应
+    WIN_W = window->width();
+    WIN_H = window->height();
+    MODEL_AREA_H = WIN_H / 2;
+    printf("[Mode] display %dx%d (direct)\n", WIN_W, WIN_H);
+#endif
 
 #ifdef _WIN32
     // 位置记忆恢复（1.x windowPosition 字段复用）：init() 默认放右下角，
@@ -990,6 +1003,14 @@ int main() {
                 cfg.device_brightness = v;
                 UserConfigStore::saveDeviceBrightness(v);
                 // 设备端下一次 /api/status 轮询 ≤2s 收到
+            }
+        }
+        // ---- 屏幕旋转（菜单「设备→屏幕旋转」0/90/180/270；经 /api/status 下发）----
+        else if (id.rfind("device-rotate:", 0) == 0) {
+            const int deg = std::stoi(id.substr(13));
+            if (deg == 0 || deg == 90 || deg == 180 || deg == 270) {
+                cfg.screen_rotation = deg;
+                UserConfigStore::saveScreenRotation(deg);
             }
         }
         // ---- 同步最新程序到设备（菜单「同步程序到设备」）----
@@ -1913,7 +1934,7 @@ int main() {
 #endif
 
         // 10. 渲染（边缘吸附时只画吸附条：角色/状态栏/监控/菜单全部隐藏）
-        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClearColor(0.f, 0.f, 0.f, 0.f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         const bool edge_docked = window->isEdgeDocked();
@@ -1956,7 +1977,7 @@ int main() {
                 // 少时不再贴底下沉）。时钟区预留：顶边距 26 + 字号 56×1.2
                 // 行高 + 与角色间隙 ≈ 110px
                 const int clock_reserve = 110;
-                const int char_h = kDisplayHeight - clock_reserve - (int)panel_h;
+                const int char_h = WIN_H - clock_reserve - (int)panel_h;
                 renderer.setCenterV(true);
                 gif.setCenterV(true);
                 renderer.setViewport(0, (int)panel_h, WIN_W, char_h);
@@ -1964,8 +1985,8 @@ int main() {
             } else {
                 renderer.setCenterV(true);
                 gif.setCenterV(true);
-                renderer.setViewport(0, 0, WIN_W, kDisplayHeight);
-                gif.setViewport(0, 0, WIN_W, kDisplayHeight);
+                renderer.setViewport(0, 0, WIN_W, WIN_H);
+                gif.setViewport(0, 0, WIN_W, WIN_H);
             }
             // 相框模式轮播：形象变化从头开始，此后 15s 换下一个动作
             if (device_mode == "frame") {
@@ -2010,7 +2031,8 @@ int main() {
 #ifdef _WIN32
             // 硬件显示端状态（菜单"设备模式"分组显示/隐藏 + 当前模式勾选）
             ui.setDeviceStatus(backend.deviceOnline(), cfg.device_mode,
-                               cfg.clock_color, cfg.device_brightness);
+                               cfg.clock_color, cfg.device_brightness,
+                               cfg.screen_rotation);
             ui.beginFrame();
             ui.renderStatus(current_status);
             if (!mini_mode && has_metrics) ui.renderMetrics(current_metrics);
@@ -2020,15 +2042,15 @@ int main() {
 #else
             // 叠加层用全屏坐标系：恢复全屏视口（角色渲染用的半屏视口会影响
             // 后续绘制的 NDC->窗口映射，不复位面板会被压进上半屏）
-            glViewport(0, 0, WIN_W, kDisplayHeight);
+            glViewport(0, 0, WIN_W, WIN_H);
             if (device_mode == "multi") {
                 if (usb_connected) {
                     // 动态分屏：面板顶边 = 面板高度（卡片底贴屏幕底）
-                    task_panel.render(current_status, WIN_W, kDisplayHeight,
+                    task_panel.render(current_status, WIN_W, WIN_H,
                                       panel_h);
                 } else {
                     // 引导画面：宠物待机动画（上半屏已渲染）+ 底部提示横幅
-                    prompt_banner.render(WIN_W, kDisplayHeight);
+                    prompt_banner.render(WIN_W, WIN_H);
                 }
             }
             // 顶部时钟 + 日期（所有模式都显示；字号随模式）。
@@ -2067,21 +2089,21 @@ int main() {
                     (device_mode == "multi") ? 56.f : 92.f;
                 // 时钟顶部留白：multi 26px（稍下沉，避免压住变大后的角色头顶）、
                 // 单任务/相框 22px
-                const float clock_top = (float)kDisplayHeight -
+                const float clock_top = (float)WIN_H -
                                         ((device_mode == "multi") ? 26.f : 22.f);
                 task_panel.renderClock(time_buf, clock_top, clock_size,
-                                       WIN_W, kDisplayHeight);
+                                       WIN_W, WIN_H);
                 // 日期行放屏幕底部（GL 原点左下，y 向上）：留 14px 底边距。
                 // 仅单任务/相框模式（多任务模式底部是任务列表，会重叠）
                 if (device_mode != "multi") {
                     task_panel.renderDate(date_buf, 30.f * 1.35f + 14.f, 30.f,
-                                          WIN_W, kDisplayHeight);
+                                          WIN_W, WIN_H);
                 }
             }
             // 右上角 USB 连接状态小插头：绿=已连 PC，红=未连接
-            task_panel.renderUsbStatus(usb_connected, WIN_W, kDisplayHeight);
+            task_panel.renderUsbStatus(usb_connected, WIN_W, WIN_H);
             // 软件亮度：整屏压暗叠层（brightness<100 时生效）
-            task_panel.renderDim(device_brightness, WIN_W, kDisplayHeight);
+            task_panel.renderDim(device_brightness, WIN_W, WIN_H);
 #endif
         }
 
