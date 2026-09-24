@@ -372,6 +372,7 @@ void HttpServer::registerRoutes() {
             j["deviceMode"] = cfg.value("deviceMode", "multi");
             j["clockColor"] = cfg.value("clockColor", "amber");
             j["deviceBrightness"] = cfg.value("deviceBrightness", 100);
+            j["screenRotation"] = cfg.value("screenRotation", 0);
             // 状态音频（设备端状态切换时播放）：activeAudio = 当前角色
             // {状态: 文件名}；soundMute = 完全静音；soundMutedStates =
             // 当前角色被单独静音的状态列表（后端按 activeCharacterId 算好）

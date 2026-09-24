@@ -106,15 +106,17 @@ public:
     // 对齐 1.x menu-left 模式：菜单贴窗口左缘、角色区右锚）
     void setMenuLeft(bool left);
     // 硬件显示端状态（主循环每帧注入）：菜单"设备"子页显示模式/时钟
-    // 颜色/亮度/同步（menu_activate 收 "device-mode:<m>" / "clock-color:<c>"
-    // / "device-brightness:<n>"）
+    // 颜色/亮度/旋转/同步（menu_activate 收 "device-mode:<m>" /
+    // "clock-color:<c>" / "device-brightness:<n>" / "device-rotate:<deg>"）
     void setDeviceStatus(bool online, const std::string& mode,
                          const std::string& clock_color = "amber",
-                         int brightness = 100) {
+                         int brightness = 100,
+                         int screen_rotation = 0) {
         device_online_ = online;
         device_mode_ = mode;
         clock_color_ = clock_color;
         device_brightness_ = brightness;
+        device_screen_rotation_ = screen_rotation;
     }
     // 客户区坐标是否落在菜单矩形内（右键菜单区域时不触发开/关切换）
     bool isPointInMenu(float x, float y) const;
@@ -186,6 +188,7 @@ private:
     std::string device_mode_ = "multi";
     std::string clock_color_ = "amber";
     int device_brightness_ = 100;
+    int device_screen_rotation_ = 0;
 };
 
 } // namespace dutyon

@@ -58,6 +58,10 @@ struct PetStatus {
     // 当前角色被单独静音的状态列表（config.json stateAudioMuted 按当前
     // 角色键过滤后下发）
     std::vector<std::string> sound_muted_states;
+    // 屏幕旋转角（度：0/90/180/270，PC 菜单"设备→屏幕旋转"设定，
+    // config.json screenRotation）：设备端逻辑竖屏 480x800 渲染到离屏
+    // FBO，swapBuffers 时 quad 按旋转角 blit 到 800x480 横 mode 上屏
+    int screen_rotation = 0;
 };
 
 // 与 PC 端 /api/metrics 返回的 MetricsSnapshot 对应

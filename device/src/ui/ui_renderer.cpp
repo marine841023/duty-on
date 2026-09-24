@@ -2397,6 +2397,26 @@ void UIRenderer::renderMenu() {
                     activate(act_id);
             }
             p->MenuDivider();
+            // 屏幕旋转（四选一，config.json screenRotation 经 /api/status
+            // 下发；设备端离屏 FBO + quad 旋转 blit，切换即时生效）
+            p->MenuLabel(I18n::t("menu.screenRotate"));
+            if (p->MenuRow("rot-0", I18n::t("menu.rot0"),
+                        device_screen_rotation_ == 0, false, nullptr,
+                        false).clicked)
+                activate("device-rotate:0");
+            if (p->MenuRow("rot-90", I18n::t("menu.rot90"),
+                        device_screen_rotation_ == 90, false, nullptr,
+                        false).clicked)
+                activate("device-rotate:90");
+            if (p->MenuRow("rot-180", I18n::t("menu.rot180"),
+                        device_screen_rotation_ == 180, false, nullptr,
+                        false).clicked)
+                activate("device-rotate:180");
+            if (p->MenuRow("rot-270", I18n::t("menu.rot270"),
+                        device_screen_rotation_ == 270, false, nullptr,
+                        false).clicked)
+                activate("device-rotate:270");
+            p->MenuDivider();
             // 声音管理（设备端状态音频播放与静音开关）
             if (p->MenuRow("device-sound", I18n::t("menu.soundManage"),
                         false, false, nullptr, true).clicked)

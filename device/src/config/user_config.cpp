@@ -140,6 +140,8 @@ UserConfig UserConfigStore::load() {
             if (it.value().is_boolean())
                 cfg.state_audio_muted[it.key()] = it.value().get<bool>();
     }
+    if (j.contains("screenRotation") && j["screenRotation"].is_number())
+        cfg.screen_rotation = std::clamp(j["screenRotation"].get<int>(), 0, 270);
     if (j.contains("stateMotions") && j["stateMotions"].is_object()) {
         for (auto it = j["stateMotions"].begin(); it != j["stateMotions"].end(); ++it)
             cfg.state_motions[it.key()] = parseMotions(it.value());
@@ -287,6 +289,11 @@ void UserConfigStore::saveStateAudioMuted(const std::string& key,
         else
             j["stateAudioMuted"].erase(k);
     });
+}
+
+void UserConfigStore::saveScreenRotation(int deg) {
+    // 屏幕旋转角（度：0/90/180/270；设备端离屏 FBO + quad 旋转 blit）
+    updateConfig([&](json& j) { j["screenRotation"] = deg; });
 }
 
 void UserConfigStore::saveCustomCharacters(const UserConfig& cfg) {

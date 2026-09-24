@@ -63,6 +63,10 @@ struct UserConfig {
     bool sound_mute = false;
     // 按状态静音（stateAudioMuted）：{ "<key>:<状态>": true }，key 同上
     std::map<std::string, bool> state_audio_muted;
+    // 硬件屏旋转角（度：0/90/180/270，config.json screenRotation）：
+    // HDMI 屏物理竖装（逻辑竖屏 480x800 上横 mode 800x480）送 90/270，
+    // 倒装送 180。设备端离屏 FBO + quad 旋转 blit 实现
+    int screen_rotation = 0;
 };
 
 // 模型目录条目
@@ -106,6 +110,9 @@ public:
     // 设备端声音：按状态静音开关（key 为角色 id 或模型 key）
     static void saveStateAudioMuted(const std::string& key,
                                     const std::string& state, bool muted);
+
+    // 屏幕旋转角（度）；/api/status 每次轮询读文件下发设备端
+    static void saveScreenRotation(int deg);
 
     // ---- 模型目录（内置 frontend/assets/live2d + 用户 ~/.dutyon/live2d）----
     // builtin_roots: 内置模型搜索目录（相对 exe 解析，main 传入）

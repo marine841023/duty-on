@@ -29,6 +29,7 @@ static std::optional<PetStatus> FetchStatus(cpr::Session& session) {
         s.device_mode = j.value("deviceMode", "multi");
         s.clock_color = j.value("clockColor", "amber");
         s.device_brightness = j.value("deviceBrightness", 100);
+        s.screen_rotation = j.value("screenRotation", 0);
         s.server_time = j.value("serverTime", 0.0);
         s.utc_offset_min = j.value("utcOffset", 0);
         s.sound_mute = j.value("soundMute", false);
