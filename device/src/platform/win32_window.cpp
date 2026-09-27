@@ -199,6 +199,46 @@ public:
     HWND hwnd() const { return hwnd_; }
     void* nativeWinHandle() const override { return hwnd_; }
 
+    // ---- 窗口显隐（配对连接成功后自动隐藏；托盘图标左键恢复）----
+    void setVisible(bool visible) override {
+        if (!window_) return;
+        if (visible == !hidden_) return;  // 幂等：状态未变不重复操作
+        hidden_ = !visible;
+        if (visible) {
+            glfwShowWindow(window_);
+            // GLFW_FOCUS_ON_SHOW=FALSE 已避免抢焦点；再钉一次顶层保证盖在上层
+            SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            printf("[Win32Window] show\n");
+        } else {
+            glfwHideWindow(window_);
+            printf("[Win32Window] hide\n");
+        }
+    }
+
+    bool isVisible() const override { return !hidden_; }
+
+    // 托盘气泡：用 W 版 + UTF-8→UTF-16 转换，保证中文不乱码（源码 /utf-8，
+    // A 版按系统代码页 GBK 解析 UTF-8 字节会花屏）。图标身份 (hWnd,uID)
+    // 与 setupTrayIcon 一致，NIM_MODIFY 命中同一图标。
+    void showBalloon(const char* title, const char* text) override {
+        if (!tray_added_) return;
+        NOTIFYICONDATAW nid = {};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = hwnd_;
+        nid.uID = TRAY_ID;
+        nid.uFlags = NIF_INFO;
+        nid.dwInfoFlags = NIIF_INFO;
+        auto toWide = [](const char* s, wchar_t* dst, int dstLen) {
+            if (!s || !dstLen) { if (dstLen) dst[0] = 0; return; }
+            if (MultiByteToWideChar(CP_UTF8, 0, s, -1, dst, dstLen) == 0)
+                dst[0] = 0;
+        };
+        toWide(title, nid.szInfoTitle, (int)ARRAYSIZE(nid.szInfoTitle));
+        toWide(text, nid.szInfo, (int)ARRAYSIZE(nid.szInfo));
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+
     void resizeKeepBottom(int new_w, int new_h, bool keep_right) override {
         if (!hwnd_) return;
         if (new_w == width_ && new_h == height_) return;
@@ -387,7 +427,15 @@ private:
     static LRESULT CALLBACK wndProcThunk(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         auto* self = reinterpret_cast<Win32Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
         if (msg == WM_TRAYICON && self) {
-            if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_LBUTTONDBLCLK) {
+            const UINT evt = LOWORD(lp);
+            // 窗口隐藏时：左键单击/双击托盘图标直接恢复显示（菜单画在窗口内，
+            // 隐藏后不可见，故此处不开菜单而是先唤回窗口）
+            if (self->hidden_ &&
+                (evt == WM_LBUTTONUP || evt == WM_LBUTTONDBLCLK)) {
+                self->setVisible(true);
+                return 0;
+            }
+            if (evt == WM_RBUTTONUP || evt == WM_LBUTTONDBLCLK) {
                 if (self->on_context_menu) self->on_context_menu(-1, -1);
                 return 0;
             }
@@ -687,6 +735,7 @@ private:
     std::atomic<bool> click_through_{false};
     bool quit_requested_ = false;
     bool tray_added_ = false;
+    bool hidden_ = false;                 // 窗口是否被隐藏（setVisible）
     std::atomic<bool> dragging_{false};
     int drag_offset_x_ = 0, drag_offset_y_ = 0;
     int drag_start_x_ = 0, drag_start_y_ = 0;  // 拖拽起点（屏幕坐标）

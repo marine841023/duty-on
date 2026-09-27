@@ -32,11 +32,31 @@ public:
     virtual int width() const = 0;
     virtual int height() const = 0;
 
+    // 整屏旋转（度：0/90/180/270）：设备端生效（逻辑 FBO + 旋转合成），
+    // 旋转后 width()/height() 返回新的逻辑尺寸；PC 端空实现
+    virtual void setRotation(int deg) { (void)deg; }
+
+    // 物理（上屏）尺寸与旋转合成回读（快照调试用）：
+    // rotation 0 时物理 = 逻辑；PC 端回退到 width()/height()
+    virtual int physWidth() const { return width(); }
+    virtual int physHeight() const { return height(); }
+    virtual bool logicalActive() const { return false; }
+    virtual void presentComposite() {}
+
     // 平台原生句柄（PC 端返回 GLFWwindow*，设备端返回 nullptr）
     virtual void* nativeHandle() { return nullptr; }
 
     // Win32 HWND（仅 Windows 端实现；诊断/Win32 专用）
     virtual void* nativeWinHandle() const { return nullptr; }
+
+    // ---- 窗口显隐 + 托盘气泡（PC 端；配对连接成功后自动隐藏并提示）----
+    // 显示/隐藏整个宠物窗口（设备端恒可见，空实现）
+    virtual void setVisible(bool visible) { (void)visible; }
+    virtual bool isVisible() const { return true; }
+    // 系统托盘气泡通知（右下角弹出；title/text 为 UTF-8，设备端空实现）
+    virtual void showBalloon(const char* title, const char* text) {
+        (void)title; (void)text;
+    }
 
     // 调整窗口尺寸并保持底边不动（内容向上生长，同 1.x 面板展开行为）。
     // keep_right=true 时保持右缘不动（宽度变化向左生长：菜单 menu-left 模式，

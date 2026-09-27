@@ -13,6 +13,12 @@ namespace dutyon::backend::bc {
 constexpr uint16_t kPort = 17521;
 constexpr const char* kHost = "127.0.0.1";
 
+// ===== 设备发现（Wi-Fi 配对码方案）=====
+// 设备入网后 UDP 广播 DUTYON_DISCOVER <device_id> 到此端口，后端监听并
+// 单播回 DUTYON_OFFER <kPort> <paired>；设备据回包源 IP + kPort 组 base_url。
+// 必须与设备端 config.h 的 kDiscoveryPort 一致（见 net/pc_discovery.cpp）。
+constexpr uint16_t kDiscoveryPort = 17522;
+
 // ===== 状态超时（毫秒）=====
 // Working 会话静默这么久后降为 Idle。必须宽松：Qoder 的 ask-user 对话框
 // （完全不发 hook 事件）会让会话合法地静默几分钟。
@@ -45,13 +51,21 @@ inline const char* const kHookEvents[] = {
 };
 constexpr int kHookEventsCount = 6;
 
-// 写入 ~/.qoder/settings.json 的事件：IDE 官方只支持前四个，但 IDE 与 CLI
-// 共用配置文件，额外接上 Notification/PermissionRequest —— 若 IDE 的
-// ask-user 对话框触发它们（未文档化），宠物就能收到"等待用户"信号。
+// 写入 ~/.qoder 与 ~/.qoder-cn 的 settings.json 的事件。经对撞实测（Qoder IDE
+// 与 Qoder CN IDE 同为 1.32.0、同一 agent 二进制），两版 IDE 实际派发的 hook
+// 事件完全一致，共 12 种（用二进制里的 "<Event> dispatch error" 常量验证）——
+// 远超 docs.qoder.cn/user-guide/hooks 所称"5 种"（那是过时的灵码旧文档）。
+// 这里全部接上：工具失败(PostToolUseFailure)、会话起止(SessionStart/SessionEnd)、
+// 子代理起止(SubagentStart/SubagentStop)、上下文压缩(PreCompact)，让状态机靠
+// 真实信号推进，少依赖超时猜测。
+// 注：TaskCompleted/TaskCreated/StopFailure/PermissionDenied/TeammateIdle/
+// WorktreeCreate 等是 Qoder CLI 专属，IDE 二进制里没有，注册也不会触发。
 inline const char* const kQoderHookEvents[] = {
-    "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "Notification", "PermissionRequest",
+    "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+    "PermissionRequest", "Notification", "SubagentStart", "SubagentStop", "PreCompact",
+    "Stop", "SessionEnd",
 };
-constexpr int kQoderHookEventsCount = 6;
+constexpr int kQoderHookEventsCount = 12;
 
 // 写入 ~/.cursor/hooks.json 的事件：Cursor 用自己的 camelCase 事件名和更
 // 扁平的 schema；桥接脚本把它们归一化为状态机认识的规范名：

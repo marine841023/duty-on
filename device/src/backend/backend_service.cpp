@@ -74,8 +74,22 @@ void BackendService::start() {
     bool expected = false;
     if (!run_.compare_exchange_strong(expected, true)) return;  // 已启动
 
+    // 启动即自检刷新 IDE hook：事件表（kQoderHookEvents 等）编译进二进制，
+    // 程序更新带来新事件时这里自动把各 IDE 的 settings.json/hooks.json 补到
+    // 最新，用户无需再手动点"安装 IDE 集成"。installHooks 幂等 + 内容无变化
+    // 不写盘（见 hooks_installer），平时启动只是只读比对，近乎零开销；hook
+    // 被删或新装 IDE 也能自愈。直调（非经 HTTP），失败只记日志不阻断启动。
+    // 注：成员 installHooks() 会遮蔽同名自由函数，必须全限定调用。
+    {
+        const InstallResult r = dutyon::backend::installHooks(resolveHooksSourceDir());
+        appendScannerLog(std::string("[hooks] auto-install ") +
+                         (r.success ? "ok" : "FAILED") +
+                         (r.warning.has_value() ? " warn=" + *r.warning : "") +
+                         (r.error.has_value() ? " err=" + *r.error : ""));
+    }
+
     // HTTP 监听（端口被占 = 旧实例并存：宠物照常跑，仅没有 hook 接收）
-    http_ = std::make_unique<HttpServer>(sm_, monitor_);
+    http_ = std::make_unique<HttpServer>(sm_, monitor_, pairing_);
     http_->setQuitHandler([this] { requestQuit(); });
     if (!http_->start()) {
         fprintf(stderr,

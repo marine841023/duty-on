@@ -115,6 +115,10 @@ UserConfig UserConfigStore::load() {
         cfg.active_character_id = j["activeCharacterId"].get<std::string>();
     if (j.contains("deviceMode") && j["deviceMode"].is_string())
         cfg.device_mode = j["deviceMode"].get<std::string>();
+    if (j.contains("frameSource") && j["frameSource"].is_string())
+        cfg.frame_source = j["frameSource"].get<std::string>();
+    if (j.contains("frameFolder") && j["frameFolder"].is_string())
+        cfg.frame_folder = j["frameFolder"].get<std::string>();
     if (j.contains("clockColor") && j["clockColor"].is_string())
         cfg.clock_color = j["clockColor"].get<std::string>();
     if (j.contains("deviceBrightness") && j["deviceBrightness"].is_number())
@@ -244,6 +248,16 @@ void UserConfigStore::saveDeviceMode(const std::string& mode) {
     updateConfig([&](json& j) { j["deviceMode"] = mode; });
 }
 
+void UserConfigStore::saveFrameSource(const std::string& source) {
+    // 相框播放源（motion=动作轮播 / folder=指定文件夹随机播放）
+    updateConfig([&](json& j) { j["frameSource"] = source; });
+}
+
+void UserConfigStore::saveFrameFolder(const std::string& path) {
+    // 照片文件夹绝对路径（仅 PC 本机 /api/frame/photo 使用，不下发）
+    updateConfig([&](json& j) { j["frameFolder"] = path; });
+}
+
 void UserConfigStore::saveClockColor(const std::string& color) {
     // 时钟颜色（amber/ice/white/green/pink）；同上经 /api/status 下发
     updateConfig([&](json& j) { j["clockColor"] = color; });
@@ -292,8 +306,39 @@ void UserConfigStore::saveStateAudioMuted(const std::string& key,
 }
 
 void UserConfigStore::saveScreenRotation(int deg) {
-    // 屏幕旋转角（度：0/90/180/270；设备端离屏 FBO + quad 旋转 blit）
+    // 屏幕旋转角（度：0/90/180/270）：设备端 rotation 0 直出，非 0 走
+    // 逻辑 FBO + 纯旋转合成（UV 已修正去镜像），并按朝向选左/上下布局
     updateConfig([&](json& j) { j["screenRotation"] = deg; });
+}
+
+std::map<std::string, std::string> UserConfigStore::loadPairedDevices() {
+    // 已配对设备表 { device_id: token }（PC 端启动时载入，重启免重配）
+    std::map<std::string, std::string> out;
+    std::ifstream in(configPath());
+    if (!in) return out;
+    json j;
+    try {
+        in >> j;
+    } catch (...) {
+        return out;
+    }
+    if (!j.is_object()) return out;
+    if (auto it = j.find("pairedDevices"); it != j.end() && it->is_object()) {
+        for (auto p = it->begin(); p != it->end(); ++p)
+            if (p.value().is_string())
+                out[p.key()] = p.value().get<std::string>();
+    }
+    return out;
+}
+
+void UserConfigStore::savePairedDevices(
+    const std::map<std::string, std::string>& devices) {
+    // 整体覆写 pairedDevices（读-改-写保留其余字段）
+    updateConfig([&](json& j) {
+        json obj = json::object();
+        for (const auto& kv : devices) obj[kv.first] = kv.second;
+        j["pairedDevices"] = std::move(obj);
+    });
 }
 
 void UserConfigStore::saveCustomCharacters(const UserConfig& cfg) {

@@ -18,10 +18,12 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <poll.h>
 
 #include <EGL/egl.h>
+#include <EGL/eglext.h>   // EGL_PLATFORM_GBM_MESA 等扩展枚举（egl.h 不含 eglext.h）
 #include <GLES3/gl3.h>
 #include <drm_fourcc.h>
 #include <gbm.h>
@@ -224,19 +226,187 @@ bool GlesContext::init(int width, int height) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
+    // 物理尺寸 = mode 尺寸；rotation 0 时逻辑 = 物理（直出）
+    phys_w_ = width_;
+    phys_h_ = height_;
+
     printf("[GlesContext] OpenGL ES context ready (%dx%d, direct)\n", width_,
            height_);
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// 整屏旋转：逻辑 FBO + 旋转合成（rotation != 0 才启用）
+// ---------------------------------------------------------------------------
+bool GlesContext::createCompositeProgram() {
+    auto compile = [](GLenum type, const char* src) -> GLuint {
+        GLuint s = glCreateShader(type);
+        glShaderSource(s, 1, &src, nullptr);
+        glCompileShader(s);
+        GLint ok = 0;
+        glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            char log[512] = {};
+            glGetShaderInfoLog(s, sizeof(log), nullptr, log);
+            fprintf(stderr, "[GlesContext] composite shader fail: %s\n", log);
+            glDeleteShader(s);
+            return 0;
+        }
+        return s;
+    };
+    const char* kVS =
+        "attribute vec2 a_pos;\n"
+        "attribute vec2 a_uv;\n"
+        "varying vec2 v_uv;\n"
+        "void main(){ gl_Position = vec4(a_pos, 0.0, 1.0); v_uv = a_uv; }\n";
+    const char* kFS =
+        "precision mediump float;\n"
+        "varying vec2 v_uv;\n"
+        "uniform sampler2D u_tex;\n"
+        "void main(){ gl_FragColor = vec4(texture2D(u_tex, v_uv).rgb, 1.0); }\n";
+    const GLuint vs = compile(GL_VERTEX_SHADER, kVS);
+    const GLuint fs = compile(GL_FRAGMENT_SHADER, kFS);
+    if (!vs || !fs) return false;
+    comp_prog_ = glCreateProgram();
+    glAttachShader(comp_prog_, vs);
+    glAttachShader(comp_prog_, fs);
+    glLinkProgram(comp_prog_);
+    GLint ok = 0;
+    glGetProgramiv(comp_prog_, GL_LINK_STATUS, &ok);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (!ok) {
+        fprintf(stderr, "[GlesContext] composite program link fail\n");
+        glDeleteProgram(comp_prog_);
+        comp_prog_ = 0;
+        return false;
+    }
+    return true;
+}
+
+bool GlesContext::createLogicalTarget() {
+    destroyLogicalTarget();
+    glGenTextures(1, &fbo_tex_);
+    glBindTexture(GL_TEXTURE_2D, fbo_tex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width_, height_, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenFramebuffers(1, &fbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           fbo_tex_, 0);
+    const GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (st != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "[GlesContext] logical FBO incomplete: 0x%x\n", st);
+        destroyLogicalTarget();
+        return false;
+    }
+    return true;
+}
+
+void GlesContext::destroyLogicalTarget() {
+    if (fbo_) { glDeleteFramebuffers(1, &fbo_); fbo_ = 0; }
+    if (fbo_tex_) { glDeleteTextures(1, &fbo_tex_); fbo_tex_ = 0; }
+    logical_active_ = false;
+}
+
+void GlesContext::bindLogicalTarget() {
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    glViewport(0, 0, width_, height_);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+// 把逻辑 FBO 旋转合成到默认帧缓冲（物理分辨率）：不透明贴图铺满整屏。
+// uv 按旋转角选取，使逻辑画面顺时针旋转 rotation_ 后上屏。
+void GlesContext::compositeToScreen() {
+    if (!comp_prog_ || !fbo_tex_) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, phys_w_, phys_h_);
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(comp_prog_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, fbo_tex_);
+    glUniform1i(glGetUniformLocation(comp_prog_, "u_tex"), 0);
+    // 全屏 quad（NDC：TL TR BL BR，TRIANGLE_STRIP）
+    static const float pos[8] = {-1, 1, 1, 1, -1, -1, 1, -1};
+    // uv 顺序对应 pos 的 TL/TR/BL/BR；纹理 v=1 = 逻辑画面视觉顶部。
+    // 下列映射为纯旋转（行列式 +1，无镜像）：屏幕某角采样「旋转后应落到
+    // 该角的逻辑角」。旧表把 180 映成左右镜像、identity 映成上下翻转，
+    // 是本次「人物/时间/任务全反」的根因。
+    float uv[8];
+    switch (rotation_) {
+        case 90:  { const float v[8] = {0, 0, 0, 1, 1, 0, 1, 1}; memcpy(uv, v, sizeof(v)); break; }
+        case 180: { const float v[8] = {1, 0, 0, 0, 1, 1, 0, 1}; memcpy(uv, v, sizeof(v)); break; }
+        case 270: { const float v[8] = {1, 1, 1, 0, 0, 1, 0, 0}; memcpy(uv, v, sizeof(v)); break; }
+        default:  { const float v[8] = {0, 1, 1, 1, 0, 0, 1, 0}; memcpy(uv, v, sizeof(v)); break; }
+    }
+    const GLint lp = glGetAttribLocation(comp_prog_, "a_pos");
+    const GLint lu = glGetAttribLocation(comp_prog_, "a_uv");
+    glEnableVertexAttribArray(lp);
+    glEnableVertexAttribArray(lu);
+    glVertexAttribPointer(lp, 2, GL_FLOAT, GL_FALSE, 0, pos);
+    glVertexAttribPointer(lu, 2, GL_FLOAT, GL_FALSE, 0, uv);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisableVertexAttribArray(lp);
+    glDisableVertexAttribArray(lu);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glUseProgram(0);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+void GlesContext::setRotation(int deg) {
+    deg = ((deg % 360) + 360) % 360;
+    if (deg != 0 && deg != 90 && deg != 180 && deg != 270) return;
+    if (deg == rotation_) return;
+    rotation_ = deg;
+    const bool swap = (deg == 90 || deg == 270);
+    width_ = swap ? phys_h_ : phys_w_;
+    height_ = swap ? phys_w_ : phys_h_;
+    if (deg == 0) {
+        destroyLogicalTarget();
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, width_, height_);
+    } else {
+        if (!comp_prog_ && !createCompositeProgram()) {
+            rotation_ = 0; width_ = phys_w_; height_ = phys_h_;
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, width_, height_);
+            return;
+        }
+        if (!createLogicalTarget()) {
+            // FBO 不可用：回退直出（宁可不旋转也不黑屏）
+            fprintf(stderr, "[GlesContext] rotation fallback to direct\n");
+            rotation_ = 0; width_ = phys_w_; height_ = phys_h_;
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, width_, height_);
+            return;
+        }
+        logical_active_ = true;
+        bindLogicalTarget();
+    }
+    printf("[GlesContext] rotation %d (logical %dx%d -> physical %dx%d)\n",
+           rotation_, width_, height_, phys_w_, phys_h_);
+}
+
 void GlesContext::swapBuffers() {
     if (display_ == EGL_NO_DISPLAY || surface_ == EGL_NO_SURFACE) return;
+    // 旋转合成：场景渲染在逻辑 FBO，先旋转贴满默认帧缓冲（物理屏）再翻页
+    if (logical_active_) compositeToScreen();
     eglSwapBuffers(display_, surface_);
     if (!drm_ || !drm_->surf) return;
 
     gbm_bo* bo = gbm_surface_lock_front_buffer(drm_->surf);
     if (!bo) return;
-    const uint32_t fb = fbIdForBo(*drm_, bo, width_, height_);
+    // fb 尺寸必须用物理（mode）尺寸：GBM surface 按 phys_w_/phys_h_ 创建，
+    // 旋转时 width_/height_ 已是逻辑尺寸（不可用于 fb 注册，否则与 bo 不匹配）
+    const uint32_t fb = fbIdForBo(*drm_, bo, phys_w_, phys_h_);
     if (!fb) {
         gbm_surface_release_buffer(drm_->surf, bo);
         return;
@@ -248,8 +418,8 @@ void GlesContext::swapBuffers() {
                            &drm_->connector_id, 1, &drm_->mode) != 0) {
             fprintf(stderr, "[GlesContext] drmModeSetCrtc failed\n");
         } else {
-            printf("[GlesContext] setCrtc ok (fb %u %dx%d)\n", fb, width_,
-                   height_);
+            printf("[GlesContext] setCrtc ok (fb %u %dx%d)\n", fb, phys_w_,
+                   phys_h_);
         }
         drm_->mode_set = true;
     } else if (drmModePageFlip(drm_->fd, drm_->crtc_id, fb,
@@ -278,9 +448,15 @@ void GlesContext::swapBuffers() {
         gbm_surface_release_buffer(drm_->surf, drm_->shown_bo);
     }
     drm_->shown_bo = bo;
+    // 复位逻辑目标（绑 FBO + 视口 + 混合态），供下一帧场景渲染
+    if (logical_active_) bindLogicalTarget();
 }
 
 void GlesContext::destroy() {
+    if (context_ != EGL_NO_CONTEXT) {
+        destroyLogicalTarget();
+        if (comp_prog_) { glDeleteProgram(comp_prog_); comp_prog_ = 0; }
+    }
     if (display_ != EGL_NO_DISPLAY) {
         eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         if (surface_ != EGL_NO_SURFACE) eglDestroySurface(display_, surface_);

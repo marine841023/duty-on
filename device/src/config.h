@@ -2,16 +2,14 @@
 
 namespace dutyon {
 
-// USB 直连（NCM gadget，Windows 内置 usbnet 免驱）：设备以 USB 网卡形态
-// 接入 PC，usb0 = 192.168.7.1 并通过 systemd-networkd 内置 DHCP 给 PC 派发
-// 地址；应用层从 ARP 邻居表自动发现 PC（见 net/usb_link.cpp）。
-// PC 端仍需在 ~/.dutyon/config.json 设 "externalAccess": true（服务器改绑
-// 0.0.0.0，http_server.cpp 读取）。
-constexpr const char* kUsbLinkName = "usb0";
+// Wi-Fi 局域网连接（配对码方案）：设备加入家庭 Wi-Fi 后与 PC 同网段，
+// 经 UDP 广播发现 PC（见 net/pc_discovery.cpp）；PC 端服务器绑 0.0.0.0，
+// 由配对 token 门控（见 backend/http_server.cpp）。
 constexpr int kApiPort = 17521;
-
-// 开机引导横幅（未插 USB 时屏幕底部提示"请通过 USB 连接电脑"）
-constexpr const char* kPromptBannerPath = "/opt/dutyon/assets/prompt-usb.png";
+// 设备发现 PC 的 UDP 广播端口（Wi-Fi 配对码方案）：设备广播
+// DUTYON_DISCOVER 到此端口，PC 后端监听并单播回 DUTYON_OFFER。
+// 见 net/pc_discovery.cpp（设备）与 backend/http_server.cpp（PC）。
+constexpr int kDiscoveryPort = 17522;
 
 // 任务列表文字字体（Noto Sans SC Regular，OFL 开源；随部署包放到 assets）
 constexpr const char* kFontPath = "/opt/dutyon/assets/font-noto-sc.otf";

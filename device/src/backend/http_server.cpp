@@ -20,11 +20,17 @@
 #include <httplib.h>
 
 #include <chrono>
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <random>
 #include <sstream>
 #include <thread>
 
@@ -32,6 +38,12 @@
 #include "backend/backend_config.h"
 #include "backend/hooks_installer.h"
 #include "backend/ide_scanner.h"
+#include "backend/pairing_manager.h"
+
+// 照片缩放重编码（仅本 TU 定义实现；解码实现在 live2d_renderer.cpp）
+#include <stb_image.h>
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>
 
 namespace dutyon::backend {
 
@@ -92,20 +104,6 @@ bool isLoopback(const std::string& addr) {
     return addr == "127.0.0.1" || addr == "::1" || addr == "localhost";
 }
 
-// 「允许外部访问」开关（1.x 同名菜单项的配置层移植）：~/.dutyon/config.json
-// 里 "externalAccess": true 时服务器改绑 0.0.0.0，供局域网硬件屏（香橙派等）
-// 轮询 /api/* 只读接口。写端点仍受 loopback_guard 保护，外部不可注入事件。
-// 修改后需重启生效（绑定地址只在 start() 读一次）。
-bool externalAccessEnabled() {
-    const std::string home = homeDir();
-    if (home.empty()) return false;
-    auto content = readFileIfExists(fs::path(home) / ".dutyon" / "config.json");
-    if (!content.has_value()) return false;
-    json j = json::parse(*content, nullptr, /*allow_exceptions=*/false);
-    return !j.is_discarded() && j.is_object() && j.contains("externalAccess") &&
-           j["externalAccess"].is_boolean() && j["externalAccess"].get<bool>();
-}
-
 // 200 + JSON 响应（匿名 namespace 自由函数：路由 lambda 不必逐个捕获）
 void okJson(httplib::Response& res, const json& j) {
     res.status = 200;
@@ -122,9 +120,158 @@ json readConfigJson() {
     return json::parse(*content, nullptr, /*allow_exceptions=*/false);
 }
 
+// ---------------------------------------------------------------------------
+// 相框「指定文件夹」照片服务（GET /api/frame/photo）
+//
+// 设备端不批量同步照片：每播放完一张才要下一张，本端每次只回一个文件，
+// 照片始终留在 PC 磁盘（设备侧零落盘、不累积）。文件列表按目录 5s 缓存，
+// 目录增删照片最迟 5s 生效；选取用蓄水池随机（每请求独立抽签）：一轮内
+// 几乎不重复，无需在 PC 端维护播放进度表。
+// 大尺寸手机照片按 max_side 在 PC 端缩放重编码后下发（设备内存/带宽友好），
+// 重编码结果按文件路径+mtime+尺寸键缓存于内存（不写盘）。
+// ---------------------------------------------------------------------------
+constexpr auto kFrameDirTtl = std::chrono::seconds(5);
+constexpr int kFrameMaxSide = 1536;   // 下发照片最长边上限（设备屏 800x480）
+constexpr size_t kFrameCacheBudget = 12 * 1024 * 1024;  // 重编码缓存预算
+
+struct FrameDirCache {
+    std::mutex mtx;
+    std::string dir_key;                      // 当前缓存的目录
+    std::chrono::steady_clock::time_point scanned{};
+    std::vector<fs::path> files;
+};
+FrameDirCache g_frame_dir;
+
+struct FramePhotoCacheItem {
+    std::string key;   // 绝对路径|mtime秒|文件大小
+    std::string jpeg;  // 重编码字节
+};
+std::vector<FramePhotoCacheItem> g_frame_photos;  // 前端单请求顺序访问，不加锁
+
+bool isFramePhotoExt(const fs::path& p) {
+    std::string ext = p.extension().string();
+    for (auto& ch : ext) ch = (char)tolower((unsigned char)ch);
+    return ext == ".jpg" || ext == ".jpeg" || ext == ".png";
+}
+
+// 列目录（非递归，仅 jpg/jpeg/png）；TTL 内命中缓存。空 vector = 目录无效或无图
+std::vector<fs::path> framePhotoList(const fs::path& dir) {
+    std::lock_guard<std::mutex> lk(g_frame_dir.mtx);
+    const auto now = std::chrono::steady_clock::now();
+    const std::string key = dir.string();
+    if (g_frame_dir.dir_key != key || now - g_frame_dir.scanned >= kFrameDirTtl) {
+        std::vector<fs::path> files;
+        std::error_code ec;
+        if (fs::is_directory(dir, ec)) {
+            for (const auto& e : fs::directory_iterator(dir, ec)) {
+                if (e.is_regular_file(ec) && isFramePhotoExt(e.path()))
+                    files.push_back(e.path());
+            }
+        }
+        std::sort(files.begin(), files.end());  // 缓存顺序稳定，便于键比对
+        g_frame_dir.dir_key = key;
+        g_frame_dir.scanned = now;
+        g_frame_dir.files = std::move(files);
+    }
+    return g_frame_dir.files;
+}
+
+// 蓄水池随机：n 个里等概率取 1 个（无需保存“已播过”集合）
+size_t framePickReservoir(size_t n) {
+    static std::mt19937_64 rng{
+        (uint64_t)std::random_device{}() * 0x9E3779B97F4A7C15ull ^
+        (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count()};
+    std::uniform_real_distribution<double> u(0.0, 1.0);
+    size_t pick = 0;
+    for (size_t i = 1; i < n; ++i)
+        if (u(rng) < 1.0 / (double)(i + 1)) pick = i;
+    return pick;
+}
+
+// 缩到最长边 ≤ max_side 并重编码 JPEG（质量 88）；失败返回空。
+// 缓存命中直接复用（避免每张新照片都占一次 CPU 缩放）。
+std::string framePhotoScaled(const fs::path& file, int max_side) {
+    std::error_code ec;
+    const auto mt = fs::last_write_time(file, ec);
+    const auto sz = fs::file_size(file, ec);
+    std::string key = file.string() + "|" +
+                      std::to_string(mt.time_since_epoch().count()) + "|" +
+                      std::to_string((unsigned long long)sz);
+    for (size_t i = 0; i < g_frame_photos.size(); ++i) {
+        if (g_frame_photos[i].key != key) continue;
+        if (i != 0) {
+            FramePhotoCacheItem it = std::move(g_frame_photos[i]);
+            g_frame_photos.erase(g_frame_photos.begin());
+            g_frame_photos.insert(g_frame_photos.begin(), std::move(it));
+        }
+        return g_frame_photos.front().jpeg;
+    }
+    auto raw = readFileIfExists(file);
+    if (!raw.has_value() || raw->empty()) return {};
+    int w = 0, h = 0, ch = 0;
+    unsigned char* px = stbi_load_from_memory(
+        (const unsigned char*)raw->data(), (int)raw->size(), &w, &h, &ch, 3);
+    if (!px) {
+        stbi_image_free(px);
+        return {};  // 解不开（伪装扩展名/损坏）：当作无图
+    }
+    std::string out;
+    const int longest = w > h ? w : h;
+    if (longest > max_side && longest > 0) {
+        const int nw = (int)((double)w * max_side / longest + 0.5);
+        const int nh = (int)((double)h * max_side / longest + 0.5);
+        const int sw = nw < 1 ? 1 : nw, sh = nh < 1 ? 1 : nh;
+        // 最近邻缩放（照片仅用于 800x480 屏预览，不追求插值质量；
+        // 避免引入 stb_image_resize 头文件）
+        std::vector<unsigned char> dst((size_t)sw * sh * 3);
+        for (int y = 0; y < sh; ++y) {
+            int sy = (int)((double)y * h / sh);
+            if (sy >= h) sy = h - 1;
+            for (int x = 0; x < sw; ++x) {
+                int sx = (int)((double)x * w / sw);
+                if (sx >= w) sx = w - 1;
+                const unsigned char* s = px + ((size_t)sy * w + sx) * 3;
+                unsigned char* d = &dst[((size_t)y * sw + x) * 3];
+                d[0] = s[0];
+                d[1] = s[1];
+                d[2] = s[2];
+            }
+        }
+        std::vector<unsigned char> buf;
+        stbi_write_jpg_to_func(
+            [](void* ctx, void* data, int size) {
+                auto* v = static_cast<std::vector<unsigned char>*>(ctx);
+                v->insert(v->end(), (const unsigned char*)data,
+                          (const unsigned char*)data + size);
+            },
+            &buf, sw, sh, 3, dst.data(), 88);
+        out.assign((const char*)buf.data(), buf.size());
+    }
+    stbi_image_free(px);
+    if (!out.empty()) {
+        // LRU 写入：同键已存在则先移除；超预算从尾逐出（只留最近几张）
+        for (auto it = g_frame_photos.begin(); it != g_frame_photos.end();) {
+            if (it->key == key) it = g_frame_photos.erase(it);
+            else ++it;
+        }
+        g_frame_photos.insert(g_frame_photos.begin(),
+                              FramePhotoCacheItem{key, out});
+        size_t total = 0;
+        for (auto it = g_frame_photos.begin(); it != g_frame_photos.end();) {
+            total += it->jpeg.size();
+            if (total > kFrameCacheBudget && g_frame_photos.size() > 1)
+                it = g_frame_photos.erase(it);
+            else
+                ++it;
+        }
+    }
+    return out;
+}
+
 } // namespace
 
-HttpServer::HttpServer(StateManager& sm, SysMonitor& monitor) : sm_(sm), monitor_(monitor) {}
+HttpServer::HttpServer(StateManager& sm, SysMonitor& monitor, PairingManager& pairing)
+    : sm_(sm), monitor_(monitor), pairing_(pairing) {}
 
 HttpServer::~HttpServer() { stop(); }
 
@@ -141,7 +288,10 @@ bool HttpServer::start() {
 
     registerRoutes();
 
-    const char* bind_host = externalAccessEnabled() ? "0.0.0.0" : bc::kHost;
+    // 始终绑 0.0.0.0：设备经局域网 Wi-Fi 访问（不再有 USB 网段直连假设）。
+    // 安全由 token 门控保证 —— /api/* 除配对端点外，未配对/无效 token 一律
+    // 401（见 set_pre_routing_handler），写端点仍受 loopback_guard 保护。
+    const char* bind_host = "0.0.0.0";
     if (!svr_->bind_to_port(bind_host, (int)bc::kPort)) {
         // AddrInUse = 已有实例在跑（老版本双进程并存期也会出现）
         fprintf(stderr, "[HttpServer] Port %u is already in use. Another instance may be "
@@ -159,44 +309,76 @@ bool HttpServer::start() {
         }
         running_ = false;
     }).detach();
-    printf("[HttpServer] Listening on http://%s:%u%s\n", bind_host, (unsigned)bc::kPort,
-           externalAccessEnabled() ? " (external access ON)" : "");
+    printf("[HttpServer] Listening on http://%s:%u (token-gated)\n", bind_host,
+           (unsigned)bc::kPort);
 
-    // USB 直连通告：设备端（NCM gadget，usb0=192.168.7.1）从 ARP 邻居表
-    // 发现 PC（net/usb_link.cpp），但 Windows 插入后若一直无人向该网段
-    // 发包（IP 是静态/DHCP 已缓存时不会主动广播），设备会无限等不到 ARP
-    // 条目 —— 实测插线 5 分钟仍显示「请连接电脑」。这里每 2s 向设备固定
-    // 地址发一个 UDP 报文迫使 Windows 发出 ARP 解析，设备即可秒级发现。
-    // 无 USB 网卡时 sendto 报错忽略，开销可忽略。
-    std::thread([] {
-        WSADATA wsa;
-        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return;
-        SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
-        if (sock == INVALID_SOCKET) {
-            WSACleanup();
-            return;
-        }
-        sockaddr_in dst{};
-        dst.sin_family = AF_INET;
-        dst.sin_port = htons(9);  // discard 端口，报文到达即被丢弃
-        inet_pton(AF_INET, "192.168.7.1", &dst.sin_addr);
-        char buf[1] = {0};
-        for (;;) {
-            (void)sendto(sock, buf, sizeof(buf), 0,
-                         reinterpret_cast<sockaddr*>(&dst), sizeof(dst));
-            Sleep(2000);
-        }
-    }).detach();
+    // 设备发现应答线程（UDP 17522）：替代旧 USB 网段的 ARP 通告。
+    // joinable 成员线程（非 detach）：stop() 置否标志后 join，避免退出时
+    // 线程仍访问已析构的 pairing_（recv 超时 500ms，join 最多等这么久）。
+    discovery_run_ = true;
+    discovery_thread_ = std::thread([this] { runDiscovery(); });
     return true;
 }
 
 void HttpServer::stop() {
+    discovery_run_ = false;  // 发现线程收包超时 500ms 内醒来并退出
+    if (discovery_thread_.joinable()) discovery_thread_.join();
     if (svr_) {
         svr_->stop();
         delete svr_;
         svr_ = nullptr;
     }
     running_ = false;
+}
+
+void HttpServer::runDiscovery() {
+    // UDP 17522 发现应答：设备入网后广播 DUTYON_DISCOVER <device_id>，这里
+    // 单播回 DUTYON_OFFER <api_port> <paired>，设备据回包源 IP + 端口组
+    // base_url 轮询 /api/*（替代旧 USB 网段的 ARP 通告，见 net/pc_discovery）。
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return;
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock == INVALID_SOCKET) {
+        WSACleanup();
+        return;
+    }
+    // 收包超时 500ms：周期性检查 discovery_run_ 以便 stop() 及时退出
+    DWORD rcv_to = 500;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcv_to, sizeof(rcv_to));
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_ANY);
+    local.sin_port = htons(bc::kDiscoveryPort);
+    if (bind(sock, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == SOCKET_ERROR) {
+        fprintf(stderr, "[Discovery] bind :%u failed (%d)\n",
+                (unsigned)bc::kDiscoveryPort, WSAGetLastError());
+        closesocket(sock);
+        WSACleanup();
+        return;
+    }
+    printf("[Discovery] listening on UDP :%u\n", (unsigned)bc::kDiscoveryPort);
+    while (discovery_run_.load()) {
+        char buf[256] = {};
+        sockaddr_in from{};
+        int fromlen = sizeof(from);
+        const int n = recvfrom(sock, buf, sizeof(buf) - 1, 0,
+                               reinterpret_cast<sockaddr*>(&from), &fromlen);
+        if (n <= 0) continue;  // 超时/错误 -> 回头检查运行标志
+        buf[n] = '\0';
+        char prefix[32] = {};
+        char device_id[128] = {};
+        if (sscanf(buf, "%31s %127s", prefix, device_id) != 2) continue;
+        if (strcmp(prefix, "DUTYON_DISCOVER") != 0) continue;
+        const int paired = pairing_.isPaired(device_id) ? 1 : 0;
+        char offer[64];
+        const int len = snprintf(offer, sizeof(offer), "DUTYON_OFFER %u %d",
+                                 (unsigned)bc::kPort, paired);
+        if (len > 0)
+            (void)sendto(sock, offer, len, 0,
+                         reinterpret_cast<sockaddr*>(&from), sizeof(from));
+    }
+    closesocket(sock);
+    WSACleanup();
 }
 
 void HttpServer::registerRoutes() {
@@ -222,14 +404,38 @@ void HttpServer::registerRoutes() {
         res.status = 204;
     });
 
-    // 硬件显示端在线跟踪：USB 网段（192.168.7.x）任意请求记录时间戳
-    //（设备 ~2s 轮询一次 /api/status，10 秒窗口足够容错丢包）
-    svr_->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response&) {
-        if (req.remote_addr.rfind("192.168.7.", 0) == 0)
-            device_last_seen_.store(
-                std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::steady_clock::now().time_since_epoch())
-                    .count());
+    // token 门控（Wi-Fi 配对码方案）：非回环（局域网设备）访问 /api/*、
+    // /live2d/* 必须携有效 X-DutyOn-Token（= 已配对），否则 401；配对端点
+    // /api/pair-request 豁免（设备此时尚无令牌）。回环 = 本机 PC（菜单
+    // 动作 / IDE hook 桥接）不受门控。带有效 token 的轮询同时刷新设备
+    // 在线时间戳（菜单"设备"子页显示/隐藏在线设置项）。
+    svr_->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
+        if (req.method == "OPTIONS")  // CORS 预检放行
+            return httplib::Server::HandlerResponse::Unhandled;
+        if (!isLoopback(req.remote_addr)) {
+            const std::string& path = req.path;
+            const bool need_auth =
+                path.rfind("/api/", 0) == 0 || path.rfind("/live2d/", 0) == 0;
+            const bool pairing_ep = (path == "/api/pair-request");
+            if (need_auth && !pairing_ep) {
+                const std::string tok = req.get_header_value("X-DutyOn-Token");
+                if (!pairing_.validateToken(tok)) {
+                    res.status = 401;
+                    res.set_content("unpaired device", "text/plain");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+                device_last_seen_.store(
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count());
+                // 捕获设备上报的程序版本（与在线时间戳同请求刷新，故
+                // deviceOnline() 翻真时 deviceVersion() 必为最新）
+                {
+                    std::lock_guard<std::mutex> lk(ver_mtx_);
+                    device_version_ = req.get_header_value("X-DutyOn-Version");
+                }
+            }
+        }
         return httplib::Server::HandlerResponse::Unhandled;
     });
 
@@ -361,6 +567,33 @@ void HttpServer::registerRoutes() {
         okJson(res, {{"status", "ok"}, {"port", (int)bc::kPort}});
     });
 
+    // POST /api/pair-request —— 设备配对握手（Wi-Fi 配对码方案）。
+    // body {deviceId, code}：已配对 -> {status:"paired", token}（设备拿回
+    // 令牌）；未配对 -> 记 pending 并回 {status:"pending"}，等用户在 PC
+    // 菜单输入设备屏幕上的配对码确认。免 token 门控（见 pre-routing 豁免）。
+    svr_->Post("/api/pair-request",
+               [this, add_cors](const httplib::Request& req, httplib::Response& res) {
+                   add_cors(res);
+                   json body = json::parse(req.body, nullptr, /*allow_exceptions=*/false);
+                   std::string device_id, code;
+                   if (!body.is_discarded() && body.is_object()) {
+                       device_id = body.value("deviceId", std::string{});
+                       code = body.value("code", std::string{});
+                   }
+                   if (device_id.empty()) {
+                       res.status = 400;
+                       res.set_content("missing deviceId", "text/plain");
+                       return;
+                   }
+                   std::string token;
+                   const std::string st = pairing_.handleRequest(device_id, code,
+                                                                 req.remote_addr, &token);
+                   if (st == "paired")
+                       okJson(res, {{"status", "paired"}, {"token", token}});
+                   else
+                       okJson(res, {{"status", "pending"}});
+               });
+
     svr_->Get("/api/status", [this, add_cors](const httplib::Request&, httplib::Response& res) {
         add_cors(res);
         json j = sm_.snapshotJson();
@@ -370,9 +603,13 @@ void HttpServer::registerRoutes() {
         if (json cfg = readConfigJson(); cfg.is_object()) {
             j["activeCharacter"] = cfg.value("activeCharacterId", std::string{});
             j["deviceMode"] = cfg.value("deviceMode", "multi");
+            // 相框播放源（motion=动作轮播 / folder=指定文件夹照片）；旧版
+            // 设备端忽略未知字段，行为保持动作轮播
+            j["frameSource"] = cfg.value("frameSource", "motion");
             j["clockColor"] = cfg.value("clockColor", "amber");
             j["deviceBrightness"] = cfg.value("deviceBrightness", 100);
             j["screenRotation"] = cfg.value("screenRotation", 0);
+            j["flipHorizontal"] = cfg.value("flipHorizontal", false);
             // 状态音频（设备端状态切换时播放）：activeAudio = 当前角色
             // {状态: 文件名}；soundMute = 完全静音；soundMutedStates =
             // 当前角色被单独静音的状态列表（后端按 activeCharacterId 算好）
@@ -472,6 +709,50 @@ void HttpServer::registerRoutes() {
             res.set_content("not found", "text/plain");
         }
     });
+
+    // GET /api/frame/photo —— 相框「指定文件夹」随机下发一张（不落盘设备）。
+    // 参数 max_side（默认 1536）：超限照片由 PC 端缩放重编码，回包可能是
+    // 原文件也可能是重编码 JPEG，统一按 image/jpeg 给（设备端 stb 自识格式）。
+    // 照片留在 PC 磁盘：设备每播完一张才要下一张，随机在 PC 端抽，设备侧
+    // 内存里始终只有一张。
+    svr_->Get(R"(/api/frame/photo)",
+              [](const httplib::Request& req, httplib::Response& res) {
+                  const json cfg = readConfigJson();
+                  const std::string folder = cfg.value("frameFolder", std::string{});
+                  auto no_photo = [&res](const char* why) {
+                      res.status = 404;
+                      res.set_content(why, "text/plain");
+                  };
+                  if (folder.empty()) return no_photo("no frame folder");
+                  int max_side = kFrameMaxSide;
+                  if (req.has_param("max_side")) {
+                      const int v = atoi(req.get_param_value("max_side").c_str());
+                      if (v >= 256 && v <= 4096) max_side = v;
+                  }
+                  const auto files = framePhotoList(fs::path(folder));
+                  if (files.empty()) return no_photo("no photos");
+                  const fs::path& pick = files[framePickReservoir(files.size())];
+                  auto bytes = readFileIfExists(pick);
+                  if (!bytes.has_value() || bytes->empty())
+                      return no_photo("photo unreadable");
+                  std::error_code ec;
+                  const auto sz = fs::file_size(pick, ec);
+                  std::string body;
+                  bool scaled = false;
+                  // 原文件已足够小：直接透传（零 CPU，保留 PNG 无损）
+                  if (sz <= 1536 * 1024) {
+                      body = std::move(*bytes);
+                  } else {
+                      body = framePhotoScaled(pick, max_side);
+                      scaled = !body.empty();
+                      if (!scaled) body = std::move(*bytes);  // 重编码失败回退原图
+                  }
+                  res.status = 200;
+                  res.set_header("X-DutyOn-Photo",
+                                 pick.filename().string());
+                  res.set_header("X-DutyOn-Photo-Scaled", scaled ? "1" : "0");
+                  res.set_content(std::move(body), "image/jpeg");
+              });
 
     // GET /api/events —— SSE 状态流。每次状态机有效变更推完整 Snapshot；
     // 15s keep-alive 注释防代理掐空闲连接。

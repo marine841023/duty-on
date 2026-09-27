@@ -47,6 +47,12 @@ struct UserConfig {
     // 硬件显示端模式：single=单任务（角色全屏+大时钟）/ multi=多任务
     //（角色+任务列表）/ frame=电子相框（角色全屏循环播放动作）
     std::string device_mode = "multi";
+    // 相框模式的播放源（deviceMode=frame 时才有意义）：motion=动作轮播
+    //（现行行为，角色循环播放动作）/ folder=指定文件夹（PC 端本机
+    // frameFolder 里的 JPG/PNG 逐张下发到设备随机播放）
+    std::string frame_source = "motion";
+    // 照片文件夹绝对路径（UTF-8，PC 端本机目录；菜单「选择文件夹」写入）
+    std::string frame_folder;
     // 硬件显示端时钟颜色：amber(默认)/ice/white/green/pink
     std::string clock_color = "amber";
     // 硬件显示端屏幕亮度：10-100（百分比）。当前屏无内核背光接口时，
@@ -98,6 +104,10 @@ public:
     static void saveCustomCharacters(const UserConfig& cfg);
     // 硬件显示端模式（single/multi/frame；PC 菜单选择后经 /api/status 下发）
     static void saveDeviceMode(const std::string& mode);
+    // 相框播放源（motion/folder；同上经 /api/status 下发给设备）
+    static void saveFrameSource(const std::string& source);
+    // 相框照片文件夹绝对路径（仅 PC 本机使用：/api/frame/photo 据此读图）
+    static void saveFrameFolder(const std::string& path);
     // 硬件显示端时钟颜色（amber/ice/white/green/pink；同上经 /api/status 下发）
     static void saveClockColor(const std::string& color);
     // 硬件显示端屏幕亮度（10-100；同上经 /api/status 下发）
@@ -113,6 +123,14 @@ public:
 
     // 屏幕旋转角（度）；/api/status 每次轮询读文件下发设备端
     static void saveScreenRotation(int deg);
+
+    // ---- 已配对设备（Wi-Fi 配对码方案，PC 端）----
+    // ~/.dutyon/config.json 的 pairedDevices 字段：{ device_id: token }。
+    // 设备首启广播发现 -> POST /api/pair-request；用户在 PC 菜单输入设备
+    // 屏幕上的 6 位配对码后签发 token 并写入此表，之后设备带 token 轮询
+    // /api/*，PC 仅服务已配对设备（见 backend/pairing_manager.cpp）。
+    static std::map<std::string, std::string> loadPairedDevices();
+    static void savePairedDevices(const std::map<std::string, std::string>& devices);
 
     // ---- 模型目录（内置 frontend/assets/live2d + 用户 ~/.dutyon/live2d）----
     // builtin_roots: 内置模型搜索目录（相对 exe 解析，main 传入）

@@ -40,6 +40,10 @@ struct PetStatus {
     // single=单任务（角色全屏+大时钟）/ multi=多任务（角色+任务列表，默认）/
     // frame=电子相框（角色全屏循环播放动作，不响应任务状态）
     std::string device_mode;
+    // 相框播放源（PC 菜单设定，config.json frameSource，deviceMode=frame 时
+    // 才有意义）：motion=动作轮播（现行）/ folder=指定文件夹（PC 本机照片
+    // 逐张下发随机播放，见 PhotoPlayer）。旧版后端无此字段时为空=动作轮播
+    std::string frame_source;
     // 时钟颜色主题（PC 菜单设定，config.json clockColor）：
     // amber=暗橙(默认)/ice=冰蓝/white=暖白/green=翠绿/pink=粉紫
     std::string clock_color;
@@ -62,6 +66,10 @@ struct PetStatus {
     // config.json screenRotation）：设备端逻辑竖屏 480x800 渲染到离屏
     // FBO，swapBuffers 时 quad 按旋转角 blit 到 800x480 横 mode 上屏
     int screen_rotation = 0;
+    // 左右翻转（镜像）人物（PC 菜单"左右翻转"设定，config.json
+    // flipHorizontal）：设备端同步翻转 Live2D/GIF 角色与 PC 保持一致。
+    // 翻转在逻辑场景内进行，与整屏旋转合成正交、可叠加
+    bool flip_horizontal = false;
 };
 
 // 与 PC 端 /api/metrics 返回的 MetricsSnapshot 对应
@@ -88,14 +96,35 @@ struct SysMetrics {
 // 网络阻塞不会影响帧率。PC 端内嵌后端直连，不走此类。
 class ApiClient {
 public:
-    // base_url 可为空：表示链路未建立，轮询线程暂停（USB 直连场景下
-    // 开机未插线即此状态，由 setBaseUrl 接入租约发现的地址）
+    // base_url 可为空：表示链路未建立，轮询线程暂停（开机未入网/未发现
+    // PC 即此状态，由 setBaseUrl 接入 pc_discovery 发现的地址）
     explicit ApiClient(const std::string& base_url);
     ~ApiClient();
 
-    // USB 链路变化时更新目标地址（主线程调用；空串 = 断连暂停轮询）。
+    // 链路变化时更新目标地址（主线程调用；空串 = 断连暂停轮询）。
     // 线程安全：内部加锁，轮询线程下一周期（≤100ms）生效
     void setBaseUrl(const std::string& url);
+
+    // ---- Wi-Fi 配对码方案：设备身份 + 配对握手 ----
+    // 提供 device_id / pair_code；existing_token 非空表示已配对（直接用于
+    // 后续请求，不再握手）。链路建立且未配对时，工作线程周期 POST
+    // /api/pair-request，拿到 token 后经 takePairToken() 交主线程持久化，
+    // 并自动附加到后续 /api/* 请求头（X-DutyOn-Token）。token 失效（PC
+    // 侧 401）时自动清除并重新握手，实现自愈。
+    void setIdentity(const std::string& device_id, const std::string& pair_code,
+                     const std::string& existing_token);
+
+    // 设置本设备程序版本（启动时读 /opt/dutyon/VERSION，由 sync-device.ps1
+    // 部署时写入）：附加到每次 /api/status 轮询头 X-DutyOn-Version，供 PC
+    // 端与源码哈希比对触发自动更新。空串 = 未知（旧固件/未同步）
+    void setProgramVersion(const std::string& version);
+
+    // 工作线程配对成功后返回新 token（消费一次后返回空串）；主线程据此
+    // 调 DeviceIdentity::setToken 持久化
+    std::string takePairToken();
+
+    // 是否已持有有效 token（本地视角）
+    bool paired() const;
 
     // 取自上次消费以来最新一次成功轮询的状态；无新数据返回 nullopt
     std::optional<PetStatus> takeStatus();
@@ -128,8 +157,13 @@ public:
     CustomCharacter fetchCharacter(const std::string& expect_id);
 
     // 下载自定义形象动画文件（/api/animations/<file>）到 save_path。
-    // GIF 数 MB 走 USB 直连约 1s；调用方应避免每帧触发
+    // GIF 数 MB 走局域网约 1s；调用方应避免每帧触发
     bool downloadAnimation(const std::string& file_name, const std::string& save_path);
+
+    // 相框「指定文件夹」：向 PC 要下一张照片（GET /api/frame/photo），编码
+    // 字节直接收进内存（不落盘，设备侧任意时刻最多一张）。失败（PC 离线 /
+    // 无照片）返回 false。调用方应在后台线程执行（网络可能耗时）。
+    bool fetchFramePhoto(std::vector<unsigned char>& out_bytes);
 
     // 下载用户 Live2D 模型文件（GET /live2d/<rel>，rel 相对 PC 端
     // ~/.dutyon/live2d/，可含子目录）到 save_path。路径按段百分号编码，

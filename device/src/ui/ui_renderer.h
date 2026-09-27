@@ -61,6 +61,13 @@ public:
     // 菜单打开时窗口需要在常规宽度外向右扩展的像素数（0 = 菜单关闭）
     float menuExtraWidth() const;
 
+    // 菜单内容的自然高度（切换形象等长视图会超出常规窗口高）；主循环据此
+    // 向上增高窗口容纳菜单。返回 0 = 菜单关闭或本帧尚未测量
+    float menuDesiredHeight() const;
+    // 主循环回注本帧采纳的「内容顶部偏移」（= 窗口增高量）：角色视口与状态栏
+    // 同步下移该量，宠物屏幕位置保持不变，顶部腾出的空间留给菜单
+    void setContentTopOffset(float px);
+
     // 常规内容区逻辑宽度（240，菜单不算）；窗口总宽 = 240 + 边距
     // 由主循环换算物理像素
     static constexpr float kPanelW = 240.0f;
@@ -117,6 +124,17 @@ public:
         clock_color_ = clock_color;
         device_brightness_ = brightness;
         device_screen_rotation_ = screen_rotation;
+    }
+    // 相框播放源（主循环每帧注入）：source = motion(动作轮播)/folder(指定
+    // 文件夹照片)；folder = PC 本机照片目录（空 = 未选择）；photos = 目录内
+    // 可用照片数（负数 = 本次不更新，沿用上次数；扫目录开销大，由调用方
+    // 仅在菜单打开时统计）
+    void setFrameSource(const std::string& source, const std::string& folder,
+                        int photos) {
+        frame_source_ = source;
+        const bool same = (frame_folder_ == folder);
+        frame_folder_ = folder;
+        if (photos >= 0 && (same || photos > 0)) frame_photo_count_ = photos;
     }
     // 客户区坐标是否落在菜单矩形内（右键菜单区域时不触发开/关切换）
     bool isPointInMenu(float x, float y) const;
@@ -189,6 +207,10 @@ private:
     std::string clock_color_ = "amber";
     int device_brightness_ = 100;
     int device_screen_rotation_ = 0;
+    // 相框播放源（setFrameSource 注入）
+    std::string frame_source_ = "motion";
+    std::string frame_folder_;
+    int frame_photo_count_ = 0;
 };
 
 } // namespace dutyon

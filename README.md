@@ -27,8 +27,8 @@
 > **New in v2.0.8:** create your own characters — upload GIF / PNG / JPG
 > animations for the sleeping / working / alert states and manage them
 > from the pet's menu. On the hardware display: boots straight into
-> photo-frame mode when USB isn't connected, a tiny USB plug icon in the corner
-> shows link status (green connected / red disconnected), and multi-task
+> photo-frame mode when not connected to a PC, a tiny Wi-Fi signal icon in the
+> corner shows link status (green connected / red disconnected), and multi-task
 > mode now splits the screen dynamically by task count with the character
 > vertically centered. Right-click menu height is content-fitted.
 >

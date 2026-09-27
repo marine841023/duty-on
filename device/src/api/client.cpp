@@ -17,8 +17,9 @@ namespace dutyon {
 // ---------------------------------------------------------------------------
 // 单次请求（同步）；供后台线程调用，绝不在主渲染线程执行
 // ---------------------------------------------------------------------------
-static std::optional<PetStatus> FetchStatus(cpr::Session& session) {
+static std::optional<PetStatus> FetchStatus(cpr::Session& session, int* http_code) {
     auto r = session.Get();
+    if (http_code) *http_code = r.status_code;
     if (r.status_code != 200) return std::nullopt;
 
     try {
@@ -27,9 +28,11 @@ static std::optional<PetStatus> FetchStatus(cpr::Session& session) {
         s.overall_state = j.value("overallState", "sleeping");
         s.active_character = j.value("activeCharacter", std::string{});
         s.device_mode = j.value("deviceMode", "multi");
+        s.frame_source = j.value("frameSource", std::string{});
         s.clock_color = j.value("clockColor", "amber");
         s.device_brightness = j.value("deviceBrightness", 100);
         s.screen_rotation = j.value("screenRotation", 0);
+        s.flip_horizontal = j.value("flipHorizontal", false);
         s.server_time = j.value("serverTime", 0.0);
         s.utc_offset_min = j.value("utcOffset", 0);
         s.sound_mute = j.value("soundMute", false);
@@ -99,13 +102,86 @@ struct ApiClient::Impl {
     std::thread worker;
     std::atomic<bool> stop{false};
 
-    // 目标地址（USB 直连下由租约发现动态更新；空 = 链路未建立）
+    // 目标地址（由 pc_discovery 发现动态更新；空 = 链路未建立）
     std::mutex url_mtx;
     std::string url;
 
     std::string snapshotUrl() {
         std::lock_guard<std::mutex> lk(url_mtx);
         return url;
+    }
+
+    // ---- 设备身份 + 配对（Wi-Fi 配对码方案）----
+    std::mutex id_mtx;
+    std::string device_id;
+    std::string pair_code;
+    bool identity_set = false;
+
+    std::mutex tok_mtx;
+    std::string token;          // 已附加到 session 请求头的令牌
+    std::string pending_token;  // 配对成功待主线程取走持久化
+    std::atomic<bool> has_token{false};
+
+    // 本设备程序版本（附加到 X-DutyOn-Version 头；main 启动时读
+    // /opt/dutyon/VERSION 注入，供 PC 端比对触发自动更新）
+    std::mutex ver_mtx;
+    std::string prog_ver;
+
+    bool identityReady() {
+        std::lock_guard<std::mutex> lk(id_mtx);
+        return identity_set && !device_id.empty();
+    }
+    std::string snapshotToken() {
+        std::lock_guard<std::mutex> lk(tok_mtx);
+        return token;
+    }
+    std::string snapshotVersion() {
+        std::lock_guard<std::mutex> lk(ver_mtx);
+        return prog_ver;
+    }
+    std::string takePendingToken() {
+        std::lock_guard<std::mutex> lk(tok_mtx);
+        std::string t;
+        t.swap(pending_token);
+        return t;
+    }
+    void clearToken() {
+        std::lock_guard<std::mutex> lk(tok_mtx);
+        token.clear();
+        has_token = false;
+    }
+    // POST /api/pair-request {deviceId, code}；PC 记 pending 或（用户已输码）
+    // 直接签发 token。拿到 token 即置 has_token，后续请求自动带头。
+    void tryPair(const std::string& base) {
+        std::string did, code;
+        {
+            std::lock_guard<std::mutex> lk(id_mtx);
+            did = device_id;
+            code = pair_code;
+        }
+        if (did.empty()) return;
+        try {
+            auto r = cpr::Post(
+                cpr::Url{base + "/api/pair-request"},
+                cpr::Header{{"Content-Type", "application/json"}},
+                cpr::Body{nlohmann::json{{"deviceId", did}, {"code", code}}.dump()},
+                cpr::ConnectTimeout{1000}, cpr::Timeout{3000},
+                cpr::Proxies{{"http", ""}, {"https", ""}});
+            if (r.status_code != 200) return;
+            auto j = nlohmann::json::parse(r.text, nullptr, /*allow_exceptions=*/false);
+            if (j.is_discarded()) return;
+            if (j.value("status", std::string{}) == "paired") {
+                const std::string tok = j.value("token", std::string{});
+                if (!tok.empty()) {
+                    std::lock_guard<std::mutex> lk(tok_mtx);
+                    token = tok;
+                    pending_token = tok;
+                    has_token = true;
+                    printf("[ApiClient] paired, token acquired\n");
+                }
+            }
+        } catch (...) {
+        }
     }
 
     // 主线程与工作线程共享的缓存（seq 防止重复消费同一条数据）
@@ -122,12 +198,15 @@ struct ApiClient::Impl {
         // 首轮立即拉一次；此后状态 500ms / 监控 1500ms（与 Rust 采样 1.5s 错开）
         auto last_status = Clock::now() - std::chrono::hours(1);
         auto last_metrics = Clock::now() - std::chrono::hours(1);
-        std::string applied_url;  // 已应用到 session 的地址
+        auto last_pair = Clock::now() - std::chrono::hours(1);
+        std::string applied_url;     // 已应用到 session 的地址
+        std::string applied_token;   // 已应用到 session 请求头的令牌
+        std::string applied_version; // 已应用到 session 请求头的程序版本
 
         while (!stop.load()) {
             const std::string url = snapshotUrl();
             if (url.empty()) {
-                // 链路未建立（未插 USB / DHCP 未完成）：暂停请求等 setBaseUrl
+                // 链路未建立（未入网 / PC 未发现）：暂停请求等 setBaseUrl
                 applied_url.clear();
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
@@ -140,13 +219,45 @@ struct ApiClient::Impl {
                 last_status = Clock::now() - std::chrono::hours(1);
                 last_metrics = Clock::now() - std::chrono::hours(1);
             }
+            // 令牌 / 程序版本变化 -> 刷新两个 session 的请求头（未配对时无
+            // token 头；未知版本时无 version 头）
+            const std::string tok = snapshotToken();
+            const std::string ver = snapshotVersion();
+            if (tok != applied_token || ver != applied_version) {
+                cpr::Header h;
+                if (!tok.empty()) h["X-DutyOn-Token"] = tok;
+                if (!ver.empty()) h["X-DutyOn-Version"] = ver;
+                status_session.SetHeader(h);
+                metrics_session.SetHeader(h);
+                applied_token = tok;
+                applied_version = ver;
+            }
             auto now = Clock::now();
+
+            // 未配对：周期尝试握手拿 token（需用户先在 PC 端输入屏幕配对码）；
+            // 未配对不轮询业务数据（PC 对未配对请求一律 401）
+            if (!has_token.load()) {
+                if (identityReady() &&
+                    now - last_pair >= std::chrono::milliseconds(3000)) {
+                    last_pair = now;
+                    tryPair(url);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
             if (now - last_status >= std::chrono::milliseconds(kPollIntervalMs)) {
                 last_status = now;
-                if (auto s = FetchStatus(status_session)) {
+                int code = 0;
+                if (auto s = FetchStatus(status_session, &code)) {
                     std::lock_guard<std::mutex> lk(mtx);
                     status = *s;
                     status_seq++;
+                } else if (code == 401) {
+                    // PC 侧已解除配对 / 令牌失效：丢弃令牌，下轮重新握手
+                    printf("[ApiClient] 401, token rejected -> re-pair\n");
+                    clearToken();
+                    applied_token.clear();
                 }
             }
             if (now - last_metrics >= std::chrono::milliseconds(1500)) {
@@ -189,6 +300,33 @@ void ApiClient::setBaseUrl(const std::string& url) {
                url.empty() ? "(link down)" : url.c_str());
     }
 }
+
+void ApiClient::setIdentity(const std::string& device_id,
+                            const std::string& pair_code,
+                            const std::string& existing_token) {
+    {
+        std::lock_guard<std::mutex> lk(impl_->id_mtx);
+        impl_->device_id = device_id;
+        impl_->pair_code = pair_code;
+        impl_->identity_set = true;
+    }
+    if (!existing_token.empty()) {
+        // 已配对（上次持久化的 token）：直接用，不再握手
+        std::lock_guard<std::mutex> lk(impl_->tok_mtx);
+        impl_->token = existing_token;
+        impl_->has_token = true;
+        printf("[ApiClient] resume with saved token\n");
+    }
+}
+
+void ApiClient::setProgramVersion(const std::string& version) {
+    std::lock_guard<std::mutex> lk(impl_->ver_mtx);
+    impl_->prog_ver = version;
+}
+
+std::string ApiClient::takePairToken() { return impl_->takePendingToken(); }
+
+bool ApiClient::paired() const { return impl_->has_token.load(); }
 
 ApiClient::~ApiClient() {
     impl_->stop.store(true);
@@ -309,7 +447,10 @@ CustomCharacter ApiClient::fetchCharacter(const std::string& expect_id) {
     const std::string base = impl_->snapshotUrl();
     if (base.empty() || expect_id.empty()) return out;
     try {
-        auto r = cpr::Get(cpr::Url{base + "/api/character"},
+        cpr::Header h;  // 已配对令牌（PC 对 /api/* 非回环请求门控）
+        if (const std::string tok = impl_->snapshotToken(); !tok.empty())
+            h["X-DutyOn-Token"] = tok;
+        auto r = cpr::Get(cpr::Url{base + "/api/character"}, h,
                           cpr::ConnectTimeout{1000}, cpr::Timeout{3000},
                           cpr::Proxies{{"http", ""}, {"https", ""}});
         if (r.status_code != 200) return out;
@@ -334,7 +475,10 @@ bool ApiClient::downloadAnimation(const std::string& file_name,
     const std::string base = impl_->snapshotUrl();
     if (base.empty() || file_name.empty() || save_path.empty()) return false;
     try {
-        auto r = cpr::Get(cpr::Url{base + "/api/animations/" + file_name},
+        cpr::Header h;  // 已配对令牌（PC 对 /api/* 非回环请求门控）
+        if (const std::string tok = impl_->snapshotToken(); !tok.empty())
+            h["X-DutyOn-Token"] = tok;
+        auto r = cpr::Get(cpr::Url{base + "/api/animations/" + file_name}, h,
                           cpr::ConnectTimeout{2000}, cpr::Timeout{30000},
                           cpr::Proxies{{"http", ""}, {"https", ""}});
         if (r.status_code != 200 || r.text.empty()) return false;
@@ -346,6 +490,26 @@ bool ApiClient::downloadAnimation(const std::string& file_name,
         out.write(r.text.data(), (std::streamsize)r.text.size());
         return out.good();
     } catch (...) {
+        return false;
+    }
+}
+
+bool ApiClient::fetchFramePhoto(std::vector<unsigned char>& out_bytes) {
+    out_bytes.clear();
+    const std::string base = impl_->snapshotUrl();
+    if (base.empty()) return false;
+    try {
+        cpr::Header h;  // 已配对令牌（PC 对 /api/* 非回环请求门控）
+        if (const std::string tok = impl_->snapshotToken(); !tok.empty())
+            h["X-DutyOn-Token"] = tok;
+        auto r = cpr::Get(cpr::Url{base + "/api/frame/photo?max_side=1024"}, h,
+                          cpr::ConnectTimeout{2000}, cpr::Timeout{20000},
+                          cpr::Proxies{{"http", ""}, {"https", ""}});
+        if (r.status_code != 200 || r.text.empty()) return false;
+        out_bytes.assign(r.text.begin(), r.text.end());
+        return true;
+    } catch (...) {
+        out_bytes.clear();
         return false;
     }
 }
@@ -377,7 +541,10 @@ bool ApiClient::downloadLive2dFile(const std::string& rel_path,
     const std::string base = impl_->snapshotUrl();
     if (base.empty() || rel_path.empty() || save_path.empty()) return false;
     try {
-        auto r = cpr::Get(cpr::Url{base + "/live2d/" + UrlEncodePath(rel_path)},
+        cpr::Header h;  // 已配对令牌（PC 对 /live2d/* 非回环请求门控）
+        if (const std::string tok = impl_->snapshotToken(); !tok.empty())
+            h["X-DutyOn-Token"] = tok;
+        auto r = cpr::Get(cpr::Url{base + "/live2d/" + UrlEncodePath(rel_path)}, h,
                           cpr::ConnectTimeout{2000}, cpr::Timeout{30000},
                           cpr::Proxies{{"http", ""}, {"https", ""}});
         if (r.status_code != 200 || r.text.empty()) return false;

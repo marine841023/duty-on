@@ -161,21 +161,24 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
     };
 
     const std::string& name = ev.hook_event_name;
-    // 工具执行记账：PreToolUse 记 pending（工具开始跑）、PostToolUse 销账
-    // （结束）。非 pending 期间静默才可能是真空闲。Pre/Post 之间完全无
+    // 工具执行记账：PreToolUse 记 pending（工具开始跑）、PostToolUse(Failure)
+    // 销账（结束）。非 pending 期间静默才可能是真空闲。Pre/Post 之间完全无
     // 事件是常态（长构建/长命令/子代理长任务），降级超时见
     // bc::kToolRunningTimeout。SessionStart/UserPromptSubmit/Stop 到来说明
-    // 回合推进，兜底清账。Notification 例外：异步事件、不推进工具生命
-    // 周期（permission_prompt 到达时工具仍在等待批准 = 仍 in-flight），
-    // 不得清账 —— 否则合法的待确认通知会被乱序防护误判为过期。
+    // 回合推进，兜底清账。Notification/SubagentStart/SubagentStop/PreCompact
+    // 例外：异步或生命周期事件、不代表在途工具收尾（permission_prompt 到达
+    // 时工具仍在等待批准 = 仍 in-flight；子代理工具另发 Pre/PostToolUse 记账；
+    // 压缩在回合之间），不得清账 —— 否则合法的待确认通知会被乱序防护误判为
+    // 过期、在途工具会丢掉 kToolRunningTimeout 放宽而被提前降级。
     if (name == "PreToolUse") {
         session.pending_tool =
             ev.tool_use_id.has_value() && !ev.tool_use_id->empty()
                 ? *ev.tool_use_id
                 : (ev.tool_name.has_value() ? *ev.tool_name : "unknown");
-    } else if (name == "Notification") {
-        // 不动 pending_tool
-    } else if (name == "PostToolUse") {
+    } else if (name == "Notification" || name == "SubagentStart" ||
+               name == "SubagentStop" || name == "PreCompact") {
+        // 不动 pending_tool（见上方注释）
+    } else if (name == "PostToolUse" || name == "PostToolUseFailure") {
         session.pending_tool.clear();
     } else {
         session.pending_tool.clear();
@@ -196,7 +199,7 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
             session.status = SessionStatus::ToolUse;
             session.alert_message.reset();
         }
-    } else if (name == "PostToolUse") {
+    } else if (name == "PostToolUse" || name == "PostToolUseFailure") {
         if (ask_user_tool) {
             // 用户已作答，代理继续思考
             session.status = SessionStatus::Thinking;
@@ -205,12 +208,14 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
                    session.status == SessionStatus::Working ||
                    session.status == SessionStatus::Thinking ||
                    session.status == SessionStatus::ConfirmationNeeded) {
-            // 工具完成 —— 包括 ConfirmationNeeded：工具完成意味着用户已经
-            // 批准（或回答了挂起的 ask），保持 alert 会永远响
+            // 工具完成/失败 —— 都 -> Thinking：成功据结果继续、失败据错误
+            // 继续（PostToolUseFailure 是 Qoder IDE 实测支持的事件）。包括
+            // ConfirmationNeeded：工具收尾意味着用户已批准（或回答了挂起的
+            // ask），保持 alert 会永远响
             session.status = SessionStatus::Thinking;
             session.alert_message.reset();
         }
-        // Idle（如手动中止后的 Stop）时迟到的 PostToolUse 不得复活会话
+        // Idle（如手动中止后的 Stop）时迟到的 PostToolUse(Failure) 不得复活会话
     } else if (name == "Notification") {
         // check_confirmation_needed 三级判定
         bool needs_confirmation = false;
@@ -291,9 +296,24 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
         // 代理请求工具权限 —— 需要用户输入
         session.status = SessionStatus::ConfirmationNeeded;
         session.alert_message = alert_msg();
-    } else if (name == "Stop") {
+    } else if (name == "Stop" || name == "SessionEnd") {
+        // Stop = 代理完成本轮响应；SessionEnd = 会话结束（权威收尾信号，
+        // Qoder IDE 实测支持）。两者都 -> Idle，让"对话真的结束"不再只靠
+        // 超时猜测（见 cleanupStaleSessions）。
         session.status = SessionStatus::Idle;
         session.alert_message.reset();
+    } else if (name == "SubagentStart" || name == "SubagentStop" ||
+               name == "PreCompact") {
+        // 子代理起止 / 上下文压缩：会话仍在推进 —— 子代理跑长任务时主代理
+        // 在等它、压缩是回合间的自动上下文整理。统一 -> Thinking（忙），避免
+        // 这些阶段的长静默被超时误降级为 Idle（进而误播"任务完成"音）；事件
+        // 本身也刷新 last_event_time，进一步压低误判概率。
+        // 绝不打断 ConfirmationNeeded：主代理正等用户确认时收到的子代理/压缩
+        // 信号是并行的陈旧事件，清掉 alert 会让提醒停响。
+        if (session.status != SessionStatus::ConfirmationNeeded) {
+            session.status = SessionStatus::Thinking;
+            session.alert_message.reset();
+        }
     }
 
     // 真实 hook 会话已覆盖该项目；删除窗口扫描建立的占位会话避免列表重复

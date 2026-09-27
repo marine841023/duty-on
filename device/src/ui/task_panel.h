@@ -29,22 +29,30 @@ public:
     static float heightForSessions(int session_count);
 
     // 在下半屏绘制：area_top = 面板区顶边（布局约定为 screen_h/2），
-    // 行块自角色区下方（留隙）向下堆叠（卡片高度按行数自适应）
-    void render(const PetStatus& status, int screen_w, int screen_h, float area_top);
+    // 行块自角色区下方（留隙）向下堆叠（卡片高度按行数自适应）。
+    // region_x/region_w：水平放置区域（横屏左右布局时限制到右列）；
+    // region_w<0 表示用整屏宽（竖屏默认，等价旧行为）
+    void render(const PetStatus& status, int screen_w, int screen_h, float area_top,
+                int region_x = 0, int region_w = -1);
 
     // 顶部时钟（HH:MM:SS 居中）：y_top = 文本区顶边（GL 坐标），
-    // size = 字号（多任务模式 ~40，单任务模式 ~56）
+    // size = 字号（多任务模式 ~40，单任务模式 ~56）。region_x/region_w
+    // 同上（在区域内水平居中；region_w<0 = 整屏）
     void renderClock(const std::string& text, float y_top, float size,
-                     int screen_w, int screen_h);
+                     int screen_w, int screen_h,
+                     int region_x = 0, int region_w = -1);
 
     // 底部日期行（YYYY年M月D日 星期X 居中，屏幕下缘）：同款字体/配色、
-    // 字号更小；过宽自动缩字号保证一行放下
+    // 字号更小；过宽自动缩字号保证一行放下。region_x/region_w 同上
     void renderDate(const std::string& text, float y_top, float size,
-                    int screen_w, int screen_h);
+                    int screen_w, int screen_h,
+                    int region_x = 0, int region_w = -1);
 
-    // 屏幕右上角 USB 连接状态小插头：已连接=绿色插头与线缆插合；
-    // 未连接=红色插头与线缆之间留缝（断开态）。纯色几何绘制，无贴图依赖
-    void renderUsbStatus(bool connected, int screen_w, int screen_h);
+    // 屏幕右上角连接状态图标（两块，纯色几何、无贴图）：
+    //   最右 Wi-Fi 信号条（4 根递增）——设备是否已入网：入网=绿，未入网/配网中=红；
+    //   其左 显示器图标——是否已连上 PC：连上=绿，未连=灰。两段链路分开表示。
+    void renderNetStatus(bool wifi_online, bool pc_online,
+                         int screen_w, int screen_h);
 
     // 全屏压暗叠层（软件亮度）：brightness 10-100，>=100 不画。
     // 当前屏无 /sys/class/backlight 内核接口时的亮度实现；

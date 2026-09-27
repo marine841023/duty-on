@@ -8,9 +8,12 @@
 //   UserPromptSubmit                   -> Thinking
 //   PreToolUse（非 ask-user）          -> ToolUse
 //   PostToolUse（非 ask-user）         -> Thinking（工具结果 -> 继续思考）
+//   PostToolUseFailure                 -> Thinking（工具失败 -> 代理据错继续）
 //   PreToolUse(AskUserQuestion)        -> ConfirmationNeeded；其 PostToolUse -> Thinking
 //   Notification（确认类）             -> ConfirmationNeeded
 //   Notification（完成类）/ Stop       -> Idle
+//   SessionEnd（会话结束，权威收尾）   -> Idle
+//   SubagentStart/SubagentStop/PreCompact -> Thinking（忙；不打断 ConfirmationNeeded）
 //   CLI 代理（Codex/OpenCode）崩溃     -> 由 syncCliLiveness 清除
 //
 // 宠物总状态（三档）：

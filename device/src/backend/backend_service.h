@@ -19,9 +19,11 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "api/client.h"  // PetStatus / SysMetrics
 #include "backend/http_server.h"
+#include "backend/pairing_manager.h"
 #include "backend/state_manager.h"
 #include "backend/sys_monitor.h"
 
@@ -60,8 +62,27 @@ public:
     // 请求整个应用退出（HTTP /api/quit 与本地菜单共用）；主循环每帧用
     // quitRequested() 轮询
     void requestQuit() { quit_requested_ = true; }
-    // 硬件显示端在线（USB 网段 10s 内有 API 轮询）；菜单"设备模式"分组用
+    // 硬件显示端在线（已配对设备 10s 内有带 token 的 /api/* 轮询）；菜单"设备"子页用
     bool deviceOnline() const { return http_ && http_->deviceOnline(); }
+    // 设备最近上报的程序版本（连接时与源码哈希比对触发自动更新）；空 = 未知
+    std::string deviceVersion() const {
+        return http_ ? http_->deviceVersion() : std::string{};
+    }
+
+    // ---- 设备配对（Wi-Fi 配对码方案；菜单「设备→配对设备」用）----
+    // 待配对请求列表（设备已 POST pair-request，等用户输码确认）
+    std::vector<PendingPair> pendingPairings() { return pairing_.pendingList(); }
+    // 已配对设备 id 列表
+    std::vector<std::string> pairedDevices() { return pairing_.pairedList(); }
+    // 用户输入配对码确认：匹配待配对请求即签发 token 持久化，成功返回 true
+    bool confirmPairing(const std::string& code) {
+        return !pairing_.confirmByCode(code).empty();
+    }
+    // 解除某设备配对（设备下次轮询得 401 → 自动重新握手）
+    bool unpairDevice(const std::string& device_id) {
+        return pairing_.unpair(device_id);
+    }
+
     bool quitRequested() const { return quit_requested_; }
     // ApiClient 兼容别名（菜单 quit 项调用面保持一致）
     bool quitApp() {
@@ -78,6 +99,7 @@ private:
 
     StateManager sm_;
     SysMonitor monitor_;
+    PairingManager pairing_;  // 声明先于 http_：析构时 http_ 先亡（join 发现线程）
     std::unique_ptr<HttpServer> http_;
     std::atomic<bool> quit_requested_{false};
     std::atomic<bool> run_{false};

@@ -4,7 +4,7 @@
 # 说明：NSIS 工具链在 tools\nsis\nsis-3\（tauri 官方 GitHub 镜像的 NSIS 3
 #       便携版，首次运行自动下载）；ZIP 外层包装用于规避 SmartScreen
 #       对未签名 exe 的拦截（项目分发约定）。
-param([string]$Version = "2.0.7")
+param([string]$Version = "2.0.9")
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent       # 仓库根

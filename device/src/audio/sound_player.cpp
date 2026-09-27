@@ -403,6 +403,7 @@ SoundPlayer::~SoundPlayer() {
 }
 
 void SoundPlayer::play(Event ev) {
+    printf("[Sound] play ev=%d\n", (int)ev);
     switch (ev) {
         case Event::TaskStart:
             impl_->enqueue(impl_->acquire("mission_start.wav", buildStart));

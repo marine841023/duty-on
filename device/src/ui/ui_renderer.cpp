@@ -629,11 +629,18 @@ enum MenuView {
     kMenuMotionAssign,
     kMenuSettings,
     kMenuLanguage,
-    kMenuVisibility,
+    kMenuDisplay,     // 显示：左右翻转/迷你模式/最小化 + 监控项显隐
     kMenuDevice,      // 设备子页：模式/时钟颜色/亮度/同步程序
+    kMenuDeviceMode,  // 设备·模式（单任务/多任务/电子相框）
+    kMenuFrameSource, // 设备·相框播放源（动作轮播/指定文件夹照片）
+    kMenuDeviceColor, // 设备·时钟颜色（琥珀橙/冰晶蓝/暖白/翠竹绿/樱花粉）
+    kMenuDeviceBrightness, // 设备·亮度（30/50/70/85/100%）
+    kMenuDeviceRotate,     // 设备·屏幕旋转（0/90/180/270）
+    kMenuIntegration, // 集成：开机自启动 + IDE 集成 Hook 状态
     kMenuCharManage,  // 自定义角色管理列表
     kMenuCharEdit,    // 单个自定义角色的状态动画编辑
     kMenuSound,       // 设备声音管理：完全静音 / 按状态静音
+    kMenuPair,        // 设备配对：待配对列表 + 配对码数字键盘输入
 };
 
 struct UIRenderer::Impl {
@@ -702,8 +709,11 @@ struct UIRenderer::Impl {
     int menu_view = kMenuMain;
     std::string assign_state;  // 动作设定的目标状态（sleeping/working/alert）
     std::string edit_char;     // 角色编辑视图正在编辑的自定义角色 id（char_xxx）
+    std::string pair_code_input;  // 配对视图：物理键盘采集的配对码缓冲
     int hover_motion = -1;     // 动作列表悬停项（预览）
     float menu_h = 0.0f;       // 上一帧菜单实测高（点击关闭区域判定）
+    float menu_desired_h = 0.0f;      // 上一帧菜单内容自然高（主循环增高窗口用）
+    float content_top_offset = 0.0f;  // 窗口为菜单增高时角色/状态栏的整体下移量
 
     // ---- 字体图集构建（init / 语言切换重建共用）----
     void BuildFonts() {
@@ -1445,6 +1455,13 @@ float UIRenderer::menuExtraWidth() const {
     return 8.0f * impl_->scale + menu_w;
 }
 
+float UIRenderer::menuDesiredHeight() const {
+    if (!impl_->menu_open) return 0.0f;
+    return impl_->menu_desired_h;
+}
+
+void UIRenderer::setContentTopOffset(float px) { impl_->content_top_offset = px; }
+
 void UIRenderer::setModelRect(const Rect& r, bool tight_bounds) {
     impl_->model_rect = r;
     impl_->model_bounds_tight = tight_bounds;
@@ -1464,6 +1481,8 @@ void UIRenderer::openMenu() {
     impl_->menu_open = true;
     impl_->menu_view = kMenuMain;
     impl_->hover_motion = -1;
+    impl_->pair_code_input.clear();
+    impl_->menu_desired_h = 0.0f;  // 重新测量，避免沿用上次菜单视图的高度
     // 通知主程序刷新 autostart / hook / 模型目录等缓存（避免菜单内每帧 HTTP）
     if (on_menu_open) on_menu_open();
 }
@@ -1472,6 +1491,7 @@ void UIRenderer::closeMenu() {
     impl_->menu_open = false;
     impl_->hover_motion = -1;
     impl_->menu_h = 0.0f;  // 下次打开重新测量，避免沿用旧视图高度
+    impl_->menu_desired_h = 0.0f;
 }
 
 void UIRenderer::openMenuView(const std::string& view) {
@@ -1481,7 +1501,8 @@ void UIRenderer::openMenuView(const std::string& view) {
     else if (view == "motion-assign") impl_->menu_view = kMenuMotionAssign;
     else if (view == "settings") impl_->menu_view = kMenuSettings;
     else if (view == "language") impl_->menu_view = kMenuLanguage;
-    else if (view == "visibility") impl_->menu_view = kMenuVisibility;
+    else if (view == "visibility" || view == "display") impl_->menu_view = kMenuDisplay;
+    else if (view == "integration") impl_->menu_view = kMenuIntegration;
     else impl_->menu_view = kMenuMain;  // "main" / 未知值
 }
 
@@ -1676,7 +1697,8 @@ void UIRenderer::renderStatus(const PetStatus& s) {
     const float row_h = row_pad_v * 2.0f +
                         (mini ? 15.0f * S : 18.0f * S);  // 行高（名称行主导）
 
-    ImGui::SetNextWindowPos(ImVec2(p->panel_x, p->canvas_h + p->panel_gap),
+    ImGui::SetNextWindowPos(ImVec2(p->panel_x,
+                                   p->canvas_h + p->panel_gap + p->content_top_offset),
                             ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(p->panel_w, 0.0f), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.85f);
@@ -2017,6 +2039,9 @@ void UIRenderer::renderMetrics(const SysMetrics& m) {
                 float fmax;
                 ImU32 scol;
             };
+            // “显示”菜单已移除 CPU/内存/显卡/网络/自身的单独开关：
+            // 系统监控开启即全部显示（忽略可能被持久化为 false 的旧值）
+            showCpu = showRam = showGpu = showNet = showSelf = true;
             MonRow rows[6];
             int n_rows = 0;
             if (showCpu) {
@@ -2282,56 +2307,36 @@ void UIRenderer::renderMenu() {
 
     if (ImGui::Begin("##ctxmenu", nullptr, flags)) {
         p->menu_h = ImGui::GetWindowHeight();  // 实测高供命中判定（下一帧生效）
+        bool desired_set = false;  // 切换形象视图显式算自然高；其余视图按光标实测
         switch (p->menu_view) {
         case kMenuMain: {
             // ==== 主菜单（对齐 1.x #menu-main-view）====
             if (p->MenuRow("models", I18n::t("menu.switchModel"), false, false,
                         nullptr, true).clicked)
                 go(kMenuModels);
-            if (p->MenuRow("upload", I18n::t("menu.uploadLive2D"), false, false,
-                        nullptr, false).clicked) {
-                activate("open-models-dir");
-                closeMenu();
-            }
             if (p->MenuRow("play", I18n::t("menu.playMotion"), false, false,
                         nullptr, true).clicked)
                 go(kMenuMotionPlay);
             if (p->MenuRow("settings", I18n::t("menu.actionSettings"), false, false,
                         nullptr, true).clicked)
                 go(kMenuSettings);
-            if (p->MenuRow("flip", I18n::t("menu.flipHorizontal"), checked("flip"),
-                        false, nullptr, false).clicked)
-                activate("flip");
-            if (p->MenuRow("mini", I18n::t("menu.miniMode"), checked("mini"),
-                        false, nullptr, false).clicked)
-                activate("mini");
-            if (p->MenuRow("vis", I18n::t("menu.visibility"), false, false,
+            // 显示：左右翻转 / 迷你模式 / 最小化 + 监控项显隐（统一收纳）
+            if (p->MenuRow("display", I18n::t("menu.display"), false, false,
                         nullptr, true).clicked)
-                go(kMenuVisibility);
-            if (p->MenuRow("autostart", I18n::t("menu.autoLaunch"),
-                        checked("autostart"), false, nullptr, false).clicked)
-                activate("autostart");
+                go(kMenuDisplay);
             if (p->MenuRow("lang", I18n::t("menu.language"), false, false,
                         nullptr, true).clicked)
                 go(kMenuLanguage);
-            // ---- 硬件显示端：全部设备功能收进"设备"子页 ----
+            // ---- 硬件显示端 + 系统集成：均带右侧状态 ----
             p->MenuDivider();
             if (p->MenuRow("device", I18n::t("menu.device"), false, false,
                         device_online_ ? I18n::t("menu.deviceOnline")
                                        : I18n::t("menu.deviceOffline"),
                         true).clicked)
                 go(kMenuDevice);
-            p->MenuDivider();
-            if (p->MenuRow("install", I18n::t("menu.installHooks"), false, false,
-                        nullptr, false).clicked) {
-                activate("install-hooks");
-                closeMenu();
-            }
-            if (p->MenuRow("hook", I18n::t("menu.hookStatus"), false, false,
-                        hint_of("hook-status").c_str(), false).clicked) {
-                activate("hook-status");
-                closeMenu();
-            }
+            if (p->MenuRow("integration", I18n::t("menu.integration"), false, false,
+                        hint_of("integration-status").c_str(), true).clicked)
+                go(kMenuIntegration);
             p->MenuDivider();
             if (p->MenuRow("quit", I18n::t("menu.quit"), false, true, nullptr,
                         false).clicked) {
@@ -2341,50 +2346,155 @@ void UIRenderer::renderMenu() {
             break;
         }
         case kMenuDevice: {
-            // ==== 设备子页：模式 / 时钟颜色 / 亮度 / 同步程序 ====
+            // ==== 设备子页：配对设备 / 模式 / 时钟颜色 / 亮度 / 同步程序 ====
             if (p->MenuRow("back", I18n::t("menu.back"), false, false,
                         nullptr, false).clicked)
                 go(kMenuMain);
+            // 配对设备（始终可达：新设备未配对时 device_online_ 为假，
+            // 仍需能进入配对流程输码）
+            if (p->MenuRow("device-pair", I18n::t("menu.pairDevice"), false,
+                        false, nullptr, true).clicked) {
+                p->pair_code_input.clear();
+                go(kMenuPair);
+            }
+            p->MenuDivider();
             if (!device_online_) {
                 p->MenuLabel(I18n::t("menu.deviceOffline"));
                 break;
             }
-            // 模式（三选一，config.json deviceMode 经 /api/status 下发）
+            // 模式 / 时钟颜色 / 亮度 / 屏幕旋转：各收敛为一个入口，右侧
+            // 显示当前选中值，点进去是子菜单（三 / 五 / 五 / 四选一）
+            const char* mode_hint =
+                device_mode_ == "single" ? I18n::t("menu.modeSingle")
+                : device_mode_ == "multi" ? I18n::t("menu.modeMulti")
+                                          : I18n::t("menu.modeFrame");
+            const char* color_hint =
+                clock_color_ == "amber" ? I18n::t("menu.colorAmber")
+                : clock_color_ == "ice" ? I18n::t("menu.colorIce")
+                : clock_color_ == "white" ? I18n::t("menu.colorWhite")
+                : clock_color_ == "green" ? I18n::t("menu.colorGreen")
+                                          : I18n::t("menu.colorPink");
+            const std::string bright_hint =
+                std::to_string(device_brightness_) + "%";
+            const char* rotate_hint =
+                device_screen_rotation_ == 90 ? I18n::t("menu.rot90")
+                : device_screen_rotation_ == 180 ? I18n::t("menu.rot180")
+                : device_screen_rotation_ == 270 ? I18n::t("menu.rot270")
+                                                 : I18n::t("menu.rot0");
+            if (p->MenuRow("dmode", I18n::t("menu.mode"), false, false,
+                        mode_hint, true).clicked)
+                go(kMenuDeviceMode);
+            // 相框模式下多一行「相框播放」：动作轮播 / 指定文件夹照片
+            if (device_mode_ == "frame") {
+                if (p->MenuRow("dframe-src", I18n::t("menu.frameSource"), false,
+                            false,
+                            frame_source_ == "folder" ? I18n::t("menu.framePhotos")
+                                                      : I18n::t("menu.frameMotion"),
+                            true)
+                            .clicked)
+                    go(kMenuFrameSource);
+            }
+            if (p->MenuRow("dcolor", I18n::t("menu.clockColor"), false, false,
+                        color_hint, true).clicked)
+                go(kMenuDeviceColor);
+            if (p->MenuRow("dbright", I18n::t("menu.brightness"), false, false,
+                        bright_hint.c_str(), true).clicked)
+                go(kMenuDeviceBrightness);
+            if (p->MenuRow("drotate", I18n::t("menu.screenRotate"), false, false,
+                        rotate_hint, true).clicked)
+                go(kMenuDeviceRotate);
+            p->MenuDivider();
+            // 声音管理（设备端状态音频播放与静音开关）
+            if (p->MenuRow("device-sound", I18n::t("menu.soundManage"),
+                        false, false, nullptr, true).clicked)
+                go(kMenuSound);
+            break;
+        }
+        case kMenuDeviceMode: {
+            // ==== 设备·模式（三选一；config.json deviceMode 经 /api/status 下发）====
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                        nullptr, false).clicked)
+                go(kMenuDevice);
+            p->MenuLabel(I18n::t("menu.mode"));
             if (p->MenuRow("dmode-single", I18n::t("menu.modeSingle"),
-                        device_mode_ == "single", false, nullptr,
-                        false).clicked)
+                        device_mode_ == "single", false, nullptr, false).clicked)
                 activate("device-mode:single");
             if (p->MenuRow("dmode-multi", I18n::t("menu.modeMulti"),
-                        device_mode_ == "multi", false, nullptr,
-                        false).clicked)
+                        device_mode_ == "multi", false, nullptr, false).clicked)
                 activate("device-mode:multi");
             if (p->MenuRow("dmode-frame", I18n::t("menu.modeFrame"),
-                        device_mode_ == "frame", false, nullptr,
-                        false).clicked)
+                        device_mode_ == "frame", false, nullptr, false).clicked)
                 activate("device-mode:frame");
-            // 时钟颜色（五选一，config.json clockColor 经 /api/status 下发）
+            break;
+        }
+        case kMenuFrameSource: {
+            // ==== 设备·相框播放（二选一；config.json frameSource 经
+            // /api/status 下发）：动作轮播 = 现行行为；指定文件夹 = PC 本机
+            // 照片逐张下发（设备端不落盘、不批量同步）====
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                        nullptr, false).clicked)
+                go(kMenuDevice);
+            p->MenuLabel(I18n::t("menu.frameSource"));
+            if (p->MenuRow("fsrc-motion", I18n::t("menu.frameMotion"),
+                        frame_source_ != "folder", false, nullptr, false).clicked)
+                activate("frame-source:motion");
+            const std::string folder_tip = frame_folder_.empty()
+                ? std::string(I18n::t("menu.frameNoFolder"))
+                : (frame_photo_count_ > 0
+                       ? std::to_string(frame_photo_count_) + " " +
+                             I18n::t("menu.framePhotoCount")
+                       : std::string(I18n::t("menu.frameNoFolder")));
+            if (p->MenuRow("fsrc-folder", I18n::t("menu.framePhotos"),
+                        frame_source_ == "folder", false, folder_tip.c_str(),
+                        false).clicked)
+                activate("frame-source:folder");
+            if (p->MenuRow("fsrc-pick", I18n::t("menu.framePickFolder"), false,
+                        false, nullptr, false).clicked)
+                activate("frame-source:pick");
+            // 当前目录（过长时尾部省略，菜单宽 240px 容不下绝对路径；
+            // 回退到 UTF-8 码点边界，避免截出半个汉字）
+            if (!frame_folder_.empty()) {
+                std::string show = frame_folder_;
+                if (show.size() > 34) {
+                    size_t cut = show.size() - 33;
+                    while (cut < show.size() && ((unsigned char)show[cut] & 0xC0) == 0x80)
+                        cut++;
+                    show = "…" + show.substr(cut);
+                }
+                p->MenuLabel(show.c_str());
+            }
+            p->MenuDivider();
+            p->MenuLabel(I18n::t("menu.frameHint"));
+            break;
+        }
+        case kMenuDeviceColor: {
+            // ==== 设备·时钟颜色（五选一；config.json clockColor 经 /api/status 下发）====
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                        nullptr, false).clicked)
+                go(kMenuDevice);
             p->MenuLabel(I18n::t("menu.clockColor"));
             if (p->MenuRow("dcolor-amber", I18n::t("menu.colorAmber"),
-                        clock_color_ == "amber", false, nullptr,
-                        false).clicked)
+                        clock_color_ == "amber", false, nullptr, false).clicked)
                 activate("clock-color:amber");
             if (p->MenuRow("dcolor-ice", I18n::t("menu.colorIce"),
-                        clock_color_ == "ice", false, nullptr,
-                        false).clicked)
+                        clock_color_ == "ice", false, nullptr, false).clicked)
                 activate("clock-color:ice");
             if (p->MenuRow("dcolor-white", I18n::t("menu.colorWhite"),
-                        clock_color_ == "white", false, nullptr,
-                        false).clicked)
+                        clock_color_ == "white", false, nullptr, false).clicked)
                 activate("clock-color:white");
             if (p->MenuRow("dcolor-green", I18n::t("menu.colorGreen"),
-                        clock_color_ == "green", false, nullptr,
-                        false).clicked)
+                        clock_color_ == "green", false, nullptr, false).clicked)
                 activate("clock-color:green");
             if (p->MenuRow("dcolor-pink", I18n::t("menu.colorPink"),
-                        clock_color_ == "pink", false, nullptr,
-                        false).clicked)
+                        clock_color_ == "pink", false, nullptr, false).clicked)
                 activate("clock-color:pink");
-            // 亮度（五档；设备端有 sysfs 背光则写背光，否则渲染层压暗）
+            break;
+        }
+        case kMenuDeviceBrightness: {
+            // ==== 设备·亮度（五档；设备端有 sysfs 背光则写背光，否则渲染层压暗）====
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                        nullptr, false).clicked)
+                go(kMenuDevice);
             p->MenuLabel(I18n::t("menu.brightness"));
             for (int v : {30, 50, 70, 85, 100}) {
                 const std::string row_id = "dbr-" + std::to_string(v);
@@ -2396,36 +2506,27 @@ void UIRenderer::renderMenu() {
                             false).clicked)
                     activate(act_id);
             }
-            p->MenuDivider();
-            // 屏幕旋转（四选一，config.json screenRotation 经 /api/status
-            // 下发；设备端离屏 FBO + quad 旋转 blit，切换即时生效）
+            break;
+        }
+        case kMenuDeviceRotate: {
+            // ==== 设备·屏幕旋转（四选一；rotation 0 直出、非 0 逻辑 FBO +
+            // 纯旋转合成，切换即时生效）====
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                        nullptr, false).clicked)
+                go(kMenuDevice);
             p->MenuLabel(I18n::t("menu.screenRotate"));
             if (p->MenuRow("rot-0", I18n::t("menu.rot0"),
-                        device_screen_rotation_ == 0, false, nullptr,
-                        false).clicked)
+                        device_screen_rotation_ == 0, false, nullptr, false).clicked)
                 activate("device-rotate:0");
             if (p->MenuRow("rot-90", I18n::t("menu.rot90"),
-                        device_screen_rotation_ == 90, false, nullptr,
-                        false).clicked)
+                        device_screen_rotation_ == 90, false, nullptr, false).clicked)
                 activate("device-rotate:90");
             if (p->MenuRow("rot-180", I18n::t("menu.rot180"),
-                        device_screen_rotation_ == 180, false, nullptr,
-                        false).clicked)
+                        device_screen_rotation_ == 180, false, nullptr, false).clicked)
                 activate("device-rotate:180");
             if (p->MenuRow("rot-270", I18n::t("menu.rot270"),
-                        device_screen_rotation_ == 270, false, nullptr,
-                        false).clicked)
+                        device_screen_rotation_ == 270, false, nullptr, false).clicked)
                 activate("device-rotate:270");
-            p->MenuDivider();
-            // 声音管理（设备端状态音频播放与静音开关）
-            if (p->MenuRow("device-sound", I18n::t("menu.soundManage"),
-                        false, false, nullptr, true).clicked)
-                go(kMenuSound);
-            p->MenuDivider();
-            // 推送本机仓库最新源码到设备：设备端增量编译并覆盖部署
-            if (p->MenuRow("device-sync", I18n::t("menu.syncDevice"),
-                        false, false, nullptr, false).clicked)
-                activate("device-sync");
             break;
         }
         case kMenuSound: {
@@ -2459,27 +2560,150 @@ void UIRenderer::renderMenu() {
             if (!any_audio) p->MenuLabel(I18n::t("menu.soundNoBinding"));
             break;
         }
+        case kMenuPair: {
+            // ==== 设备配对：待配对请求 + 物理键盘输入配对码 + 已配对列表 ====
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                        nullptr, false).clicked)
+                go(kMenuDevice);
+            // 待配对请求（设备已 POST /api/pair-request，等用户输码确认）
+            p->MenuLabel(I18n::t("menu.pairPending"));
+            std::vector<MenuEntry> pending =
+                menu_collect ? menu_collect("pair-pending")
+                             : std::vector<MenuEntry>();
+            if (pending.empty()) {
+                p->MenuLabel(I18n::t("menu.pairNone"));
+            } else {
+                for (const auto& e : pending)
+                    p->MenuLabel(e.label.c_str());
+            }
+            p->MenuDivider();
+            // 配对码：物理键盘直接采集。桌宠窗口常态 WS_EX_NOACTIVATE 不抢焦点，
+            // ImGui 输入框拿不到按键，故用 GetAsyncKeyState 轮询物理键边沿
+            //（bit0=自上次查询以来按下过，快速点按也不漏）：数字追加、
+            // Backspace 删除、Enter 确认。无需窗口焦点，也不抢占焦点。
+            p->MenuLabel(I18n::t("menu.pairHint"));
+            {
+#ifdef _WIN32
+                // GetAsyncKeyState 低序位（“上次查询后按下过”）在新版 Windows
+                // 不可靠（常恒为 0），改用高序位（当前按下）+ 自维护按下沿：
+                // 按下瞬间触发一次、松开不重复；prev_down 跨帧保持（static）。
+                static bool prev_down[12] = {};
+                for (int d = 0; d <= 9; ++d) {
+                    const bool down =
+                        ((::GetAsyncKeyState(0x30 + d) & 0x8000) != 0) ||
+                        ((::GetAsyncKeyState(0x60 + d) & 0x8000) != 0);
+                    const bool tap = down && !prev_down[d];
+                    prev_down[d] = down;
+                    if (tap && p->pair_code_input.size() < 6)
+                        p->pair_code_input += (char)('0' + d);
+                }
+                {
+                    const bool down = (::GetAsyncKeyState(VK_BACK) & 0x8000) != 0;
+                    const bool tap = down && !prev_down[10];
+                    prev_down[10] = down;
+                    if (tap && !p->pair_code_input.empty())
+                        p->pair_code_input.pop_back();
+                }
+                const bool enter_down =
+                    (::GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
+                const bool enter = enter_down && !prev_down[11];
+                prev_down[11] = enter_down;
+#else
+                const bool enter = false;
+#endif
+                ImGui::Dummy(ImVec2(0, 2.0f * S));
+                // 回显当前缓冲（未满位用 - 占位）
+                const std::string shown = p->pair_code_input.empty()
+                                              ? std::string("------")
+                                              : p->pair_code_input;
+                p->MenuLabel((std::string(I18n::t("menu.pairCode")) + ": " + shown)
+                                 .c_str());
+                const bool code_ready = p->pair_code_input.size() == 6;
+                bool do_confirm = enter && code_ready;
+                if (p->MenuRow("pok", I18n::t("menu.pairConfirm"), code_ready,
+                            false, nullptr, false)
+                        .clicked &&
+                    code_ready)
+                    do_confirm = true;
+                if (do_confirm) {
+                    activate("pair-confirm:" + p->pair_code_input);
+                    p->pair_code_input.clear();
+                }
+            }
+            // 已配对设备（点击解除配对）
+            std::vector<MenuEntry> paired =
+                menu_collect ? menu_collect("pair-paired")
+                             : std::vector<MenuEntry>();
+            if (!paired.empty()) {
+                p->MenuDivider();
+                p->MenuLabel(I18n::t("menu.pairPairedTitle"));
+                for (const auto& e : paired) {
+                    if (p->MenuRow(e.id.c_str(), e.label.c_str(), false, true,
+                                I18n::t("menu.pairUnpair"), false)
+                            .clicked)
+                        activate("pair-unpair:" + e.id);
+                }
+            }
+            break;
+        }
         case kMenuModels: {
             // ==== 切换形象（1.x #menu-model-view：两列缩略图卡片网格）====
             if (p->MenuRow("back", I18n::t("menu.back"), false, false, nullptr, false).clicked)
                 go(kMenuMain);
+            // 上传 Live2D 模型 / 新建自定义角色：置顶（无模型时也始终可达）
+            if (p->MenuRow("upload", I18n::t("menu.uploadLive2D"), false, false,
+                        nullptr, false).clicked) {
+                activate("open-models-dir");
+                closeMenu();
+            }
+            if (p->MenuRow("charnew", I18n::t("menu.newChar"), false, false,
+                        nullptr, false).clicked)
+                activate("charnew");  // 弹文件选择器；返回后网格自动含新角色
+            p->MenuDivider();
             p->MenuLabel(I18n::t("menu.switchModel"));
             p->MenuDivider();
             std::vector<MenuEntry> models =
                 menu_collect ? menu_collect("models") : std::vector<MenuEntry>();
+            // 是否有自定义角色（决定网格下方“编辑”入口 = 底部预留高）
+            bool has_custom = false;
+            for (const auto& e : models)
+                if (e.id.rfind("char:", 0) == 0) { has_custom = true; break; }
             if (models.empty()) {
                 p->MenuLabel("(no models)");
                 break;
             }
-            // #character-grid：2 列，gap 6，padding 6px 4px；超出滚动
+            // #character-grid：2 列，gap 6，padding 6px 4px。
+            // 子窗必须给「显式高度」——用 0（填充剩余）会在内容自适应的父窗里
+            // 塌陷，表现为“切换形象窗口自动缩小、底部角色被裁”；超出可用高则
+            // 子窗内部滚动兜底。
             {
                 const float content_w = ImGui::GetWindowSize().x - 8.0f * S;
                 const float grid_pad_h = 4.0f * S;
                 const float gap = 6.0f * S;
                 const float card_w = (content_w - grid_pad_h * 2.0f - gap) * 0.5f;
+                // 卡片高（与 CharCard 内公式一致）：上边距+缩略图+间距+名称+下边距
+                const float card_h = 8.0f * S + 64.0f * S + 6.0f * S +
+                                     (11.0f * S * kTextScale + 2.0f * S) + 6.0f * S;
+                const size_t rows = (models.size() + 1) / 2;
+                // 网格自然高：各行 + 行间距 + 顶部 Dummy + 少量余量（略放宽防裁剪）
+                const float grid_natural =
+                    rows * card_h + (rows + 1) * gap + 2.0f * S;
+                // 底部预留：编辑入口（分隔线+行）或仅内边距
+                const float footer_reserve = has_custom ? 46.0f * S : 10.0f * S;
+                const float header_y = ImGui::GetCursorPosY();
+                // 菜单内容自然高（供主循环增高窗口以完整容纳网格；下一帧生效）
+                p->menu_desired_h = header_y + grid_natural + footer_reserve;
+                desired_set = true;
+                // 本帧可用高：窗口高 - 上下边距 - 头部 - 底部预留；网格超出则滚动
+                const float avail =
+                    ((float)p->win_h - 8.0f * S) - header_y - footer_reserve;
+                float child_h = grid_natural;
+                if (child_h > avail) child_h = avail;
+                const float min_h = card_h + gap;  // 至少容得下一行
+                if (child_h < min_h) child_h = min_h;
                 ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
                                     ImVec2(gap, gap));
-                ImGui::BeginChild("##chargrid", ImVec2(content_w, 0.0f),
+                ImGui::BeginChild("##chargrid", ImVec2(content_w, child_h),
                                   ImGuiChildFlags_None);
                 ImGui::SetCursorPosX(ImGui::GetCursorPosX() + grid_pad_h);
                 ImGui::Dummy(ImVec2(content_w - grid_pad_h * 2.0f, 6.0f * S));
@@ -2499,18 +2723,13 @@ void UIRenderer::renderMenu() {
                 ImGui::EndChild();
                 ImGui::PopStyleVar(1);
             }
-            // ---- 自定义角色：新建 / 编辑入口（网格下方）----
-            bool has_custom = false;
-            for (const auto& e : models)
-                if (e.id.rfind("char:", 0) == 0) { has_custom = true; break; }
-            p->MenuDivider();
-            if (p->MenuRow("charnew", I18n::t("menu.newChar"), false, false,
-                        nullptr, false).clicked)
-                activate("charnew");  // 弹文件选择器；返回后网格自动含新角色
-            if (has_custom &&
-                p->MenuRow("charmanage", I18n::t("menu.manageChar"), false,
-                        false, nullptr, true).clicked)
-                go(kMenuCharManage);
+            // ---- 编辑自定义角色入口（网格下方；有自定义角色时才显示）----
+            if (has_custom) {
+                p->MenuDivider();
+                if (p->MenuRow("charmanage", I18n::t("menu.manageChar"), false,
+                            false, nullptr, true).clicked)
+                    go(kMenuCharManage);
+            }
             break;
         }
         case kMenuCharManage: {
@@ -2636,6 +2855,13 @@ void UIRenderer::renderMenu() {
                             audio.c_str()).clicked) {
                     activate("stateaudio:" + std::string(kStates[i]));
                 }
+                // 试听：播放当前已绑定的状态音频（仅已绑定时显示）
+                if (!audio.empty() &&
+                    p->MenuRow(("stateaudiopreview:" + std::string(kStates[i])).c_str(),
+                            I18n::t("menu.audioPreview"), false, false, nullptr,
+                            false).clicked) {
+                    activate("stateaudiopreview:" + std::string(kStates[i]));
+                }
                 if (!audio.empty() &&
                     p->MenuRow(("stateaudioclear:" + std::string(kStates[i])).c_str(),
                             I18n::t("menu.audioClear"), false, true, nullptr,
@@ -2662,35 +2888,59 @@ void UIRenderer::renderMenu() {
             }
             break;
         }
-        case kMenuVisibility: {
-            // ==== 显示隐藏（1.x #menu-visibility-view：分组分隔线）====
+        case kMenuDisplay: {
+            // ==== 显示（左右翻转 / 迷你模式 / 最小化 + 监控项显隐）====
             if (p->MenuRow("back", I18n::t("menu.back"), false, false, nullptr, false).clicked)
                 go(kMenuMain);
-            p->MenuLabel(I18n::t("menu.visibility"));
+            p->MenuLabel(I18n::t("menu.display"));
+            if (p->MenuRow("flip", I18n::t("menu.flipHorizontal"), checked("flip"),
+                        false, nullptr, false).clicked)
+                activate("flip");
+            if (p->MenuRow("mini", I18n::t("menu.miniMode"), checked("mini"),
+                        false, nullptr, false).clicked)
+                activate("mini");
+            // 最小化：隐藏到系统托盘（托盘图标左键单击/双击唤回）
+            if (p->MenuRow("minimize", I18n::t("menu.minimize"), false, false,
+                        nullptr, false).clicked) {
+                activate("minimize");
+                closeMenu();
+            }
+            p->MenuDivider();
+            // 系统监控：总开关——开启即显示 CPU/内存/显卡/网络/自身全部指标
+            //（子项不再单独提供开关）
             if (p->MenuRow("v0", I18n::t("menu.systemMonitor"), checked("vis-monitor"),
                         false, nullptr, false).clicked)
                 activate("vis-monitor");
-            p->MenuDivider();
-            static const char* kVisKeys[5] = {"vis-cpu", "vis-ram", "vis-gpu",
-                                              "vis-net", "vis-self"};
-            static const char* kVisLabels[5] = {"monitor.cpu", "monitor.ram",
-                                                "monitor.gpu", "monitor.net",
-                                                "monitor.self"};
-            for (int i = 0; i < 5; i++) {
-                if (p->MenuRow(kVisKeys[i], I18n::t(kVisLabels[i]),
-                            checked(kVisKeys[i]), false, nullptr, false).clicked)
-                    activate(kVisKeys[i]);
-            }
             p->MenuDivider();
             if (p->MenuRow("v6", I18n::t("monitor.projectList"),
                         checked("vis-projects"), false, nullptr, false).clicked)
                 activate("vis-projects");
             break;
         }
+        case kMenuIntegration: {
+            // ==== 集成（IDE 集成 Hook + 开机自启动）====
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false, nullptr, false).clicked)
+                go(kMenuMain);
+            p->MenuLabel(I18n::t("menu.integration"));
+            // 安装 IDE 集成（置顶）：Hook 状态直接显示在本行右侧
+            if (p->MenuRow("install", I18n::t("menu.installHooks"), false, false,
+                        hint_of("hook-status").c_str(), false).clicked) {
+                activate("install-hooks");
+                closeMenu();
+            }
+            p->MenuDivider();
+            if (p->MenuRow("autostart", I18n::t("menu.autoLaunch"),
+                        checked("autostart"), false, nullptr, false).clicked)
+                activate("autostart");
+            break;
+        }
         default:
             go(kMenuMain);
             break;
         }
+        // 菜单内容自然高（非切换形象视图按光标实测；切换形象视图已显式设置）
+        if (!desired_set)
+            p->menu_desired_h = ImGui::GetCursorPosY() + 4.0f * S;
     }
     ImGui::End();
     ImGui::PopStyleVar(3);

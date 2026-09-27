@@ -542,9 +542,9 @@ void GifSprite::render() {
 //
 // ARM Linux 版：stb_image 解码动画 GIF（内部按 disposal 合成为全画布
 // RGBA 帧序列，语义与 Windows/WIC 版一致），GLES2 shader 绘制贴图四边形
-// （无固定管线，参考 prompt_banner 的渲染方式）。
+// （无固定管线，shader 直接画纹理四边形）。
 // 帧数据驻留 RAM，仅当前帧上传纹理（帧切换时全量 glTexSubImage2D；
-// 480×480 一帧 0.9MB，USB/SoC 带宽足够）。
+// 480×480 一帧 0.9MB，SoC 内存带宽足够）。
 
 #include <GLES3/gl3.h>
 #include <stb_image.h>

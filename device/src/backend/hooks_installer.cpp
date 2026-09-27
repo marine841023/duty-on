@@ -126,6 +126,13 @@ std::optional<std::string> mergeHooksIntoFile(
         }
     }
 
+    // 变化检测基线：解析出的原始内容（文件不存在/损坏则为空 object）。合并
+    // 完若与之深比较相等，说明磁盘上已是要写的结果 -> 跳过写盘，避免每次
+    // 启动重装都 bump mtime、触发 IDE 反复重载 hook（nlohmann == 与键序/
+    // 缩进无关，只比语义）。须在 version/hooks 归一化之前取，才能覆盖
+    // "文件本就缺 version" 这类需要补写的情况。
+    const json baseline = existing;
+
     if (strip_version) {
         existing.erase("version");  // Codex CLI 拒绝 version 字段（unknown field）
     } else if (add_version && !existing.contains("version")) {
@@ -196,6 +203,9 @@ std::optional<std::string> mergeHooksIntoFile(
         kept.push_back(std::move(group));
         arr = std::move(kept);
     }
+
+    // 无实质变化：磁盘内容已与合并结果语义一致，跳过写盘（见 baseline 注释）
+    if (existing == baseline) return warning;
 
     if (!writeFile(path, existing.dump(2) + "\n")) {
         err = "Failed to write " + path.string();
@@ -433,19 +443,25 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
     fs::create_directories(target_hook_dir, ec);
     if (ec) return fail("Failed to create hook dir: " + ec.message());
 
-    // 复制桥接脚本
+    // 复制桥接脚本（内容一致则跳过，避免每次启动重装都重写 bump mtime）
     if (auto content = readFileIfExists(bridge_src)) {
-        if (!writeFile(target_hook_dir / bridgeFilename(), *content)) {
-            return fail("Failed to copy bridge: " + (target_hook_dir / bridgeFilename()).string());
+        const fs::path bridge_dst = target_hook_dir / bridgeFilename();
+        const auto cur = readFileIfExists(bridge_dst);
+        if (!cur.has_value() || *cur != *content) {
+            if (!writeFile(bridge_dst, *content)) {
+                return fail("Failed to copy bridge: " + bridge_dst.string());
+            }
         }
     } else {
         return fail("Failed to read bridge: " + bridge_src.string());
     }
 
-    // 单独的安装脚本（存在则一并复制，不存在跳过）
+    // 单独的安装脚本（存在则一并复制，内容一致跳过，不存在跳过）
     const fs::path installer_src = fs::path(hooks_source_dir) / "install-hooks.ps1";
     if (auto content = readFileIfExists(installer_src)) {
-        writeFile(target_hook_dir / "install-hooks.ps1", *content);
+        const fs::path installer_dst = target_hook_dir / "install-hooks.ps1";
+        const auto cur = readFileIfExists(installer_dst);
+        if (!cur.has_value() || *cur != *content) writeFile(installer_dst, *content);
     }
 
     std::vector<std::string> warnings;

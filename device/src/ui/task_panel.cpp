@@ -321,16 +321,17 @@ bool TaskPanel::init(const std::string& font_path) {
 }
 
 void TaskPanel::render(const PetStatus& status, int screen_w, int screen_h,
-                       float area_top) {
+                       float area_top, int region_x, int region_w) {
     auto* p = impl_;
     if (screen_w <= 0 || screen_h <= 0 || area_top <= 0) return;
+    if (region_w < 0) region_w = screen_w;  // 默认整屏宽（竖屏）
 
     const int total = (int)status.sessions.size();
     const int shown = std::min(total, kMaxRows);
 
     // 卡片不再铺满下半屏：行块贴屏幕底堆叠，未占区域保持透明黑（无底栏）
-    const float x0 = kPanelMargin;
-    const float x1 = screen_w - kPanelMargin;
+    const float x0 = region_x + kPanelMargin;
+    const float x1 = region_x + region_w - kPanelMargin;
     const float rx0 = x0 + kRowInsetX;  // 行底/行内容相对卡片内缩
     const float rx1 = x1 - kRowInsetX;
 
@@ -435,18 +436,23 @@ void TaskPanel::render(const PetStatus& status, int screen_w, int screen_h,
 }
 
 void TaskPanel::renderClock(const std::string& text, float y_top, float size,
-                            int screen_w, int screen_h) {
+                            int screen_w, int screen_h,
+                            int region_x, int region_w) {
     auto* p = impl_;
     // 时钟用圆润卡通字体（加载失败回退主字体）；字体缺失时静默回退
     TextRenderer& font =
         p->clock_font.isLoaded() ? p->clock_font : p->text;
     if (!font.isLoaded() || text.empty() || screen_w <= 0) return;
+    if (region_w < 0) region_w = screen_w;  // 默认整屏宽（竖屏）
+    // 区域内过宽自动缩字号（横屏窄右列防溢出；竖屏整屏宽不触发）
+    while (size > 24.f && font.measureWidth(text, size) > (float)region_w - 12.f)
+        size -= 4.f;
 
     // ===== 柔光橙黄时钟（无背板、无描边）=====
     // 主体：柔和橙黄（不刺眼的暖色）+ 同色多层柔和光晕，加粗卡通字形
     const float lh = font.lineHeight(size);
     const float w = font.measureWidth(text, size);
-    const float x = ((float)screen_w - w) * 0.5f;
+    const float x = region_x + ((float)region_w - w) * 0.5f;  // 区域内水平居中
     const float ty = y_top;  // 文字顶边（GL y 向上）
 
     // 柔和光晕：setClockColor 设定的主题色（柔光衬托，不刺眼）
@@ -473,18 +479,20 @@ void TaskPanel::renderClock(const std::string& text, float y_top, float size,
 }
 
 void TaskPanel::renderDate(const std::string& text, float y_top, float size,
-                           int screen_w, int screen_h) {
+                           int screen_w, int screen_h,
+                           int region_x, int region_w) {
     auto* p = impl_;
     // 日期含中文（年月日/星期），卡通字体无中文字形，必须用主字体渲染
     TextRenderer& font = p->text;
     if (!font.isLoaded() || text.empty() || screen_w <= 0) return;
+    if (region_w < 0) region_w = screen_w;  // 默认整屏宽（竖屏）
 
-    // 一行内放不下则自动缩小字号（宽度留 20px 边距）
-    const float max_w = (float)screen_w - 20.f;
+    // 一行内放不下则自动缩小字号（区域内宽度留 20px 边距）
+    const float max_w = (float)region_w - 20.f;
     while (size > 12.f && font.measureWidth(text, size) > max_w) size -= 2.f;
 
     const float w = font.measureWidth(text, size);
-    const float x = ((float)screen_w - w) * 0.5f;
+    const float x = region_x + ((float)region_w - w) * 0.5f;  // 区域内水平居中
     const float ty = y_top;
 
     // 同款主题色柔光（缩小版光晕：层数/半径随字号减小）
@@ -510,9 +518,6 @@ float TaskPanel::clockLineHeight(float pixel_size) const {
     return f.isLoaded() ? f.lineHeight(pixel_size) : pixel_size;
 }
 
-// 右上角 USB 状态插头（GL 原点左下，y 向上）：
-//   插脚x2 + 插头头(圆角) + 插头身 + 线缆。连接=绿色且线缆贴身；
-//   断开=红色且线缆与插头身之间留缝。所有模式都画（时钟居中，角上空闲）
 void TaskPanel::renderDim(int brightness, int screen_w, int screen_h) {
     // 整屏叠黑色矩形压暗：alpha = 1 - 亮度/100（SRC_ALPHA 混合 =
     // 各像素乘以亮度系数），100% 时直接跳过
@@ -522,36 +527,60 @@ void TaskPanel::renderDim(int brightness, int screen_w, int screen_h) {
                     1.0f - (float)b / 100.0f, screen_w, screen_h);
 }
 
-void TaskPanel::renderUsbStatus(bool connected, int screen_w, int screen_h) {
+void TaskPanel::renderNetStatus(bool wifi_online, bool pc_online,
+                                int screen_w, int screen_h) {
     auto* p = impl_;
     if (screen_w <= 0 || screen_h <= 0) return;
 
-    const float x1 = (float)screen_w - 12.f;   // 右边距 12
-    const float x0 = x1 - 22.f;                // 图标宽 22
-    const float y1 = (float)screen_h - 12.f;   // 顶边距 12
-    const float y0 = y1 - 30.f;                // 图标高 30
-    const float cx = (x0 + x1) * 0.5f;
+    // 右上角两块连接状态图标（纯色几何，无贴图），分别表示两段链路：
+    //   最右 = Wi-Fi 信号条（4 根递增）：设备是否已入网（入网=绿/未入网=红）；
+    //   其左 = 显示器图标（镂空屏框+支架）：是否已连上 PC（连上=绿/未连=灰）。
+    const float top = (float)screen_h - 12.f;            // 顶边距 12
+    const float box_h = 20.f;                            // 图标高
+    const float bottom = top - box_h;
+    const float bar_w = 3.f, bar_gap = 2.f;              // 条宽 / 条间距
+    const float x1 = (float)screen_w - 12.f;             // 右边距 12
+    const float x0 = x1 - (bar_w * 4.f + bar_gap * 3.f);  // 信号条左缘（宽 18）
 
-    const float r = connected ? 0.25f : 0.95f;
-    const float g = connected ? 0.85f : 0.35f;
-    const float b = connected ? 0.45f : 0.30f;
-    const float a = 0.95f;
+    // ---- Wi-Fi 信号条：入网=绿，未入网/配网中=红 ----
+    {
+        const float r = wifi_online ? 0.25f : 0.95f;
+        const float g = wifi_online ? 0.85f : 0.35f;
+        const float b = wifi_online ? 0.45f : 0.30f;
+        const float a = wifi_online ? 0.95f : 0.85f;
+        static const float kBarH[4] = {6.f, 10.f, 14.f, 18.f};
+        for (int i = 0; i < 4; ++i) {
+            const float bx0 = x0 + (float)i * (bar_w + bar_gap);
+            p->fillRect(bx0, bottom, bx0 + bar_w, bottom + kBarH[i], r, g, b, a,
+                        screen_w, screen_h);
+        }
+    }
 
-    // 插脚（顶部两根）
-    p->fillRect(x0 + 5.f, y1 - 7.f, x0 + 8.5f, y1, r, g, b, a, screen_w,
-                screen_h);
-    p->fillRect(x1 - 8.5f, y1 - 7.f, x1 - 5.f, y1, r, g, b, a, screen_w,
-                screen_h);
-    // 插头头（圆角）
-    p->fillRoundedRect(x0 + 2.5f, y1 - 17.f, x1 - 2.5f, y1 - 7.f, 2.5f, r, g,
-                       b, a, screen_w, screen_h);
-    // 插头身（收窄）
-    p->fillRect(cx - 5.5f, y1 - 23.f, cx + 5.5f, y1 - 17.f, r, g, b, a,
-                screen_w, screen_h);
-    // 线缆：连接时贴着插头身；断开时下移 5px 留缝
-    const float cable_top = connected ? y1 - 23.f : y1 - 28.f;
-    p->fillRect(cx - 1.75f, y0, cx + 1.75f, cable_top, r, g, b, a, screen_w,
-                screen_h);
+    // ---- PC 显示器图标（信号条左侧，间距 7；镂空屏框 + 支架 + 底座）----
+    {
+        const float gap = 7.f;
+        const float iw = 16.f;                 // 显示器宽
+        const float px1 = x0 - gap;            // 右缘
+        const float px0 = px1 - iw;            // 左缘
+        const float scr_top = bottom + 14.f;   // 屏幕上沿
+        const float scr_bot = bottom + 4.f;    // 屏幕下沿
+        const float t = 2.f;                   // 屏框线宽
+        const float r = pc_online ? 0.25f : 0.60f;
+        const float g = pc_online ? 0.85f : 0.62f;
+        const float b = pc_online ? 0.45f : 0.66f;
+        const float a = pc_online ? 0.95f : 0.65f;
+        // 屏框四边（镂空，中间透出背景）
+        p->fillRect(px0, scr_top - t, px1, scr_top, r, g, b, a, screen_w, screen_h);
+        p->fillRect(px0, scr_bot, px1, scr_bot + t, r, g, b, a, screen_w, screen_h);
+        p->fillRect(px0, scr_bot, px0 + t, scr_top, r, g, b, a, screen_w, screen_h);
+        p->fillRect(px1 - t, scr_bot, px1, scr_top, r, g, b, a, screen_w, screen_h);
+        // 支架 + 底座
+        const float cx = px0 + iw * 0.5f;
+        p->fillRect(cx - 1.5f, bottom + 1.f, cx + 1.5f, scr_bot, r, g, b, a,
+                    screen_w, screen_h);
+        p->fillRect(px0 + 3.f, bottom, px1 - 3.f, bottom + 1.f, r, g, b, a,
+                    screen_w, screen_h);
+    }
 }
 
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(dutyon-2.0 VERSION 2.0.8 LANGUAGES CXX)
+project(dutyon-2.0 VERSION 2.0.9 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -140,6 +140,14 @@ if(WIN32)
         opengl32
         "${GLEW_ROOT}/lib/Release/x64/glew32s.lib"
     )
+else()
+    # Framework 的 OpenGL/GLES 渲染后端 include <EGL/egl.h> <GLES3/gl3.h>；
+    # 设备原生编译时 /usr/include 是默认搜索路径，交叉编译（sysroot 非默认）
+    # 必须显式加入 pkg-config 提供的 EGL/GLES3 include 目录，否则找不到头。
+    target_include_directories(cubism_framework PUBLIC
+        ${EGL_INCLUDE_DIRS}
+        ${GLES3_INCLUDE_DIRS}
+    )
 endif()
 
 # ---------------------------------------------------------------------------
@@ -195,18 +203,27 @@ if(WIN32)
         src/backend/hooks_installer.cpp
         src/backend/autostart.cpp
         src/backend/http_server.cpp
+        src/backend/pairing_manager.cpp
         src/backend/backend_service.cpp)
 else()
     # ApiClient（HTTP 轮询 PC 端 API）仅设备端使用；PC 端内嵌后端直连。
-    # usb_link = USB 直连链路监视（租约发现）；prompt_banner = 开机引导横幅；
     # text_renderer/task_panel = 下半屏任务列表（字形图集文字 + 面板）
+    # Wi-Fi 配对码方案（替代 USB 配对）：
+    #   net/wifi_manager   = AP/client 模式切换状态机 + 内嵌 captive portal(httplib:80)
+    #   net/pc_discovery   = UDP 广播发现 PC（设备广播 DUTYON_DISCOVER）
+    #   net/device_identity= device_id/pair_code/token 持久化（~/.dutyon/device.json）
+    #   render/qrcodegen   = 自包含 QR 编码器；render/qr_banner = 配网 QR 屏幕渲染
     list(APPEND SOURCES
         src/api/client.cpp
         src/audio/sound_player.cpp
-        src/net/usb_link.cpp
+        src/net/wifi_manager.cpp
+        src/net/pc_discovery.cpp
+        src/net/device_identity.cpp
         src/platform/egl_window.cpp
         src/render/gles_context.cpp
-        src/render/prompt_banner.cpp
+        src/render/qrcodegen.cpp
+        src/render/qr_banner.cpp
+        src/render/photo_player.cpp
         src/render/text_renderer.cpp
         src/ui/task_panel.cpp)
 endif()
@@ -220,11 +237,11 @@ target_include_directories(dutyon-pet PRIVATE
     ${stb_SOURCE_DIR}
 )
 
-if(WIN32)
-    # cpp-httplib 单头文件（third_party/deps/httplib/httplib.h 随仓库分发）
-    target_include_directories(dutyon-pet PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/deps/httplib)
-endif()
+# cpp-httplib 单头文件（third_party/deps/httplib/httplib.h 随仓库分发）：
+# PC 端内嵌后端服务器 + 设备端 captive portal（AP 配网页）都用它，两平台均需
+# 该 include 目录。设备端交叉编译无需额外链接（纯 POSIX socket + 已链 pthread）。
+target_include_directories(dutyon-pet PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/deps/httplib)
 
 target_compile_definitions(dutyon-pet PRIVATE ${CSM_TARGET})
 
@@ -248,6 +265,7 @@ if(WIN32)
         gdi32
         psapi         # EnumProcessModules（崩溃诊断）
         comdlg32      # GetOpenFileNameW（自定义角色动画上传选择器）
+        winmm         # mciSendStringW（动作设定页状态音频试听）
     )
     # 子系统 WINDOWS：启动不弹控制台黑窗。入口仍是 main()，需显式指定
     # mainCRTStartup（否则链接器找 WinMain 报错）。调试要看 printf 日志时

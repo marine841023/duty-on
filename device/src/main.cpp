@@ -25,7 +25,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>  // SHBrowseForFolderW（相框照片文件夹选择）
 #include <commdlg.h>  // GetOpenFileNameW（自定义角色动画上传）
+#include <mmsystem.h>  // mciSendStringW（状态音频试听）
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>  // glfwGetFramebufferSize（视口 DPI 换算）
 #else
@@ -53,10 +55,14 @@
 #include "ui/ui_renderer.h"
 #ifdef _WIN32
 #include "backend/backend_service.h"  // 单进程后端（原 duty-on.exe 职责）
+#include "platform/sync_progress.h"   // 设备程序自动更新进度窗口
 #else
 #include <nlohmann/json.hpp>            // 用户模型 model3.json 解析（PC 同步）
-#include "net/usb_link.h"             // USB 直连链路监视（租约发现 PC）
-#include "render/prompt_banner.h"     // 开机引导横幅（未插线提示）
+#include "net/wifi_manager.h"         // Wi-Fi 配网 + AP/client 模式切换状态机
+#include "net/pc_discovery.h"         // UDP 广播发现 PC（替代 USB ARP 发现）
+#include "net/device_identity.h"      // device_id / pair_code / token 持久化
+#include "render/qr_banner.h"         // 配网 QR 屏幕渲染
+#include "render/photo_player.h"      // 电子相框照片逐张流式播放
 #include "ui/task_panel.h"            // 下半屏任务列表（项目名 + 状态）
 #include "audio/sound_player.h"       // 事件提示音（开始/结束/提醒）
 #endif
@@ -82,6 +88,217 @@ static std::string gifFileFor(const CustomCharacter& c, const std::string& state
     if (!f && !c.alert.empty()) f = &c.alert;
     return f ? *f : std::string();
 }
+
+#ifdef _WIN32
+// ---------------------------------------------------------------------------
+// 设备程序自动更新（连接时触发）：设备连上 PC 后比对「本机待推送源码树的内容
+// 哈希」与「设备上报版本」（X-DutyOn-Version，来自 /opt/dutyon/VERSION），不
+// 一致则后台跑 .userdata/sync-device.ps1 推送更新，独立置顶窗口显示进度。原
+// 「同步程序到设备」菜单项已移除，改为此处全自动。
+// ---------------------------------------------------------------------------
+
+// 自动更新并发闸：连接跳变处预判 + launcher 内 exchange 双保险
+static std::atomic<bool> g_syncing{false};
+
+// 计算「待推送源码树」的内容哈希（FNV-1a 64 位 → 16 位十六进制）。文件集与
+// sync-device.ps1 的 tar 一致，故「哈希变」<=>「推送内容变」<=>「需更新」。
+// 仅 PC 端计算（设备只存 PC 下发值，无需跨平台一致）。无文件返回空串。
+static std::string computeSourceVersion(const std::string& repo) {
+    namespace fs = std::filesystem;
+    const char* kRoots[] = {"device/CMakeLists.txt", "device/src",
+                            "device/scripts", "frontend/assets/device",
+                            ".userdata/deploy.sh"};
+    const fs::path base(repo);
+    std::vector<fs::path> files;
+    for (const char* rel : kRoots) {
+        const fs::path p = base / rel;
+        std::error_code ec;
+        if (!fs::exists(p, ec)) continue;
+        if (fs::is_regular_file(p, ec)) {
+            files.push_back(p);
+        } else if (fs::is_directory(p, ec)) {
+            fs::recursive_directory_iterator it(
+                p, fs::directory_options::skip_permission_denied, ec);
+            for (fs::recursive_directory_iterator end; !ec && it != end;
+                 it.increment(ec)) {
+                std::error_code fec;
+                if (it->is_regular_file(fec) && !fec) files.push_back(it->path());
+            }
+        }
+    }
+    if (files.empty()) return std::string();
+    std::sort(files.begin(), files.end());  // 稳定顺序：哈希与枚举序无关
+    unsigned long long h = 1469598103934665603ULL;  // FNV-1a offset basis
+    auto feed = [&](const void* data, size_t n) {
+        const unsigned char* b = static_cast<const unsigned char*>(data);
+        for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ULL; }
+    };
+    for (const auto& f : files) {
+        const std::string rel = fs::relative(f, base).generic_string();
+        feed(rel.data(), rel.size());
+        std::error_code ec;
+        const unsigned long long s =
+            static_cast<unsigned long long>(fs::file_size(f, ec));
+        if (ec) continue;
+        feed(&s, sizeof(s));
+        std::ifstream in(f, std::ios::binary);
+        if (!in) continue;
+        char buf[8192];
+        while (in.read(buf, sizeof(buf)) || in.gcount() > 0) {
+            feed(buf, static_cast<size_t>(in.gcount()));
+            if (in.gcount() < static_cast<std::streamsize>(sizeof(buf))) break;
+        }
+    }
+    char out[17];
+    snprintf(out, sizeof(out), "%016llx", h);
+    return std::string(out);
+}
+
+// 读同步日志尾部，解析最后一条 PROGRESS=NN 与阶段关键字（ASCII 首词）
+static bool parseSyncProgress(const std::wstring& logPath, int& pct,
+                              std::string& stageKey) {
+    std::ifstream f(logPath, std::ios::binary);
+    if (!f) return false;
+    f.seekg(0, std::ios::end);
+    const std::streamoff sz = f.tellg();
+    if (sz <= 0) return false;
+    const std::streamoff n = std::min<std::streamoff>(sz, 4096);
+    f.seekg(sz - n);
+    std::string tail(static_cast<size_t>(n), '\0');
+    f.read(&tail[0], n);
+    const size_t pos = tail.rfind("PROGRESS=");
+    if (pos == std::string::npos) return false;
+    size_t i = pos + 9;  // strlen("PROGRESS=")
+    int v = 0;
+    while (i < tail.size() && tail[i] >= '0' && tail[i] <= '9') {
+        v = v * 10 + (tail[i] - '0');
+        i++;
+    }
+    if (v < 0 || v > 100) return false;
+    while (i < tail.size() && (tail[i] == ' ' || tail[i] == '\t')) i++;
+    size_t j = i;
+    while (j < tail.size() && tail[j] != ' ' && tail[j] != '\r' &&
+           tail[j] != '\n' && tail[j] != '\t')
+        j++;
+    pct = v;
+    stageKey = tail.substr(i, j - i);
+    return true;
+}
+
+// 阶段关键字 → 中文进度文案（关键字均为脚本内 ASCII，无需 UTF-8 转换）
+static const wchar_t* syncStageLabel(const std::string& k) {
+    if (k == "push") return L"推送源码…";
+    if (k == "remote") return L"连接设备…";
+    if (k == "unpack") return L"解包源码…";
+    if (k == "configure") return L"配置构建…";
+    if (k == "build") return L"编译中（约 1-5 分钟）…";
+    if (k == "deploy") return L"部署到设备…";
+    if (k == "restart") return L"重启服务…";
+    if (k == "done") return L"完成";
+    return L"同步中…";
+}
+
+// 后台推送更新：跑 sync-device.ps1 -Version <hash>，独立置顶窗口显示进度。
+// 全程在工作线程内（含进度窗口创建/消息泵/销毁），不阻塞渲染主循环。
+static void launchDeviceSync(const std::string& repo,
+                             const std::string& version) {
+    if (g_syncing.exchange(true)) return;  // 已有同步在跑
+    std::thread([repo, version]() {
+        namespace fs = std::filesystem;
+        const fs::path script = fs::path(repo) / ".userdata" / "sync-device.ps1";
+        std::error_code ec;
+        SyncProgressDialog dlg;
+        if (!fs::exists(script, ec)) { g_syncing = false; return; }
+
+        wchar_t tmp[MAX_PATH];
+        GetTempPathW(MAX_PATH, tmp);
+        const std::wstring log = std::wstring(tmp) + L"dutyon-device-sync.log";
+        { std::ofstream clr(log, std::ios::binary | std::ios::trunc); }  // 清旧日志
+
+        const std::wstring repoW(repo.begin(), repo.end());
+        const std::wstring verW(version.begin(), version.end());
+        const std::wstring scriptW = repoW + L"\\.userdata\\sync-device.ps1";
+        std::wstring cmd =
+            L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" +
+            scriptW + L"\" -Repo \"" + repoW + L"\" -LogFile \"" + log +
+            L"\" -Version \"" + verW + L"\"";
+
+        STARTUPINFOW si{sizeof(si)};
+        PROCESS_INFORMATION pi{};
+        dlg.create();
+        dlg.update(3, L"正在启动同步…");
+        if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE,
+                            CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            dlg.update(0, L"无法启动同步脚本");
+            Sleep(2500);
+            dlg.destroy();
+            g_syncing = false;
+            return;
+        }
+
+        // 轮询：每 200ms 等进程 + 泵消息 + tail 日志解析进度。真实标记到达即
+        // 跳进；长阶段（编译）无新标记时按 ~2.4s/1% 缓慢爬升，封顶 95 防假死
+        const auto t0 = std::chrono::steady_clock::now();
+        const long long kTimeoutMs = 20LL * 60 * 1000;
+        int shown = 3, lastLogged = 0, creep = 0;
+        std::string stageKey;
+        bool timedOut = false;
+        while (true) {
+            const DWORD wr = WaitForSingleObject(pi.hProcess, 200);
+            dlg.pump();
+            int p = 0;
+            std::string k;
+            if (parseSyncProgress(log, p, k) && p >= lastLogged) {
+                lastLogged = p;
+                if (!k.empty()) stageKey = k;
+            }
+            if (shown < lastLogged) {
+                shown = lastLogged;  // 真实进度：跳到最新标记
+            } else if (shown < std::min<int>(lastLogged + 20, 95)) {
+                if (++creep >= 12) { creep = 0; shown++; }  // 停滞时缓慢爬升
+            }
+            dlg.update(shown, syncStageLabel(stageKey));
+            if (wr == WAIT_OBJECT_0) break;
+            const long long el =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - t0).count();
+            if (el > kTimeoutMs) { timedOut = true; break; }
+        }
+        DWORD rc = 1;
+        GetExitCodeProcess(pi.hProcess, &rc);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+
+        // 结果确认：读日志尾部 RESULT=OK（脚本最后一行）
+        std::string tail;
+        {
+            std::ifstream f(log, std::ios::binary);
+            if (f) {
+                f.seekg(0, std::ios::end);
+                const std::streamoff sz = f.tellg();
+                const std::streamoff n = std::min<std::streamoff>(sz, 800);
+                f.seekg(sz - n);
+                tail.resize(static_cast<size_t>(n));
+                f.read(&tail[0], n);
+            }
+        }
+        const bool ok = !timedOut && rc == 0 &&
+                        tail.find("RESULT=OK") != std::string::npos;
+        if (ok) {
+            dlg.update(100, L"更新完成，设备已重启");
+            printf("[Sync] device update done (version=%s)\n", version.c_str());
+        } else {
+            dlg.update(shown, timedOut ? L"更新超时，请检查设备连接"
+                                       : L"更新失败，请重试或检查设备");
+            printf("[Sync] device update FAILED (rc=%lu timedOut=%d)\n", rc,
+                   timedOut ? 1 : 0);
+        }
+        Sleep(2800);  // 结果停留片刻再关窗
+        dlg.destroy();
+        g_syncing = false;
+    }).detach();
+}
+#endif  // _WIN32
 
 #ifndef _WIN32
 // ---------------------------------------------------------------------------
@@ -293,7 +510,7 @@ int main() {
     const int initial_h = BASE_MODEL_AREA_H + 90;  // 状态栏首帧高度估算，之后自动校正
 #else
     const char* platform = "ARM Linux (EGL/GLES2)";
-    const char* api_url = "USB 直连（usb0 租约自动发现）";
+    const char* api_url = "Wi-Fi 局域网（UDP 广播自动发现）";
     // 直出模式：逻辑尺寸 = 实际选中的 DRM 模式尺寸（竖屏 480x800 /
     // 横屏 800x480），init 后从 window 取回，布局全按实际尺寸自适应
     int WIN_W = kDisplayWidth;
@@ -450,13 +667,35 @@ int main() {
     int dev_motion_idx = 0;
     // 硬件屏布局模式（PC 经 /api/status 下发；断连后保持最近值）：
     // multi=角色半屏+任务列表 / single=角色全屏+大时钟 / frame=相框全屏轮播。
-    // 初始 frame：未插 USB 开机时当电子相框用（插线后 PC 下发模式覆盖）
+    // 初始 frame：未连上 PC 时当电子相框用（连上后 PC 下发模式覆盖）
     std::string device_mode = "frame";
     // 时钟颜色主题（PC 菜单下发；断连保持最近值）
     std::string clock_color = "amber";
     // 屏幕亮度（PC 菜单"设备→亮度"下发，10-100）：有 sysfs 背光写背光，
     // 否则渲染层整屏压暗（renderDim）
     int device_brightness = 100;
+    // 整屏旋转角（PC 菜单"设备→屏幕旋转"下发，0/90/180/270）：设备端逻辑
+    // FBO + 旋转合成；断连后保持最近值
+    int screen_rotation = 0;
+#ifndef _WIN32
+    // 默认朝向 = 上次运行时保存的旋转角（持久化于 ~/.dutyon/config.json 的
+    // screenRotation，见下方 PC 下发时的 saveScreenRotation）：开机即恢复，
+    // 无需等 PC 重新连上再下发——满足"默认显示方向与上次断开时一致"。
+    // DUTYON_FORCE_ROTATION=<deg> 仍可覆盖（无 PC 连接时供快照验证
+    // 0/90/180/270；正常发布无副作用，PC 下发会覆盖）。
+    screen_rotation = cfg.screen_rotation;
+    if (const char* rot_env = getenv("DUTYON_FORCE_ROTATION")) {
+        if (*rot_env) screen_rotation = atoi(rot_env);
+    }
+    if (screen_rotation != 0) {
+        window->setRotation(screen_rotation);
+        WIN_W = window->width();
+        WIN_H = window->height();
+        MODEL_AREA_H = WIN_H / 2;
+        printf("[Mode] startup rotation -> %d (%dx%d)\n", screen_rotation,
+               WIN_W, WIN_H);
+    }
+#endif
     // 提示音边沿检测基准（首帧仅记录不发声，避免开机误报）
     std::string snd_prev_overall;
     bool snd_prev_confirm = false;
@@ -465,6 +704,11 @@ int main() {
     std::string frame_sig;
     int frame_idx = 0;
     float frame_timer = 0.f;
+    // 相框播放源（PC 经 /api/status 下发 frameSource；断连保持最近值）：
+    // motion=动作轮播（现行）/ folder=指定文件夹照片（PhotoPlayer 逐张流式）
+    std::string frame_source = "motion";
+    bool photo_playing = false;   // PhotoPlayer 后台线程是否在跑
+    bool photo_showing = false;   // 本帧是否正显示照片（true 时隐藏角色/时钟）
     // 时钟跟随 PC（设备无 RTC/NTP 不可信）：轮询到的 PC epoch 秒 +
     // steady_clock 基准，两次轮询间自行推进
     double clock_epoch = 0;
@@ -521,12 +765,23 @@ int main() {
 #else
     ui.init(WIN_W, MODEL_AREA_H);
 
-    // USB 直连接线（仅设备端）：链路监视（每帧 poll，内部 1s 节流）+
-    // 引导横幅（未插线时屏底提示"请通过 USB 连接电脑"；GL 上下文已就绪）
-    UsbLink usb_link;
-    bool usb_connected = false;
-    PromptBanner prompt_banner;
-    prompt_banner.load(kPromptBannerPath);
+    // Wi-Fi 配对码方案（替代 USB 直连）：
+    //   wifi          AP 配网 <-> 入网 状态机（每帧 poll，内部 1s 节流）；
+    //   pc_discovery  入网后 UDP 广播发现 PC，拿 base url 喂 ApiClient；
+    //   identity      device_id / pair_code / token（~/.dutyon/device.json）；
+    //   qr_banner     AP 模式把「加入热点」串画成 QR（手机扫码配网）。
+    // pc_ready = 已入网 + 已配对 + 已发现 PC（= 可显示任务数据）。
+    auto& identity = DeviceIdentity::instance();
+    WifiManager wifi;
+    wifi.start();
+    PcDiscovery pc_discovery(identity.deviceId());
+    QrBanner qr_banner;
+    bool pc_ready = false;
+    bool pc_paired = identity.paired();  // PC 是否已认得本设备（发现回包更新）
+
+    // 设备画面：由 Wi-Fi / 配对状态决定（主循环 poll 段计算，渲染段分派）
+    enum class DevScreen { Normal, QrProvision, JoiningWifi, PairCode, FindingPc };
+    DevScreen dev_screen = DevScreen::Normal;
 
     // 任务列表面板（下半屏）：字体加载失败时只画底色无文字，不阻断运行
     TaskPanel task_panel;
@@ -560,8 +815,22 @@ int main() {
     backend.setMonitorActive(cfg.monitor_enabled);  // 面板关 = 采样零开销
     auto& api = backend;  // 方法面与 ApiClient 兼容（takeStatus/菜单动作）
 #else
-    // 初始地址为空 = 轮询暂停；插线后由租约发现经 setBaseUrl 接入（见主循环）
+    // 初始地址为空 = 轮询暂停；入网后由 pc_discovery 发现经 setBaseUrl 接入。
+    // 提供设备身份：已配对则用持久化 token 直连，否则工作线程自动握手配对。
     ApiClient api("");
+    api.setIdentity(identity.deviceId(), identity.pairCode(), identity.token());
+    // 读取本机程序版本（部署时由 sync-device.ps1 写入 /opt/dutyon/VERSION）：
+    // 附加到 /api/status 轮询头，PC 端据此与源码哈希比对触发自动更新。
+    // 文件缺失（旧固件/首次）则为空串，PC 端视为不一致 → 触发首次同步。
+    {
+        std::string ver;
+        std::ifstream vf("/opt/dutyon/VERSION");
+        if (vf) std::getline(vf, ver);
+        const auto b = ver.find_first_not_of(" \t\r\n");
+        const auto e = ver.find_last_not_of(" \t\r\n");
+        ver = (b == std::string::npos) ? std::string() : ver.substr(b, e - b + 1);
+        api.setProgramVersion(ver);
+    }
 #endif
     StateMachine state_machine;
 
@@ -629,6 +898,17 @@ int main() {
                 }
         }
     };
+#endif
+
+#ifndef _WIN32
+    // 电子相框「指定文件夹」照片播放器：声明在 api 之后（栈对象后声明先
+    // 析构，退出时先 join 后台线程，避免 worker 访问已释放的 ApiClient）。
+    // 取字节回调走 ApiClient::fetchFramePhoto（在 PhotoPlayer 后台线程执行）。
+    PhotoPlayer photo_player;
+    photo_player.setFetcher(
+        [&](std::vector<unsigned char>& out) {
+            return api.fetchFramePhoto(out);
+        });
 #endif
 
     if (!using_gif) {
@@ -707,9 +987,16 @@ int main() {
 
     ui.menu_hint = [&](const std::string& id) -> std::string {
         if (id == "hook-status") return hook_hint_cache;
+        // 集成状态（主菜单“集成”右侧）：Hook 已安装即视为已集成
+        if (id == "integration-status")
+            return I18n::t(hook_hint_cache == "已安装" ? "menu.integrated"
+                                                        : "menu.notIntegrated");
         if (id.rfind("assign:", 0) == 0) {
             auto [g, i] = state_machine.motionForState(id.substr(7));
-            return g + "[" + std::to_string(i) + "]";
+            // 与播放/选择网格显示一致：GIF 形象用状态名，Live2D 用动作显示名
+            //（原样返回 "组[序号]" 是动作原始名，未本地化）
+            if (using_gif) return I18n::t(("state." + g).c_str());
+            return I18n::motionName(g, i);
         }
         // charname:<charid> —— 角色编辑视图标题（角色显示名）
         if (id.rfind("charname:", 0) == 0) {
@@ -791,6 +1078,29 @@ int main() {
                 out.push_back({"charedit:" + c.id, c.name, false, {}});
             return out;
         }
+#ifdef _WIN32
+        // 设备配对（Wi-Fi 配对码方案）：待配对请求 / 已配对设备列表。
+        // id = device_id（供 pair-unpair 用）；label = 前 8 位（+来源 IP）。
+        if (key == "pair-pending") {
+            std::vector<UIRenderer::MenuEntry> out;
+            for (const auto& pr : backend.pendingPairings()) {
+                const std::string sid = pr.device_id.size() > 8
+                                            ? pr.device_id.substr(0, 8)
+                                            : pr.device_id;
+                out.push_back({pr.device_id, sid + " @ " + pr.ip, false, {}});
+            }
+            return out;
+        }
+        if (key == "pair-paired") {
+            std::vector<UIRenderer::MenuEntry> out;
+            for (const auto& did : backend.pairedDevices()) {
+                const std::string sid =
+                    did.size() > 8 ? did.substr(0, 8) : did;
+                out.push_back({did, sid, false, {}});
+            }
+            return out;
+        }
+#endif
         return {};
     };
 
@@ -944,6 +1254,69 @@ int main() {
         cfg.state_audio[key][state] = fname;
         return true;
     };
+
+    // 状态音频试听（PC 端）：MCI 异步播放已绑定文件。用 W 版兼容非 ASCII
+    // 路径；同一 alias 先停旧再开新，实现“重新试听”。MCI 不支持的格式
+    //（部分 ogg/flac/m4a）open 失败即静默忽略。
+    auto preview_audio_file = [](const std::string& utf8_path) {
+        mciSendStringW(L"stop dutyonprev", nullptr, 0, nullptr);
+        mciSendStringW(L"close dutyonprev", nullptr, 0, nullptr);
+        const int n = MultiByteToWideChar(CP_UTF8, 0, utf8_path.c_str(), -1,
+                                          nullptr, 0);
+        if (n <= 1) return;
+        std::wstring wp((size_t)n - 1, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, utf8_path.c_str(), -1, wp.data(), n);
+        const std::wstring cmd = L"open \"" + wp + L"\" alias dutyonprev";
+        if (mciSendStringW(cmd.c_str(), nullptr, 0, nullptr) != 0) return;
+        mciSendStringW(L"play dutyonprev", nullptr, 0, nullptr);
+    };
+
+    // 相框照片文件夹选择器（模态 shell 文件夹框；取消返回空）。路径以
+    // UTF-8 回传（与 config.json / HTTP 服务一致）
+    auto pick_frame_folder = [&]() -> std::string {
+        BROWSEINFOW bi{};
+        bi.hwndOwner = pet_hwnd;
+        bi.lpszTitle = L"选择电子相框照片文件夹（仅 JPG / PNG）";
+        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE |
+                     BIF_EDITBOX | BIF_NONEWFOLDERBUTTON;
+        std::string out;
+        if (LPITEMIDLIST pidl = SHBrowseForFolderW(&bi)) {
+            wchar_t path[MAX_PATH] = L"";
+            if (SHGetPathFromIDListW(pidl, path)) {
+                const int len = WideCharToMultiByte(CP_UTF8, 0, path, -1,
+                                                    nullptr, 0, nullptr, nullptr);
+                if (len > 1) {
+                    out.resize((size_t)len - 1);
+                    WideCharToMultiByte(CP_UTF8, 0, path, -1, out.data(), len,
+                                        nullptr, nullptr);
+                }
+            }
+            CoTaskMemFree(pidl);
+        }
+        return out;
+    };
+
+    // 统计照片目录内可用照片数（只扫一次，上限 400 张：菜单提示用，
+    // 真正常播的目录不会远少到这个数；上限避免大目录每帧卡渲染线程）
+    auto count_frame_photos = [](const std::string& folder_utf8) -> int {
+        namespace fs = std::filesystem;
+        if (folder_utf8.empty()) return 0;
+        const int n = MultiByteToWideChar(CP_UTF8, 0, folder_utf8.c_str(), -1,
+                                         nullptr, 0);
+        if (n <= 1) return 0;
+        std::wstring wp((size_t)n - 1, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, folder_utf8.c_str(), -1, wp.data(), n);
+        std::error_code ec;
+        int cnt = 0;
+        for (const auto& e : fs::directory_iterator(fs::path(wp), ec)) {
+            if (cnt >= 400) break;
+            if (!e.is_regular_file(ec)) continue;
+            std::string ext = e.path().extension().string();
+            for (auto& ch : ext) ch = (char)tolower((unsigned char)ch);
+            if (ext == ".jpg" || ext == ".jpeg" || ext == ".png") cnt++;
+        }
+        return cnt;
+    };
 #endif
 
     ui.menu_activate = [&](const std::string& id) {
@@ -967,6 +1340,12 @@ int main() {
             mini_mode = !mini_mode;
             UserConfigStore::saveMini(mini_mode);
         }
+        // ---- 最小化：隐藏到系统托盘（托盘图标左键单击/双击唤回）----
+        else if (id == "minimize") {
+#ifdef _WIN32
+            window->setVisible(false);
+#endif
+        }
         // ---- 语言 ----
         else if (id.rfind("lang:", 0) == 0) {
             const std::string code = id.substr(5);
@@ -985,6 +1364,42 @@ int main() {
                 UserConfigStore::saveDeviceMode(mode);
                 // 立即生效（设备端下一次 /api/status 轮询 ≤2s 收到）
             }
+        }
+        // ---- 相框播放源（菜单「设备→相框播放」：动作轮播 / 指定文件夹）----
+        else if (id.rfind("frame-source:", 0) == 0) {
+#ifdef _WIN32
+            const std::string src = id.substr(13);
+            if (src == "motion") {
+                cfg.frame_source = "motion";
+                UserConfigStore::saveFrameSource("motion");
+            } else if (src == "folder") {
+                // 启用已选目录；未选过时先弹一次选择器（取消则保持原状）
+                bool go = true;
+                if (cfg.frame_folder.empty()) {
+                    const std::string picked = pick_frame_folder();
+                    if (picked.empty()) {
+                        go = false;
+                    } else {
+                        cfg.frame_folder = picked;
+                        UserConfigStore::saveFrameFolder(picked);
+                    }
+                }
+                if (go) {
+                    cfg.frame_source = "folder";
+                    UserConfigStore::saveFrameSource("folder");
+                }
+            } else if (src == "pick") {
+                const std::string picked = pick_frame_folder();
+                if (!picked.empty()) {  // 取消：保持原状
+                    cfg.frame_folder = picked;
+                    UserConfigStore::saveFrameFolder(picked);
+                    // 选完即切到照片源（否则用户得再点一下）
+                    cfg.frame_source = "folder";
+                    UserConfigStore::saveFrameSource("folder");
+                }
+            }
+            // 设备端下一次 /api/status 轮询（≤2s）收到 frameSource
+#endif
         }
         // ---- 硬件显示端时钟颜色（菜单"时钟颜色"五选一）----
         else if (id.rfind("clock-color:", 0) == 0) {
@@ -1007,94 +1422,27 @@ int main() {
         }
         // ---- 屏幕旋转（菜单「设备→屏幕旋转」0/90/180/270；经 /api/status 下发）----
         else if (id.rfind("device-rotate:", 0) == 0) {
-            const int deg = std::stoi(id.substr(13));
+            // 前缀 "device-rotate:" 共 14 字符，偏移 +14 才是角度数字；
+            // 用 atoi（解析失败返回 0，不抛异常），避免 stoi 遇非法输入崩溃
+            const int deg = atoi(id.c_str() + 14);
             if (deg == 0 || deg == 90 || deg == 180 || deg == 270) {
                 cfg.screen_rotation = deg;
                 UserConfigStore::saveScreenRotation(deg);
             }
         }
-        // ---- 同步最新程序到设备（菜单「同步程序到设备」）----
-        else if (id == "device-sync") {
+        // ---- 设备配对（Wi-Fi 配对码方案；菜单「设备→配对设备」）----
+        else if (id.rfind("pair-confirm:", 0) == 0) {
 #ifdef _WIN32
-            // 全流程（tar 推源码 → 设备端增量编译 → 部署重启服务）要数分钟，
-            // 必须后台线程执行（同 install-hooks 模式），否则渲染循环卡死
-            static std::atomic<bool> syncing{false};
-            const std::filesystem::path script =
-                std::filesystem::path(cfg.device_repo) / ".userdata" /
-                "sync-device.ps1";
-            if (cfg.device_repo.empty() ||
-                !std::filesystem::exists(script)) {
-                MessageBoxW(
-                    nullptr,
-                    L"尚未配置源码仓库路径，无法同步。\r\n\r\n"
-                    L"请在 C:\\Users\\<用户名>\\.dutyon\\config.json 中增加：\r\n"
-                    L"\"deviceRepo\": \"<仓库根目录，如 d:/src/traeSprite>\"",
-                    L"Duty On", MB_OK | MB_ICONINFORMATION);
-            } else if (!syncing.exchange(true)) {
-                const std::string repo = cfg.device_repo;
-                std::thread([repo]() {
-                    wchar_t tmp[MAX_PATH];
-                    GetTempPathW(MAX_PATH, tmp);
-                    const std::wstring log =
-                        std::wstring(tmp) + L"dutyon-device-sync.log";
-                    const std::wstring repoW(repo.begin(), repo.end());
-                    const std::wstring scriptW =
-                        repoW + L"\\.userdata\\sync-device.ps1";
-                    std::wstring cmd =
-                        L"powershell.exe -NoProfile -ExecutionPolicy Bypass"
-                        L" -File \"" + scriptW + L"\" -Repo \"" + repoW +
-                        L"\" -LogFile \"" + log + L"\"";
-                    STARTUPINFOW si{sizeof(si)};
-                    PROCESS_INFORMATION pi{};
-                    std::wstring result;
-                    if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr,
-                                       FALSE, CREATE_NO_WINDOW, nullptr,
-                                       nullptr, &si, &pi)) {
-                        // 设备端全量编译最坏 ~10 分钟，留足余量
-                        WaitForSingleObject(pi.hProcess, 20 * 60 * 1000);
-                        DWORD rc = 1;
-                        GetExitCodeProcess(pi.hProcess, &rc);
-                        CloseHandle(pi.hThread);
-                        CloseHandle(pi.hProcess);
-                        // 日志尾巴随结果展示（成功回执/失败原因都在末尾）
-                        std::string tail;
-                        std::ifstream f(log, std::ios::binary);
-                        if (f) {
-                            f.seekg(0, std::ios::end);
-                            const auto sz = f.tellg();
-                            const auto n =
-                                std::min<std::streamoff>(sz, 1200);
-                            f.seekg(sz - n);
-                            tail.resize(static_cast<size_t>(n));
-                            f.read(tail.data(), n);
-                        }
-                        // 日志统一 UTF-8 写入（见 sync-device.ps1 Log()）
-                        const int wlen = MultiByteToWideChar(
-                            CP_UTF8, 0, tail.data(), (int)tail.size(),
-                            nullptr, 0);
-                        std::wstring tailW(wlen, L'\0');
-                        MultiByteToWideChar(CP_UTF8, 0, tail.data(),
-                                            (int)tail.size(), tailW.data(),
-                                            wlen);
-                        result = (rc == 0)
-                            ? L"同步完成，设备端程序已更新并重启。\r\n\r\n" +
-                                  tailW
-                            : L"同步失败（退出码 " + std::to_wstring(rc) +
-                                  L"）。\r\n\r\n" + tailW;
-                    } else {
-                        result = L"无法启动同步脚本：\r\n" + scriptW;
-                    }
-                    MessageBoxW(nullptr, result.c_str(),
-                                L"Duty On — 同步程序到设备",
-                                MB_OK | MB_ICONINFORMATION);
-                    syncing = false;
-                }).detach();
-                MessageBoxW(
-                    nullptr,
-                    L"已开始向设备同步最新程序。\r\n"
-                    L"设备端编译需要几分钟，完成后会弹出结果提示。",
-                    L"Duty On", MB_OK | MB_ICONINFORMATION);
-            }
+            // 用户输入设备屏幕上的 6 位码：匹配待配对请求即签发 token 持久化。
+            // 设备下次 /api/pair-request 轮询（≤3s）拿到 token 完成配对。
+            const std::string code = id.substr(13);
+            printf("[Pair] confirm code %s -> %s\n", code.c_str(),
+                   backend.confirmPairing(code) ? "paired" : "no match");
+#endif
+        } else if (id.rfind("pair-unpair:", 0) == 0) {
+#ifdef _WIN32
+            // 解除配对：移除 token；设备下次轮询得 401 → 自动清 token 重新握手
+            backend.unpairDevice(id.substr(12));
 #endif
         }
         // ---- 形象 / 动作 ----
@@ -1336,6 +1684,19 @@ int main() {
 #endif
             }
         }
+        // ---- 状态音频试听：动作设定页播放当前活动角色已绑定的状态音频 ----
+        else if (id.rfind("stateaudiopreview:", 0) == 0) {
+#ifdef _WIN32
+            const std::string state = id.substr(18);
+            auto kit = cfg.state_audio.find(cfg.active_character_id);
+            if (kit != cfg.state_audio.end()) {
+                auto fit = kit->second.find(state);
+                if (fit != kit->second.end() && !fit->second.empty())
+                    preview_audio_file(
+                        UserConfigStore::animationsDir() + "/" + fit->second);
+            }
+#endif
+        }
         // ---- 设备声音管理：完全静音 / 按状态静音（经 /api/status 下发）----
         else if (id == "sound-mute") {
             cfg.sound_mute = !cfg.sound_mute;
@@ -1538,6 +1899,21 @@ int main() {
     PetStatus current_status{};
     SysMetrics current_metrics{};
     bool has_metrics = false;
+#ifndef _WIN32
+    // 最近一次成功收到 PC 状态更新（HTTP 200 + token 有效）的时刻；开机置为
+    // 远古表示"尚未连上"。dev_screen 用 (now - last_status_ok) 判定 PC 是否
+    // 真在线——区别于"仅 UDP 发现但 token 失效/无响应"（会冻结在旧状态）。
+    auto last_status_ok = Clock::now() - std::chrono::hours(1);
+    // Wi-Fi 入网瞬间提示：渲染段在截止时刻前显示“Wi-Fi 连接成功”数秒
+    bool wifi_was_online = false;
+    Clock::time_point wifi_ok_until{};
+#endif
+
+#ifdef _WIN32
+    // 配对连接成功边沿检测：设备首次带 token 上线（deviceOnline false→true）
+    // 时自动隐藏桌宠窗口并弹托盘气泡。false 起始 = PC 重启后设备重连也会触发。
+    bool device_was_online = false;
+#endif
 
     while (g_running) {
         auto now = Clock::now();
@@ -1552,22 +1928,98 @@ int main() {
             g_running = false;
             break;
         }
+        // 配对连接成功：设备首次带 token 轮询上线 → 自动隐藏桌宠窗口，
+        // 右下角托盘气泡提示“我在这里哟”（托盘图标左键可恢复显示）
+        {
+            const bool online_now = backend.deviceOnline();
+            if (online_now && !device_was_online) {
+                window->setVisible(false);
+                window->showBalloon("Duty On 桌宠", "我在这里哟");
+                printf("[Pair] device connected -> hide window + tray balloon\n");
+                // 自动检查程序版本：本机源码哈希 != 设备上报版本 则后台推送
+                // 更新（哈希计算放工作线程，主循环零阻塞；未配置仓库静默跳过）
+                const std::string repo = cfg.device_repo;
+                if (!repo.empty() && !g_syncing.load()) {
+                    const std::string dev_ver = backend.deviceVersion();
+                    std::thread([repo, dev_ver]() {
+                        const std::string src = computeSourceVersion(repo);
+                        if (!src.empty() && src != dev_ver) {
+                            printf("[Sync] version mismatch (device=%s src=%s)"
+                                   " -> auto update\n",
+                                   dev_ver.c_str(), src.c_str());
+                            launchDeviceSync(repo, src);
+                        } else {
+                            printf("[Sync] version match (src=%s), skip\n",
+                                   src.c_str());
+                        }
+                    }).detach();
+                }
+            }
+            device_was_online = online_now;
+        }
 #endif
 
         // 8. 消费后台轮询结果（非阻塞读取缓存）
 #ifndef _WIN32
-        // USB 直连链路检测（UsbLink 内部 1s 节流）：拿到租约 → 更新轮询地址；
-        // 拔线 → 清空地址（ApiClient 自动暂停请求），画面切回引导横幅。
-        // setBaseUrl 内部仅在地址变化时生效，每帧调用无额外开销。
+        // Wi-Fi 状态机推进（内部 1s 节流）：无凭据 AP 配网 <-> 入网切换。
+        wifi.poll();
+        const WifiState wifi_state = wifi.state();
+        // 入网瞬间记一个“Wi-Fi 连接成功”提示的截止时刻（渲染段显示数秒）
         {
-            const auto url = usb_link.poll();
-            usb_connected = url.has_value();
-            api.setBaseUrl(url.value_or(""));
+            const bool online_now = (wifi_state == WifiState::Online);
+            if (online_now && !wifi_was_online)
+                wifi_ok_until = Clock::now() + std::chrono::seconds(5);
+            wifi_was_online = online_now;
         }
+        // 配对握手成功后工作线程产出 token：取走持久化（重启免再配）。
+        if (std::string tok = api.takePairToken(); !tok.empty())
+            identity.setToken(tok);
+        // 仅入网(Online)后广播发现 PC：拿到 base url 喂 ApiClient；未入网/
+        // 未发现则清空地址（ApiClient 自动暂停轮询）。发现回包的 paired 标记
+        // PC 是否已认得本设备，记入 pc_paired（诊断用）。
+        if (wifi_state == WifiState::Online) {
+            bool disc_paired = false;
+            const auto url = pc_discovery.poll(&disc_paired);
+            if (disc_paired) pc_paired = true;
+            api.setBaseUrl(url.value_or(""));
+        } else {
+            api.setBaseUrl("");
+        }
+        // 连接判定（关键）：只有"Wi-Fi 入网 + 确实在收到 PC 状态"才算已连接。
+        // pc_online 以最近一次成功轮询时刻判定，5s 无新状态即视为断开——单靠
+        // "UDP 发现 + 本地有 token"不够：token 可能已失效（PC 清除配对→401），
+        // 若无条件进 Normal 会冻结在最后一帧（历史"卡在思考中且无声"根因）。
+        const bool pc_online =
+            (now - last_status_ok) < std::chrono::seconds(5);
+        // paired 以 ApiClient 实时 token 为准：启动已用持久化 token 初始化，
+        // 已配对设备重启后即为 true（免再配）；PC 侧 401 后 api 自动清 token
+        // → false，屏幕回落到配对码引导重新配对（自愈）。
+        const bool paired = api.paired();
+        // 画面分派：
+        //   AP 配网中        -> 配网 QR（手机扫码加入设备热点）
+        //   入网中           -> "正在连接 Wi-Fi"
+        //   入网 + PC 在线   -> 正常任务画面（原机器自动连上后切到这里）
+        //   入网 + 未连上 PC -> 顶部恒显配对码；已配对="正在等待连接"（原机器
+        //                       回来自动切正常页），未配对="没有设备连接"（待输码）
+        if (wifi_state == WifiState::ApProvisioning) {
+            dev_screen = DevScreen::QrProvision;
+        } else if (wifi_state == WifiState::Joining) {
+            dev_screen = DevScreen::JoiningWifi;
+        } else if (wifi_state == WifiState::Online && pc_online) {
+            dev_screen = DevScreen::Normal;
+        } else if (wifi_state == WifiState::Online) {
+            dev_screen = paired ? DevScreen::FindingPc : DevScreen::PairCode;
+        } else {
+            dev_screen = DevScreen::PairCode;  // 无射频/未入网：无从连接 PC
+        }
+        pc_ready = (dev_screen == DevScreen::Normal);
 #endif
         if (auto status = api.takeStatus()) {
             current_status = std::move(*status);
 #ifndef _WIN32
+            // 收到新状态 = PC 链路活着（HTTP 200 + token 有效）：刷新在线
+            // 时刻，供上方 pc_online 判定（下一帧据此切回正常任务画面）
+            last_status_ok = Clock::now();
             // 布局模式同步（single/multi/frame；断连后保持最近值）
             if (!current_status.device_mode.empty() &&
                 current_status.device_mode != device_mode) {
@@ -1598,6 +2050,30 @@ int main() {
                         }
                     }
                 }
+            }
+            // 相框播放源同步（motion/folder；旧版后端不下发时为空=动作轮播）
+            {
+                const std::string want_src =
+                    current_status.frame_source.empty() ? std::string("motion")
+                                                        : current_status.frame_source;
+                if (want_src != frame_source) {
+                    frame_source = want_src;
+                    printf("[Mode] frame source -> %s\n", frame_source.c_str());
+                }
+            }
+            // 照片播放启停：仅 frame 模式 + folder 源跑 PhotoPlayer（逐张
+            // 流式，设备侧零落盘）。进入/离开都重置动作轮播计时，保证切回
+            // motion 时从头轮播。
+            const bool want_photo =
+                (device_mode == "frame" && frame_source == "folder");
+            if (want_photo && !photo_playing) {
+                photo_player.start();
+                photo_playing = true;
+            } else if (!want_photo && photo_playing) {
+                photo_player.stop();
+                photo_playing = false;
+                frame_timer = 0.f;
+                frame_sig.clear();
             }
             // 时钟颜色同步（amber/ice/white/green/pink；断连后保持最近值）
             if (!current_status.clock_color.empty() &&
@@ -1634,6 +2110,29 @@ int main() {
                 printf("[Mode] brightness -> %d (%s)\n", device_brightness,
                        wrote_backlight ? "backlight" : "software dim");
             }
+            // 整屏旋转同步（0/90/180/270；PC 菜单"设备→屏幕旋转"下发）：
+            // rotation!=0 时切换逻辑 FBO + 旋转合成；刷新布局尺寸（90/270
+            // 交换）使角色/时钟/面板自适应新朝向，横屏竖屏皆可
+            if (current_status.screen_rotation != screen_rotation) {
+                screen_rotation = current_status.screen_rotation;
+                window->setRotation(screen_rotation);
+                WIN_W = window->width();
+                WIN_H = window->height();
+                MODEL_AREA_H = WIN_H / 2;
+                // 持久化：作为下次开机的默认朝向（"与上次断开时一致"）
+                UserConfigStore::saveScreenRotation(screen_rotation);
+                printf("[Mode] screen rotation -> %d (%dx%d)\n",
+                       screen_rotation, WIN_W, WIN_H);
+            }
+            // 左右翻转（镜像）同步：PC 菜单"左右翻转"下发，设备端同步翻转
+            // Live2D/GIF 角色与 PC 一致（断连后保持最近值）。翻转在逻辑
+            // 场景内进行，与整屏旋转合成正交、可叠加
+            if (current_status.flip_horizontal != renderer.isFlipped()) {
+                renderer.setFlip(current_status.flip_horizontal);
+                gif.setFlip(current_status.flip_horizontal);
+                printf("[Mode] flip horizontal -> %s\n",
+                       current_status.flip_horizontal ? "on" : "off");
+            }
             // 事件提示音：提醒（待确认）播 3 次，开始/结束各 1 次；边沿触发。
             // 对应状态绑定了自定义音频且未静音时，替代内置 beep
             if (snd_seen) {
@@ -1659,9 +2158,17 @@ int main() {
                     }
                 }
             }
-            snd_prev_overall = current_status.overall_state;
-            snd_prev_confirm = current_status.has_confirmation;
-            snd_seen = true;
+            // 首帧只定基准不发声（防开机误报）；但 overall 基准设为 sleeping，
+            // 使"连接/重启时已有活跃任务"在下一帧补播开始提示音——避免服务
+            // 重启落在 working 期间导致边沿被吞、全程无声
+            if (!snd_seen) {
+                snd_prev_overall = "sleeping";
+                snd_prev_confirm = current_status.has_confirmation;
+                snd_seen = true;
+            } else {
+                snd_prev_overall = current_status.overall_state;
+                snd_prev_confirm = current_status.has_confirmation;
+            }
             // 时钟同步：记录 PC 时间与本地单调钟基准，两次轮询间自行推进
             if (current_status.server_time > 0) {
                 clock_epoch = current_status.server_time;
@@ -1875,6 +2382,9 @@ int main() {
                 cr.push_back({r.x, r.y, r.w, r.h});
             window->updateClickRegions(cr, ui.isMenuOpen());
         }
+        // 菜单内容超出常规窗口高时，窗口向上增高的量（角色/状态栏同步
+        // 下移，宠物屏幕位置不变）；仅在下方非吸附分支内计算，其余情况为 0
+        float menu_top_offset = 0.0f;
         if (window->isEdgeDocked()) {
             // 边缘吸附条：40px 宽细条，几何由窗口层管理；按内容高度校正
             //（项目数变化时条随之伸缩，垂直中心保持不变）
@@ -1913,8 +2423,23 @@ int main() {
             // 1.x 迷你模式保留半宽状态栏、隐藏监控
             const float mon_h =
                 (!mini_mode && ui.showMetrics) ? ui.monitorHeight() : 0.0f;
-            float target_h = canvas_h_f + gap + ui.statusBarHeight();
-            if (mon_h > 0.0f) target_h += gap + mon_h;
+            const float base_h = canvas_h_f + gap + ui.statusBarHeight() +
+                                 (mon_h > 0.0f ? gap + mon_h : 0.0f);
+            // 菜单内容（切换形象等长视图）超出常规窗口高 -> 向上增高窗口容纳；
+            // 角色视口/状态栏同步下移同量，宠物屏幕位置不变，顶部空间留给菜单
+            float target_h = base_h;
+            if (const float want = ui.menuDesiredHeight(); want > 0.0f) {
+                float need = want + 8.0f * S;  // 内容 + 上下各 4px 边距
+                int wl = 0, wt = 0, wr = 0, wb = 0;
+                window->workArea(wl, wt, wr, wb);
+                if (wb > wt && need > (float)(wb - wt))
+                    need = (float)(wb - wt);  // 上限：工作区高，避免超出屏幕
+                if (need > base_h) {
+                    menu_top_offset = need - base_h;
+                    target_h = need;
+                }
+            }
+            ui.setContentTopOffset(menu_top_offset);
             const int target_w = (int)(base_w_f + extra);
             window->resizeKeepBottom(target_w, (int)target_h, menu_left_active);
             // 菜单已收起且窗口回到基础宽 → 退出 menu-left（展开与收回都保持右缘）
@@ -1961,59 +2486,93 @@ int main() {
                 const int canvas_gl_h = static_cast<int>(cvs_h * scale);
                 const int canvas_gl_w = static_cast<int>(cvs_w * scale);
                 const int margin_gl_x = static_cast<int>(margin_x * scale);
-                renderer.setViewport(margin_gl_x, fb_h - canvas_gl_h,
+                // 菜单增高窗口时角色整体下移 menu_top_offset（保持屏幕位置不变）
+                const int top_off_gl = (int)(menu_top_offset * scale);
+                renderer.setViewport(margin_gl_x, fb_h - canvas_gl_h - top_off_gl,
                                      canvas_gl_w, canvas_gl_h);
-                gif.setViewport(margin_gl_x, fb_h - canvas_gl_h,
+                gif.setViewport(margin_gl_x, fb_h - canvas_gl_h - top_off_gl,
                                 canvas_gl_w, canvas_gl_h);
             }
 #else
-            // 设备端：multi=动态分屏（按任务数）+角色区居中；single/frame=全屏+垂直居中
-            float panel_h = 0.f;  // multi 面板区高度（下方渲染面板用）
-            if (device_mode == "multi") {
-                // 面板高度随任务数伸缩：任务少时角色区更大，避免半屏空黑
+            // 设备端布局按朝向分两套：
+            //   横屏（WIN_W>=WIN_H，rotation 0/180）= 左右布局：人偶占左列
+            //     （满高），时钟/日期/任务列表在右列自上而下；
+            //   竖屏（rotation 90/270）= 沿用上下布局：角色区 + 底部面板。
+            const bool landscape = (WIN_W >= WIN_H);
+            const int left_w = landscape ? WIN_H : WIN_W;   // 横屏左列（正方形）宽
+            const int region_x = landscape ? left_w : 0;     // 信息区起点 x
+            const int region_w = landscape ? (WIN_W - left_w) : WIN_W;
+            float panel_h = 0.f;  // 竖屏 multi 面板区高度（横屏不用）
+            renderer.setCenterV(true);
+            gif.setCenterV(true);
+            if (landscape) {
+                // 左右布局：人偶占满高左列（列内居中），右列留给时钟/日期/任务
+                renderer.setViewport(0, 0, left_w, WIN_H);
+                gif.setViewport(0, 0, left_w, WIN_H);
+            } else if (device_mode == "multi") {
+                // 竖屏多任务：动态分屏（角色区 = 时钟下沿 ~ 面板顶，内容
+                // 在该区域内垂直居中）。时钟区预留 ≈ 110px
                 panel_h = TaskPanel::heightForSessions(
-                    usb_connected ? (int)current_status.sessions.size() : 0);
-                // 角色区 = 时钟下沿 ~ 面板顶，内容在该区域内垂直居中（任务
-                // 少时不再贴底下沉）。时钟区预留：顶边距 26 + 字号 56×1.2
-                // 行高 + 与角色间隙 ≈ 110px
+                    pc_ready ? (int)current_status.sessions.size() : 0);
                 const int clock_reserve = 110;
                 const int char_h = WIN_H - clock_reserve - (int)panel_h;
-                renderer.setCenterV(true);
-                gif.setCenterV(true);
                 renderer.setViewport(0, (int)panel_h, WIN_W, char_h);
                 gif.setViewport(0, (int)panel_h, WIN_W, char_h);
             } else {
-                renderer.setCenterV(true);
-                gif.setCenterV(true);
+                // 竖屏单任务/相框：全屏 + 垂直居中
                 renderer.setViewport(0, 0, WIN_W, WIN_H);
                 gif.setViewport(0, 0, WIN_W, WIN_H);
             }
-            // 相框模式轮播：形象变化从头开始，此后 15s 换下一个动作
+            // 相框模式播放：folder=照片逐张流式（PhotoPlayer）/ motion=动作
+            // 轮播（现行）。无照片可显（PC 离线 / 首帧未就绪）时兜底跑动作
+            // 轮播，避免黑屏。
+            photo_showing = false;
             if (device_mode == "frame") {
-                const std::string sig =
-                    using_gif ? (gif_char ? gif_char->id : std::string("?"))
-                              : current_model_key;
-                if (sig != frame_sig) {
-                    frame_sig = sig;
-                    frame_timer = 0.f;
-                    play_frame_motion(0);
+                if (photo_playing) {
+                    photo_player.update(delta);
+                    photo_showing = photo_player.hasImage();
                 }
-                frame_timer += delta;
-                if (frame_timer >= 15.f) {
-                    frame_timer = 0.f;
-                    play_frame_motion(frame_idx + 1);
+                if (!photo_showing) {
+                    const std::string sig =
+                        using_gif ? (gif_char ? gif_char->id : std::string("?"))
+                                  : current_model_key;
+                    if (sig != frame_sig) {
+                        frame_sig = sig;
+                        frame_timer = 0.f;
+                        play_frame_motion(0);
+                    }
+                    frame_timer += delta;
+                    if (frame_timer >= 15.f) {
+                        frame_timer = 0.f;
+                        play_frame_motion(frame_idx + 1);
+                    }
                 }
             }
 #endif
 
+#ifdef _WIN32
+            const bool draw_character = true;
+#else
+            // 设备端：仅"正常任务画面"渲染角色；配网/入网/配对引导画面
+            //（QrProvision/JoiningWifi/PairCode/FindingPc）不画 GIF/模型背景
+            // ——开机初始化时角色动画压在配对码/二维码下显得杂乱。update 照常
+            // 推进（状态/包围盒保持新鲜），仅跳过绘制。相框照片显示时同样
+            // 不画角色（照片满屏）。
+            const bool draw_character =
+                (dev_screen == DevScreen::Normal) && !photo_showing;
+#endif
             if (using_gif) {
                 gif.update(delta);
-                gif.render();
+                if (draw_character) gif.render();
             } else {
                 renderer.update(delta);
-                renderer.render();
+                if (draw_character) renderer.render();
             }
-
+#ifndef _WIN32
+            // 相框照片：满屏 cover 上屏（photo_showing 时角色已抑制）。
+            // 主循环末尾的叠加层会重新 glViewport 回全屏，无需此处复位。
+            if (photo_showing) photo_player.render(0, 0, WIN_W, WIN_H);
+#endif
             // 头顶特效锚定：内容包围盒（视口坐标）→ 窗口客户区坐标。
             // GIF 用 72% 贴底适配后的实际绘制矩形（跟随缩放，而非整个画布区）
             {
@@ -2021,18 +2580,24 @@ int main() {
                                     : renderer.contentRect();
 #ifdef _WIN32
                 cr.x += (float)canvas_x_px();
+                // 角色视口下移了 menu_top_offset -> 头顶特效锚点同步下移
+                cr.y += menu_top_offset;
 #endif
                 // Live2D=紧贴内容包围盒；GIF=整图框（含透明留白）
                 ui.setModelRect(cr, !using_gif);
             }
 
             // 11. UI 叠加（迷你模式保留半宽状态栏 + 头顶特效，隐藏监控；
-            //     设备端未插 USB 时不画状态栏，改画引导横幅）
+            //     设备端未就绪时不画状态栏，改画配网 QR / 配对码）
 #ifdef _WIN32
             // 硬件显示端状态（菜单"设备模式"分组显示/隐藏 + 当前模式勾选）
             ui.setDeviceStatus(backend.deviceOnline(), cfg.device_mode,
                                cfg.clock_color, cfg.device_brightness,
                                cfg.screen_rotation);
+            // 相框播放源（照片数每次开菜单才用得上：仅在菜单打开时扫目录）
+            ui.setFrameSource(cfg.frame_source, cfg.frame_folder,
+                              ui.isMenuOpen() ? count_frame_photos(cfg.frame_folder)
+                                              : -1);
             ui.beginFrame();
             ui.renderStatus(current_status);
             if (!mini_mode && has_metrics) ui.renderMetrics(current_metrics);
@@ -2043,19 +2608,126 @@ int main() {
             // 叠加层用全屏坐标系：恢复全屏视口（角色渲染用的半屏视口会影响
             // 后续绘制的 NDC->窗口映射，不复位面板会被压进上半屏）
             glViewport(0, 0, WIN_W, WIN_H);
-            if (device_mode == "multi") {
-                if (usb_connected) {
-                    // 动态分屏：面板顶边 = 面板高度（卡片底贴屏幕底）
-                    task_panel.render(current_status, WIN_W, WIN_H,
-                                      panel_h);
+
+            // ---- 配网 / 入网 / 配对 引导画面（非正常态，覆盖待机动画）----
+            // 文字复用 task_panel：renderClock=数字卡通字体（配对码），
+            // renderDate=主字体（含中文提示）。位置按 WIN_H 比例，横竖屏通用。
+            if (dev_screen == DevScreen::QrProvision) {
+                // 配网引导：QR（手机扫码自动加入设备热点）+ 分步文字说明。
+                // 横屏：QR 放左列、步骤在右列；竖屏：QR 在上、步骤在下。
+                const std::string payload = "WIFI:S:" + wifi.apSsid() +
+                                            ";T:WPA;P:" + wifi.apPass() + ";;";
+                qr_banner.setPayload(payload);
+
+                float qr_cx, qr_cy, qr_fill;  // QR 中心（像素）与边长比例
+                int sx, sw;                   // 步骤文本区起点 x / 宽
+                float s_top, s_gap;           // 步骤首行顶边 / 行距
+                if (landscape) {
+                    qr_cx = left_w * 0.5f;
+                    qr_cy = (float)WIN_H * 0.5f;
+                    qr_fill = 0.66f;
+                    sx = region_x;
+                    sw = region_w;
+                    s_top = (float)WIN_H - 56.f;
+                    s_gap = 44.f;
                 } else {
-                    // 引导画面：宠物待机动画（上半屏已渲染）+ 底部提示横幅
-                    prompt_banner.render(WIN_W, WIN_H);
+                    qr_cx = (float)WIN_W * 0.5f;
+                    qr_cy = (float)WIN_H * 0.70f;
+                    qr_fill = 0.50f;
+                    sx = 0;
+                    sw = WIN_W;
+                    s_top = (float)WIN_H * 0.46f;
+                    s_gap = 44.f;
                 }
+                qr_banner.render(WIN_W, WIN_H, qr_fill, qr_cx, qr_cy);
+
+                // 步骤文案（含真实热点名/密码/portal 地址；renderDate 过宽自动缩字）。
+                // 末尾追加电脑端软件下载指引（GitHub/Gitee）：配网阶段用户往往
+                // 还没装 PC 端 DutyOn，就地告知去哪搜、去哪下载、怎么装。
+                const std::string steps[] = {
+                    "配网步骤",
+                    "① 手机连接设备热点",
+                    "热点 「" + wifi.apSsid() + "」",
+                    "密码 " + wifi.apPass(),
+                    "② 弹出页面选家中 Wi-Fi 输密码",
+                    "③ 提交后设备自动联网",
+                    "④ 电脑端 DutyOn 输入配对码",
+                    "或浏览器打开 " + wifi.portalUrl(),
+                    "电脑端软件下载（Releases）",
+                    "GitHub 搜 duty-on",
+                    "Gitee 搜 dutyo",
+                    "github.com/marine841023/duty-on",
+                    "gitee.com/megrezsoft/dutyo",
+                };
+                const float sizes[] = {18.f, 16.f, 15.f, 15.f, 16.f, 16.f, 16.f,
+                                       12.f, 15.f, 14.f, 14.f, 12.f, 12.f};
+                const int n = (int)(sizeof(steps) / sizeof(steps[0]));
+                // 行距自适应：n 行在 [底部留白, s_top] 内均分，横竖屏都不溢出屏
+                {
+                    const float bottom_margin = 28.f;
+                    const float avail = s_top - bottom_margin;
+                    if (n > 1 && avail > 0.f) s_gap = avail / (float)(n - 1);
+                }
+                for (int i = 0; i < n; ++i)
+                    task_panel.renderDate(steps[i], s_top - s_gap * (float)i,
+                                          sizes[i], WIN_W, WIN_H, sx, sw);
+            } else if (dev_screen == DevScreen::JoiningWifi) {
+                task_panel.renderDate("正在连接 Wi-Fi…", (float)WIN_H * 0.60f,
+                                      44.f, WIN_W, WIN_H);
+            } else if (dev_screen == DevScreen::PairCode ||
+                       dev_screen == DevScreen::FindingPc) {
+                // 已入 Wi-Fi 但尚未连上 PC：顶部恒显 6 位配对码，底部状态区分
+                //   未配对(PairCode)  ="没有设备连接" + 提示在 PC 端输入此码；
+                //   已配对(FindingPc) ="正在等待连接" + 原机器上线后自动切正常页。
+                // 已配对仍显示码：PC 若清除了配对，用户可据此直接重配（兜底）。
+                const bool waiting = (dev_screen == DevScreen::FindingPc);
+                const float code_top = (float)WIN_H * 0.70f;
+                task_panel.renderDate("配对码", (float)WIN_H * 0.80f, 34.f,
+                                      WIN_W, WIN_H);
+                task_panel.renderClock(identity.pairCode(), code_top, 96.f,
+                                       WIN_W, WIN_H);
+                task_panel.renderDate(waiting ? "正在等待连接" : "没有设备连接",
+                                      code_top - 132.f, 38.f, WIN_W, WIN_H);
+                task_panel.renderDate(
+                    waiting ? "电脑端 DutyOn 启动后将自动连接"
+                            : "请在电脑端 DutyOn 输入此配对码",
+                    code_top - 190.f, 26.f, WIN_W, WIN_H);
+                // Wi-Fi 刚入网数秒内顶部提示“连接成功”（此后由右上角 Wi-Fi
+                // 信号条常绿表示已入网；是否连上 PC 由旁边的显示器图标表示）
+                if (Clock::now() < wifi_ok_until)
+                    task_panel.renderDate("✓ Wi-Fi 连接成功",
+                                          (float)WIN_H * 0.90f, 30.f, WIN_W, WIN_H);
             }
-            // 顶部时钟 + 日期（所有模式都显示；字号随模式）。
-            // 优先用 PC 下发时间（设备本地钟不可信），断连兜底本地时间
-            {
+
+            // ---- 时钟/日期/任务列表纵向位置（横屏右列 vs 竖屏上下）----
+            const float clock_size =
+                (device_mode == "multi") ? 56.f : 92.f;
+            const float clock_lh = task_panel.clockLineHeight(clock_size);
+            const float date_size = 30.f;
+            const float date_lh = date_size * 1.35f;
+            float clock_top, date_top, task_top;
+            if (landscape) {
+                // 横屏右列自上而下：时钟 → 日期 → 任务列表
+                clock_top = (float)WIN_H - 40.f;
+                date_top = clock_top - clock_lh - 14.f;
+                task_top = date_top - date_lh - 18.f;
+            } else {
+                // 竖屏：时钟贴顶（multi 稍下沉避让角色头顶）；日期贴屏幕底；
+                // 任务面板顶边 = 面板高度（卡片底贴屏幕底）
+                clock_top = (float)WIN_H -
+                            ((device_mode == "multi") ? 26.f : 22.f);
+                date_top = date_lh + 14.f;
+                task_top = panel_h;
+            }
+
+            // ---- 任务列表（multi；仅正常画面且已就绪）----
+            if (dev_screen == DevScreen::Normal && device_mode == "multi" && pc_ready)
+                task_panel.render(current_status, WIN_W, WIN_H, task_top,
+                                  region_x, region_w);
+
+            // ---- 时钟 + 日期文本（仅正常画面；优先 PC 下发时间，设备本地
+            //      钟不可信，断连兜底本地时间）。相框照片满屏时隐藏，避免叠字
+            if (dev_screen == DevScreen::Normal && !photo_showing) {
                 char time_buf[16] = {};
                 char date_buf[40] = {};
                 static const char* kWeek[] = {"日", "一", "二", "三",
@@ -2085,23 +2757,19 @@ int main() {
                          "%d年%d月%d日 星期%s", tmv.tm_year + 1900,
                          tmv.tm_mon + 1, tmv.tm_mday, kWeek[tmv.tm_wday]);
 
-                const float clock_size =
-                    (device_mode == "multi") ? 56.f : 92.f;
-                // 时钟顶部留白：multi 26px（稍下沉，避免压住变大后的角色头顶）、
-                // 单任务/相框 22px
-                const float clock_top = (float)WIN_H -
-                                        ((device_mode == "multi") ? 26.f : 22.f);
                 task_panel.renderClock(time_buf, clock_top, clock_size,
-                                       WIN_W, WIN_H);
-                // 日期行放屏幕底部（GL 原点左下，y 向上）：留 14px 底边距。
-                // 仅单任务/相框模式（多任务模式底部是任务列表，会重叠）
-                if (device_mode != "multi") {
-                    task_panel.renderDate(date_buf, 30.f * 1.35f + 14.f, 30.f,
-                                          WIN_W, WIN_H);
+                                       WIN_W, WIN_H, region_x, region_w);
+                // 日期：横屏右列恒显示（时钟下方）；竖屏仅单任务/相框
+                //（竖屏 multi 底部是任务列表，会重叠）
+                if (landscape || device_mode != "multi") {
+                    task_panel.renderDate(date_buf, date_top, date_size,
+                                          WIN_W, WIN_H, region_x, region_w);
                 }
             }
-            // 右上角 USB 连接状态小插头：绿=已连 PC，红=未连接
-            task_panel.renderUsbStatus(usb_connected, WIN_W, WIN_H);
+            // 右上角连接状态图标（两段链路分开）：Wi-Fi 信号条=设备是否入网
+            //（入网绿/未入网红），旁边显示器图标=是否已连上 PC（连上绿/未连灰）
+            task_panel.renderNetStatus(wifi.state() == WifiState::Online,
+                                       pc_ready, WIN_W, WIN_H);
             // 软件亮度：整屏压暗叠层（brightness<100 时生效）
             task_panel.renderDim(device_brightness, WIN_W, WIN_H);
 #endif
@@ -2197,7 +2865,17 @@ int main() {
                 int fw = 0, fh = 0;
                 glfwGetFramebufferSize(gw, &fw, &fh);
 #else
-                const int fw = window->width(), fh = window->height();
+                // 旋转激活时：重新合成到 FB0 并按物理尺寸回读（捕捉上屏
+                // 旋转后的实际内容）；直出时物理 = 逻辑
+                int fw, fh;
+                if (window->logicalActive()) {
+                    window->presentComposite();
+                    fw = window->physWidth();
+                    fh = window->physHeight();
+                } else {
+                    fw = window->width();
+                    fh = window->height();
+                }
 #endif
                 std::vector<unsigned char> px((size_t)fw * fh * 4);
                 glReadPixels(0, 0, fw, fh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
@@ -2288,6 +2966,9 @@ int main() {
     printf("Shutting down...\n");
 #ifdef _WIN32
     backend.stop();
+#else
+    // 相框照片：显式停后台线程 + 删纹理（GL 上下文尚当前；栈析构再调一次无感）
+    photo_player.stop();
 #endif
     ui.shutdown();
     Live2DRenderer::frameworkDispose();

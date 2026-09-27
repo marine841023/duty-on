@@ -30,10 +30,13 @@ $repo = 'marine841023/duty-on'
 $api  = "https://api.github.com/repos/$repo"
 $up   = "https://uploads.github.com/repos/$repo"
 
+# 仓库根（本脚本在 tools\ 下）——用相对路径，避免仓库迁移后硬编码绝对路径失效
+$root = Split-Path $PSScriptRoot -Parent
+
 $releases = @(
-  @{ Tag = 'v2.0.8'; Name = 'DutyOn v2.0.8 - Custom characters & dynamic device layout'
-     Notes = 'D:\src\traeSprite\docs\release-notes\v2.0.8.md'
-     Zip   = 'D:\src\traeSprite\tools\dist\DutyOn-v2.0.8.zip'
+  @{ Tag = 'v2.0.9'; Name = 'DutyOn v2.0.9 - Wi-Fi pairing, photo frame & full Qoder hooks'
+     Notes = (Join-Path $root 'docs\release-notes\v2.0.9.md')
+     Zip   = (Join-Path $root 'tools\dist\DutyOn-v2.0.9.zip')
      Latest = $true }
 )
 
