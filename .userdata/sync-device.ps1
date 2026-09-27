@@ -16,7 +16,8 @@
 
 param(
     [string]$Repo = "",
-    [string]$LogFile = ""
+    [string]$LogFile = "",
+    [string]$Version = ""
 )
 
 $ErrorActionPreference = 'Continue'
@@ -35,12 +36,13 @@ function Fail([string]$msg) { Log "RESULT=FAIL:$msg"; exit 1 }
 "=== device sync $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" | Out-File $LogFile -Encoding utf8
 
 # ---- 凭据 ----
-$Device = $null; $Pass = $null
+$Device = $null; $Pass = $null; $Hostkey = $null
 $envFile = Join-Path $PSScriptRoot 'deploy.env'
 if (Test-Path $envFile) {
     foreach ($l in (Get-Content $envFile)) {
-        if ($l -match '^\s*DUTYON_DEVICE=(.+)$')          { $Device = $Matches[1].Trim() }
-        elseif ($l -match '^\s*DUTYON_DEVICE_PASS=(.+)$') { $Pass   = $Matches[1].Trim() }
+        if ($l -match '^\s*DUTYON_DEVICE=(.+)$')          { $Device  = $Matches[1].Trim() }
+        elseif ($l -match '^\s*DUTYON_DEVICE_PASS=(.+)$') { $Pass    = $Matches[1].Trim() }
+        elseif ($l -match '^\s*DUTYON_DEVICE_HOSTKEY=(.+)$') { $Hostkey = $Matches[1].Trim() }
     }
 }
 if (-not $Device) { $Device = 'root@192.168.7.1' }
@@ -55,14 +57,19 @@ if ($usePlink -and (-not $Pass -or -not (Test-Path $plink))) {
 Log "device=$Device transport=$(if ($usePlink) {'plink'} else {'ssh'}) repo=$Repo"
 
 # 远端命令组装（只含安全字符，避免多层引号地狱）
-$sshArgs = if ($usePlink) { @('-batch', '-pw', $Pass, $Device) }
-           else           { @('-o', 'ConnectTimeout=8', '-o', 'StrictHostKeyChecking=no', $Device) }
+# plink 走 -hostkey 免交互确认新设备指纹（未缓存主机密钥时 -batch 会直接拒绝）
+$sshArgs = if ($usePlink) {
+    $pa = @('-batch')
+    if ($Hostkey) { $pa += @('-hostkey', $Hostkey) }
+    $pa += @('-pw', $Pass, $Device)
+    $pa
+} else { @('-o', 'ConnectTimeout=8', '-o', 'StrictHostKeyChecking=no', $Device) }
 $sshExe  = if ($usePlink) { $plink } else { 'ssh' }
 
 # ---- 第 1 步：tar 推送源码包（二进制走 cmd 管道，PS5.1 管道会毁字节流）----
 # 整树推 device/src：设备 CMake 是显式源文件清单，多推的 PC 端文件不参与编译
-$tarPipe = "tar -cf - -C `"$Repo`" device/CMakeLists.txt device/src frontend/assets/device .userdata/deploy.sh | `"$sshExe`" $($sshArgs -join ' ') `"cat > /tmp/dutyon-sync.tar`""
-Log "push source tarball..."
+$tarPipe = "tar -cf - -C `"$Repo`" device/CMakeLists.txt device/src device/scripts frontend/assets/device .userdata/deploy.sh | `"$sshExe`" $($sshArgs -join ' ') `"cat > /tmp/dutyon-sync.tar`""
+Log "PROGRESS=15 push source tarball..."
 cmd /c "$tarPipe >> `"$LogFile`" 2>&1"
 if ($LASTEXITCODE -ne 0) { Fail "source push failed (rc=$LASTEXITCODE)" }
 
@@ -72,6 +79,7 @@ if ($LASTEXITCODE -ne 0) { Fail "source push failed (rc=$LASTEXITCODE)" }
 $remoteScript = @'
 trap 'RC=$?; if [ $RC -ne 0 ]; then echo SYNC-FAIL; tail -15 /tmp/sync-build.log 2>/dev/null; exit $RC; fi' EXIT
 set -e
+echo "PROGRESS=30 unpack"
 mkdir -p /opt/dutyon-src
 cd /opt/dutyon-src
 tar -xf /tmp/dutyon-sync.tar
@@ -79,17 +87,28 @@ rm -f /tmp/dutyon-sync.tar
 sed -i 's/\r$//' .userdata/deploy.sh
 cd device
 : > /tmp/sync-build.log
+echo "PROGRESS=45 configure"
 cmake -B build -DCMAKE_BUILD_TYPE=Release >> /tmp/sync-build.log 2>&1
+echo "PROGRESS=60 build"
 cmake --build build -j2 >> /tmp/sync-build.log 2>&1
+echo "PROGRESS=85 deploy"
 bash ../.userdata/deploy.sh >> /tmp/sync-build.log 2>&1
+printf '%s' '__VERSION__' > /opt/dutyon/VERSION
+echo "PROGRESS=95 restart"
 systemctl restart dutyon
 sleep 3
 systemctl is-active --quiet dutyon
+echo "PROGRESS=100 done"
 echo SYNC-OK
 '@ -replace "`r`n", "`n"
 
+# 注入本次源码哈希作为设备程序版本（写入 /opt/dutyon/VERSION；设备下次
+# 启动读取并经 X-DutyOn-Version 头上报，PC 端据此判定已是最新）
+if (-not $Version) { $Version = 'unknown' }
+$remoteScript = $remoteScript -replace '__VERSION__', $Version
+
 $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remoteScript))
-Log "remote build+deploy (incremental, 1-5 min typical)..."
+Log "PROGRESS=20 remote build+deploy (incremental, 1-5 min typical)..."
 & $sshExe @sshArgs "echo $b64 | base64 -d | bash" 2>&1 |
     Out-File -FilePath $LogFile -Append -Encoding utf8
 if ($LASTEXITCODE -ne 0) { Fail "remote build/deploy failed (rc=$LASTEXITCODE)" }
@@ -98,5 +117,6 @@ if ($LASTEXITCODE -ne 0) { Fail "remote build/deploy failed (rc=$LASTEXITCODE)" 
 $tail = Get-Content $LogFile -Tail 30
 if ($tail -match 'SYNC-FAIL') { Fail "device reported failure" }
 if (-not ($tail -match 'SYNC-OK')) { Fail "no success ack from device" }
+Log "PROGRESS=100 done"
 Log "RESULT=OK"
 exit 0
