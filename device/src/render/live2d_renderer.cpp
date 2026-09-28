@@ -57,6 +57,10 @@ using GLRenderer = Live2D::Cubism::Framework::Rendering::CubismRenderer_OpenGLES
 // 需要保留 GIF 解码能力
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
+// 缩略图 PNG 编码（1.x 同策略缓存）。实现放这里（双平台都编译）；
+// http_server.cpp 仅引用声明不再重复定义
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>
 
 using namespace Live2D::Cubism::Framework;
 using namespace Live2D::Cubism::Framework::Rendering;
@@ -824,5 +828,77 @@ std::vector<MotionGroupInfo> Live2DRenderer::motionGroups() const {
 Rect Live2DRenderer::contentRect() const { return impl_->content_rect; }
 
 bool Live2DRenderer::isLoaded() const { return impl_->loaded; }
+
+bool Live2DRenderer::captureThumbnailPng(const std::string& path, int size) {
+    if (!impl_->loaded || size <= 0) return false;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path p(path);
+    if (p.has_parent_path()) fs::create_directories(p.parent_path(), ec);
+
+    // 保存当前 FBO / 视口，捕获后恢复（不干扰主渲染）
+    GLint prev_fbo = 0;
+    GLint vp[4] = {0, 0, 0, 0};
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+    glGetIntegerv(GL_VIEWPORT, vp);
+
+    GLuint fbo = 0, tex = 0;
+    glGenFramebuffers(1, &fbo);
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, size, size, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                           tex, 0);
+    const bool ok =
+        glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+
+    std::vector<unsigned char> top(static_cast<size_t>(size) * size * 4, 0);
+    if (ok) {
+        glViewport(0, 0, size, size);
+        glClearColor(0.f, 0.f, 0.f, 0.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+#ifdef _WIN32
+        glBindVertexArray(0);
+#endif
+        // 临时视口=缩略图尺寸、居中、不翻转；保存/恢复现场
+        const int sx = impl_->vp_x, sy = impl_->vp_y;
+        const int sw = impl_->vp_w, sh = impl_->vp_h;
+        const bool sflip = impl_->flip;
+        const bool scenter = center_v_;
+        const Rect srect = impl_->content_rect;
+        impl_->vp_x = 0; impl_->vp_y = 0;
+        impl_->vp_w = size; impl_->vp_h = size;
+        impl_->flip = false;
+        center_v_ = true;
+        impl_->model->Draw(size, size, false, true, &impl_->content_rect);
+        impl_->vp_x = sx; impl_->vp_y = sy;
+        impl_->vp_w = sw; impl_->vp_h = sh;
+        impl_->flip = sflip;
+        center_v_ = scenter;
+        impl_->content_rect = srect;
+
+        std::vector<unsigned char> buf(static_cast<size_t>(size) * size * 4);
+        glReadPixels(0, 0, size, size, GL_RGBA, GL_UNSIGNED_BYTE, buf.data());
+        // glReadPixels 原点左下 → 翻转为自上而下（PNG 行序）
+        for (int y = 0; y < size; y++)
+            std::memcpy(&top[static_cast<size_t>(y) * size * 4],
+                        &buf[static_cast<size_t>(size - 1 - y) * size * 4],
+                        static_cast<size_t>(size) * 4);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo);
+    glViewport(vp[0], vp[1], vp[2], vp[3]);
+    if (tex) glDeleteTextures(1, &tex);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    if (!ok) return false;
+
+    return stbi_write_png(path.c_str(), size, size, 4, top.data(), size * 4) != 0;
+}
 
 } // namespace dutyon

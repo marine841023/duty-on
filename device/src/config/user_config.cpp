@@ -121,6 +121,12 @@ UserConfig UserConfigStore::load() {
         cfg.frame_folder = j["frameFolder"].get<std::string>();
     if (j.contains("clockColor") && j["clockColor"].is_string())
         cfg.clock_color = j["clockColor"].get<std::string>();
+    if (j.contains("characterColors") && j["characterColors"].is_object()) {
+        for (auto it = j["characterColors"].begin();
+             it != j["characterColors"].end(); ++it)
+            if (it.value().is_string())
+                cfg.character_colors[it.key()] = it.value().get<std::string>();
+    }
     if (j.contains("deviceBrightness") && j["deviceBrightness"].is_number())
         cfg.device_brightness =
             std::clamp(j["deviceBrightness"].get<int>(), 10, 100);
@@ -263,6 +269,21 @@ void UserConfigStore::saveClockColor(const std::string& color) {
     updateConfig([&](json& j) { j["clockColor"] = color; });
 }
 
+void UserConfigStore::saveCharacterColor(const std::string& key,
+                                         const std::string& color) {
+    // 某角色的默认显示文字颜色；color 空串 = 清除该角色色（回退全局）
+    if (key.empty()) return;
+    updateConfig([&](json& j) {
+        if (!j.contains("characterColors") || !j["characterColors"].is_object())
+            j["characterColors"] = json::object();
+        json& cc = j["characterColors"];
+        if (color.empty())
+            cc.erase(key);
+        else
+            cc[key] = color;
+    });
+}
+
 void UserConfigStore::saveDeviceBrightness(int v) {
     // 屏幕亮度（10-100）；同上经 /api/status 下发
     updateConfig([&](json& j) { j["deviceBrightness"] = v; });
@@ -371,7 +392,7 @@ std::string UserConfigStore::thumbnailsDir() {
     return home.empty() ? std::string("thumbnails") : home + "/.dutyon/thumbnails";
 }
 
-std::string UserConfigStore::thumbnailFor(const std::string& model_name) {
+std::string UserConfigStore::thumbnailPathFor(const std::string& model_name) {
     // 文件名安全化（1.x models.rs thumbnail_path：is_alphanumeric 或 '-' 保留，
     // 其余替换 '_'；ASCII 外的字节按字母数字处理以贴近 Rust 的 Unicode 语义）
     std::string safe;
@@ -383,7 +404,12 @@ std::string UserConfigStore::thumbnailFor(const std::string& model_name) {
         safe += keep ? c : '_';
     }
     if (safe.empty()) return std::string();
-    const std::string path = thumbnailsDir() + "\\" + safe + ".png";
+    return thumbnailsDir() + "/" + safe + ".png";
+}
+
+std::string UserConfigStore::thumbnailFor(const std::string& model_name) {
+    const std::string path = thumbnailPathFor(model_name);
+    if (path.empty()) return std::string();
     std::error_code ec;
     return fs::is_regular_file(path, ec) ? path : std::string();
 }

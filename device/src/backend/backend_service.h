@@ -64,6 +64,9 @@ public:
     void requestQuit() { quit_requested_ = true; }
     // 硬件显示端在线（已配对设备 10s 内有带 token 的 /api/* 轮询）；菜单"设备"子页用
     bool deviceOnline() const { return http_ && http_->deviceOnline(); }
+    // 触发一次「欢迎」（设备连接边沿由主循环调用）：递增序号经 /api/status
+    // 下发，设备端据此播放欢迎动作 + 专属音频
+    void triggerWelcome() { if (http_) http_->triggerWelcome(); }
     // 设备最近上报的程序版本（连接时与源码哈希比对触发自动更新）；空 = 未知
     std::string deviceVersion() const {
         return http_ ? http_->deviceVersion() : std::string{};

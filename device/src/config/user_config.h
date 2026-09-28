@@ -53,8 +53,11 @@ struct UserConfig {
     std::string frame_source = "motion";
     // 照片文件夹绝对路径（UTF-8，PC 端本机目录；菜单「选择文件夹」写入）
     std::string frame_folder;
-    // 硬件显示端时钟颜色：amber(默认)/ice/white/green/pink
+    // 硬件显示端时钟颜色：amber(默认)/ice/white/green/pink（全局默认/回退值）
     std::string clock_color = "amber";
+    // 每个角色的默认显示文字颜色（characterColors）：{ "<角色id或模型key>":
+    // 颜色名 }；切换角色时自动采用该角色设定的颜色，未设定则回退 clock_color
+    std::map<std::string, std::string> character_colors;
     // 硬件显示端屏幕亮度：10-100（百分比）。当前屏无内核背光接口时，
     // 设备端以渲染层整屏压暗实现；有 sysfs 背光则直接写背光
     int device_brightness = 100;
@@ -73,6 +76,13 @@ struct UserConfig {
     // HDMI 屏物理竖装（逻辑竖屏 480x800 上横 mode 800x480）送 90/270，
     // 倒装送 180。设备端离屏 FBO + quad 旋转 blit 实现
     int screen_rotation = 0;
+
+    // 指定角色的有效显示文字颜色：该角色专属色优先，未设定则回退全局 clock_color
+    std::string effectiveColor(const std::string& char_key) const {
+        auto it = character_colors.find(char_key);
+        if (it != character_colors.end() && !it->second.empty()) return it->second;
+        return clock_color;
+    }
 };
 
 // 模型目录条目
@@ -110,6 +120,8 @@ public:
     static void saveFrameFolder(const std::string& path);
     // 硬件显示端时钟颜色（amber/ice/white/green/pink；同上经 /api/status 下发）
     static void saveClockColor(const std::string& color);
+    // 某角色的默认显示文字颜色（characterColors[key]=color）；color 空=清除该角色色
+    static void saveCharacterColor(const std::string& key, const std::string& color);
     // 硬件显示端屏幕亮度（10-100；同上经 /api/status 下发）
     static void saveDeviceBrightness(int v);
     // 状态音频绑定（file 为空串 = 清除该状态绑定）
@@ -145,6 +157,8 @@ public:
     // 模型缩略图路径（文件名安全化同 1.x Rust thumbnail_path：
     // 非字母数字/连字符替换为 '_'；文件不存在返回空串）
     static std::string thumbnailFor(const std::string& model_name);
+    // 同上安全化映射的缓存路径（不检查存在性）：缩略图生成器写入用
+    static std::string thumbnailPathFor(const std::string& model_name);
 
     // 按当前模型 key 查状态动作映射（精确 key -> "_default" -> 空）
     static std::map<std::string, std::pair<std::string, int>> stateMotionsFor(

@@ -62,6 +62,13 @@ struct PetStatus {
     // 当前角色被单独静音的状态列表（config.json stateAudioMuted 按当前
     // 角色键过滤后下发）
     std::vector<std::string> sound_muted_states;
+    // 欢迎信号序号（PC 在设备连接边沿递增）：设备端检测到增大即播一次
+    //「欢迎」动作 + 专属音频。旧版后端无此字段时恒为 0（不触发）
+    long long welcome_seq = 0;
+    // 状态动作覆盖（PC「动作设定」，config.json stateMotions 按当前角色
+    // 键过滤后下发）：状态 -> (动作组, 序号)；设备端据此与 PC 保持一致。
+    // 旧版后端无此字段时为空（设备回退本地默认映射）
+    std::map<std::string, std::pair<std::string, int>> state_motions;
     // 屏幕旋转角（度：0/90/180/270，PC 菜单"设备→屏幕旋转"设定，
     // config.json screenRotation）：设备端逻辑竖屏 480x800 渲染到离屏
     // FBO，swapBuffers 时 quad 按旋转角 blit 到 800x480 横 mode 上屏

@@ -26,6 +26,7 @@ std::pair<std::string, int> StateMachine::motionForState(const std::string& stat
     if (state == "working") return {"FlickLeft", 1};  // 走路
     if (state == "alert")   return {"FlickLeft", 0};  // yeah
     if (state == "sleeping") return {"Flick3", 1};    // 哈欠
+    if (state == "welcome") return {"FlickUp", 1};    // 高兴（欢迎）
     return {"Idle", 0};
 }
 

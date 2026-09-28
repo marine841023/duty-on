@@ -94,6 +94,15 @@ std::vector<int16_t> buildReminder() {
     return b;
 }
 
+// 欢迎（welcome.wav 缺失时兜底）：上行三音，轻快招呼感
+std::vector<int16_t> buildWelcome() {
+    std::vector<int16_t> b;
+    appendTone(b, 659.f, 110.f);
+    appendTone(b, 831.f, 110.f);
+    appendTone(b, 988.f, 220.f);
+    return b;
+}
+
 // ---- wav 读取：只接受 16bit PCM（任意采样率/声道数）。成功返回 interleaved
 // 样本并写回 rate/ch；非 wav 或压缩格式返回空由调用方处理 --------------------
 std::vector<int16_t> loadWavRaw(const std::string& path, uint32_t* out_rate,
@@ -413,6 +422,9 @@ void SoundPlayer::play(Event ev) {
             break;
         case Event::Reminder:
             impl_->enqueue(impl_->acquire("attention.wav", buildReminder));
+            break;
+        case Event::Welcome:
+            impl_->enqueue(impl_->acquire("welcome.wav", buildWelcome));
             break;
     }
 }

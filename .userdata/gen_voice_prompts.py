@@ -13,6 +13,7 @@
   mission_start.wav      —— 切出空闲（开始工作）时播放
   mission_complete.wav   —— 进入空闲（工作结束）时播放
   attention.wav          —— 有提醒时播放，"Attention" × 3，段间加长静音
+  welcome.wav            —— 设备连接时播放，"I'm here!"（欢迎）
 """
 
 import argparse
@@ -199,8 +200,16 @@ async def main() -> None:
     # 拼接后再对整体做一次淡入淡出（target_peak=1.0 不二次增益）
     postprocess(final_wav, fade_ms=args.fade_ms, pad_ms=args.pad_ms, target_peak=1.0)
     finalize(final_wav)
-    print(f"[3/3] attention.wav         {os.path.getsize(final_wav)} bytes  "
+    print(f"[3/4] attention.wav         {os.path.getsize(final_wav)} bytes  "
           f"(3 x Attention! + {args.gap_ms}ms gap)")
+
+    # 4. Welcome（设备连接时播放的欢迎音，对应托盘气泡“我在这里哟”）
+    mp3 = os.path.join(OUT_DIR, "_wl.mp3")
+    wav = os.path.join(OUT_DIR, "welcome.wav")
+    await synth("I'm here!", mp3, args.voice, args.rate, args.pitch)
+    finish(mp3, wav)
+    finalize(wav)
+    print(f"[4/4] welcome.wav           {os.path.getsize(wav)} bytes")
 
 
 if __name__ == "__main__":

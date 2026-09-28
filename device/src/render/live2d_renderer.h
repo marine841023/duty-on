@@ -71,6 +71,12 @@ public:
 
     bool isLoaded() const;
 
+    // 离屏捕获当前模型一帧为 size×size 透明背景 RGBA，编码 PNG 写到 path
+    //（对齐 1.x 前端 generateMissingThumbnails：菜单缩略图缓存到
+    // ~/.dutyon/thumbnails/<名>.png）。自动创建父目录。成功返回 true。
+    // 必须在主渲染线程（同一 GL 上下文）调用；会临时切换 FBO/视口并恢复。
+    bool captureThumbnailPng(const std::string& path, int size);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

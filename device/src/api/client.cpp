@@ -36,6 +36,7 @@ static std::optional<PetStatus> FetchStatus(cpr::Session& session, int* http_cod
         s.server_time = j.value("serverTime", 0.0);
         s.utc_offset_min = j.value("utcOffset", 0);
         s.sound_mute = j.value("soundMute", false);
+        s.welcome_seq = j.value("welcomeSeq", 0LL);
         if (j.contains("activeAudio") && j["activeAudio"].is_object()) {
             for (auto it = j["activeAudio"].begin(); it != j["activeAudio"].end();
                  ++it)
@@ -46,6 +47,17 @@ static std::optional<PetStatus> FetchStatus(cpr::Session& session, int* http_cod
             for (const auto& v : j["soundMutedStates"])
                 if (v.is_string())
                     s.sound_muted_states.push_back(v.get<std::string>());
+        }
+        // 状态动作覆盖：{状态: [组, 序号]}（PC「动作设定」下发）
+        if (j.contains("stateMotions") && j["stateMotions"].is_object()) {
+            for (auto it = j["stateMotions"].begin(); it != j["stateMotions"].end();
+                 ++it) {
+                const auto& v = it.value();
+                if (v.is_array() && v.size() >= 2 && v[0].is_string() &&
+                    v[1].is_number())
+                    s.state_motions[it.key()] = {
+                        v[0].get<std::string>(), v[1].get<int>()};
+            }
         }
 
         if (j.contains("sessions") && j["sessions"].is_array()) {

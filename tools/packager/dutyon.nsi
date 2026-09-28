@@ -218,6 +218,11 @@ Section "install"
   SetOutPath "$INSTDIR\assets\live2d"
   File /r "..\..\frontend\assets\live2d\*.*"
 
+  ; 事件提示音（欢迎/开始/结束/提醒）：发布 <exe>/assets/device/sounds，
+  ; PC 端「动作设定·试听」未绑定自定义时播放系统默认音频（find_sounds_dir）
+  SetOutPath "$INSTDIR\assets\device\sounds"
+  File /r "..\..\frontend\assets\device\sounds\*.*"
+
   ; 开机自启（按选项页勾选状态）
   SetOutPath "$INSTDIR"
   ${If} $AutoStartState == ${BST_CHECKED}

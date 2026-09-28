@@ -69,6 +69,12 @@ public:
         return device_version_;
     }
 
+    // 欢迎信号：设备成功连接时由 PC 主循环递增（deviceOnline false→true 边沿）。
+    // 随 /api/status 下发 welcomeSeq，设备端检测到该序号增大即播放一次
+    //「欢迎」动作 + 专属音频（首次同步不回放到位，避免开机误播）。
+    void triggerWelcome() { welcome_seq_++; }
+    long long welcomeSeq() const { return welcome_seq_.load(); }
+
 private:
     void registerRoutes();
     void runDiscovery();  // UDP 17522 发现应答线程（替代旧 USB ARP 通告）
@@ -82,6 +88,7 @@ private:
     std::atomic<bool> discovery_run_{false};     // 发现线程运行标志（stop 置否）
     std::thread discovery_thread_;                // UDP 发现应答线程（stop 内 join）
     std::atomic<long long> device_last_seen_{0};  // 秒（steady_clock）
+    std::atomic<long long> welcome_seq_{0};        // 欢迎信号递增序号（连接边沿）
     mutable std::mutex ver_mtx_;                  // 保护 device_version_
     std::string device_version_;                  // 设备上报的程序版本
 };

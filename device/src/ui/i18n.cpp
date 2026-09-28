@@ -95,6 +95,7 @@ static const Entry kEntries[] = {
     {"menu.audioBinding",  "音频",        "音頻",        "Audio",                   "音声",          "오디오",     "Audio",                    "Audio",             "Audio"},
     {"menu.audioClear",    "清除音频",    "清除音頻",    "Clear Audio",             "音声を解除",    "오디오 해제", "Retirer l'audio",         "Audio entfernen",   "Quitar audio"},
     {"menu.audioPreview",  "试听",        "試聽",        "Preview",                 "再生",          "미리듣기",   "Écouter",                 "Anhören",           "Escuchar"},
+    {"menu.audioDefault",  "默认",        "預設",        "Default",                 "デフォルト",   "기본",       "Par défaut",              "Standard",          "Predeterminado"},
     {"menu.newChar",       "新建自定义角色…", "新增自訂角色…", "New Custom Character…",   "カスタムキャラを作成","커스텀 캐릭터 만들기","Nouveau personnage…",  "Neuer Charakter…",     "Nuevo personaje…"},
     {"menu.manageChar",    "编辑自定义角色", "編輯自訂角色",  "Edit Custom Characters",  "カスタムキャラを編集","커스텀 캐릭터 편집","Modifier les personnages","Charaktere bearbeiten","Editar personajes"},
     {"menu.deleteChar",    "删除角色",      "刪除角色",      "Delete Character",         "キャラを削除",  "캐릭터 삭제","Supprimer le personnage","Charakter löschen",  "Eliminar personaje"},
@@ -110,6 +111,7 @@ static const Entry kEntries[] = {
     {"settings.sleeping",  "空闲中",      "空閒中",      "Idle",                    "待機中",       "대기 중",    "Inactif",                  "Inaktiv",           "Inactivo"},
     {"settings.working",   "忙碌中",      "忙碌中",      "Working",                 "作業中",       "작업 중",    "Occupé",                   "Arbeitet",          "Ocupado"},
     {"settings.alert",     "需要确认",    "需要確認",    "Alert",                   "確認",         "확인",       "Alerte",                   "Alarm",             "Alerta"},
+    {"settings.welcome",   "欢迎",        "歡迎",        "Welcome",                 "ウェルカム",   "환영",       "Accueil",                  "Willkommen",        "Bienvenida"},
     // ---- 监控面板 ----
     {"monitor.title",      "系统监控",    "系統監控",    "System Monitor",          "システムモニター","시스템 모니터","Moniteur système",     "Systemmonitor",     "Monitor del sistema"},
     {"monitor.cpu",        "CPU",         "CPU",         "CPU",                     "CPU",          "CPU",        "CPU",                      "CPU",               "CPU"},

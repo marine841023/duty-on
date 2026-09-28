@@ -665,6 +665,11 @@ int main() {
     // 最近一次状态动作（模型热切换后重放，避免新模型停在待机）
     std::string dev_motion_group;
     int dev_motion_idx = 0;
+    // PC「动作设定」下发的状态动作覆盖（/api/status stateMotions，按当前
+    // 角色过滤）；优先于设备本地 stateMotions，断连后保持最近值
+    std::map<std::string, std::pair<std::string, int>> pc_state_motions;
+    // 欢迎信号序号基准（/api/status welcomeSeq）：增大即播一次欢迎
+    long long dev_welcome_prev = 0;
     // 硬件屏布局模式（PC 经 /api/status 下发；断连后保持最近值）：
     // multi=角色半屏+任务列表 / single=角色全屏+大时钟 / frame=相框全屏轮播。
     // 初始 frame：未连上 PC 时当电子相框用（连上后 PC 下发模式覆盖）
@@ -850,6 +855,11 @@ int main() {
         for (const auto& [state, gi] :
              UserConfigStore::stateMotionsFor(cfg, current_model_key))
             state_machine.setMotionFor(state, gi.first, gi.second);
+#ifndef _WIN32
+        // PC「动作设定」下发的覆盖优先（设备本地仅作断连/离线回退）
+        for (const auto& [state, gi] : pc_state_motions)
+            state_machine.setMotionFor(state, gi.first, gi.second);
+#endif
     };
     apply_state_motions();
 
@@ -1043,8 +1053,8 @@ int main() {
         if (key == "models") {
             std::vector<UIRenderer::MenuEntry> out;
             // 1.x getCharacters 顺序：内置模型在前，自定义形象在后；
-            // 缩略图：Live2D 用 1.x 缓存（~/.dutyon/thumbnails/<名>.png），
-            // GIF 形象用 sleeping 动画首帧（stb 解码）
+            // 缩略图：Live2D 用 1.x 缓存 ~/.dutyon/thumbnails/<名>.png（运行时
+            // 生成，每次收集现查以拾取新生成的），GIF 形象用 sleeping 首帧
             for (const auto& e : model_entries)
                 out.push_back({"model:" + e.key, e.name, e.key == current_model_key,
                                UserConfigStore::thumbnailFor(e.name)});
@@ -1271,6 +1281,37 @@ int main() {
         mciSendStringW(L"play dutyonprev", nullptr, 0, nullptr);
     };
 
+    // 系统默认音频文件名（未绑定自定义时试听播放；与设备端 SoundPlayer
+    // 事件一致）：每个角色默认相同，即随包语音文件
+    auto default_audio_file = [](const std::string& state) -> std::string {
+        if (state == "working") return "mission_start.wav";
+        if (state == "sleeping") return "mission_complete.wav";
+        if (state == "alert") return "attention.wav";
+        if (state == "welcome") return "welcome.wav";
+        return std::string();
+    };
+    // 随包音频目录：发布 <exe>/assets/device/sounds；开发 仓库
+    // frontend/assets/device/sounds。以 mission_start.wav 存在为识别标志
+    auto find_sounds_dir = []() -> std::string {
+        namespace fs = std::filesystem;
+        char exe_path[MAX_PATH] = {};
+        const DWORD len = GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
+        if (len == 0 || len >= MAX_PATH) return std::string();
+        const fs::path exe_dir = fs::path(exe_path).parent_path();
+        const fs::path cands[] = {
+            exe_dir / "assets" / "device" / "sounds",
+            exe_dir / ".." / ".." / ".." / "frontend" / "assets" / "device" /
+                "sounds",
+        };
+        std::error_code ec;
+        for (const auto& c : cands) {
+            const fs::path p = c.lexically_normal();
+            if (fs::is_regular_file(p / "mission_start.wav", ec))
+                return p.generic_string();
+        }
+        return std::string();
+    };
+
     // 相框照片文件夹选择器（模态 shell 文件夹框；取消返回空）。路径以
     // UTF-8 回传（与 config.json / HTTP 服务一致）
     auto pick_frame_folder = [&]() -> std::string {
@@ -1401,13 +1442,21 @@ int main() {
             // 设备端下一次 /api/status 轮询（≤2s）收到 frameSource
 #endif
         }
-        // ---- 硬件显示端时钟颜色（菜单"时钟颜色"五选一）----
+        // ---- 显示文字颜色（菜单"时钟颜色"五选一）：作用于当前角色，
+        // 存入 characterColors[activeCharacterId]；切换角色自动采用各自颜色 ----
         else if (id.rfind("clock-color:", 0) == 0) {
             const std::string color = id.substr(12);
             if (color == "amber" || color == "ice" || color == "white" ||
                 color == "green" || color == "pink") {
-                cfg.clock_color = color;
-                UserConfigStore::saveClockColor(color);
+                if (cfg.active_character_id.empty()) {
+                    // 无当前角色：回退写全局默认色
+                    cfg.clock_color = color;
+                    UserConfigStore::saveClockColor(color);
+                } else {
+                    cfg.character_colors[cfg.active_character_id] = color;
+                    UserConfigStore::saveCharacterColor(cfg.active_character_id,
+                                                        color);
+                }
                 // 立即生效（设备端下一次 /api/status 轮询 ≤2s 收到）
             }
         }
@@ -1684,17 +1733,23 @@ int main() {
 #endif
             }
         }
-        // ---- 状态音频试听：动作设定页播放当前活动角色已绑定的状态音频 ----
+        // ---- 状态音频试听：已绑定→播绑定文件；未绑定→播系统默认音频 ----
         else if (id.rfind("stateaudiopreview:", 0) == 0) {
 #ifdef _WIN32
             const std::string state = id.substr(18);
+            std::string path;
             auto kit = cfg.state_audio.find(cfg.active_character_id);
             if (kit != cfg.state_audio.end()) {
                 auto fit = kit->second.find(state);
                 if (fit != kit->second.end() && !fit->second.empty())
-                    preview_audio_file(
-                        UserConfigStore::animationsDir() + "/" + fit->second);
+                    path = UserConfigStore::animationsDir() + "/" + fit->second;
             }
+            if (path.empty()) {  // 未绑定 → 系统默认音频（随包语音）
+                const std::string sdir = find_sounds_dir();
+                const std::string df = default_audio_file(state);
+                if (!sdir.empty() && !df.empty()) path = sdir + "/" + df;
+            }
+            if (!path.empty()) preview_audio_file(path);
 #endif
         }
         // ---- 设备声音管理：完全静音 / 按状态静音（经 /api/status 下发）----
@@ -1915,10 +1970,46 @@ int main() {
     bool device_was_online = false;
 #endif
 
+    // 缩略图后台生成（1.x generateMissingThumbnails 同策略）：启动 ~2s 后
+    // 逐个为缺缓存缩略图的模型离屏渲染 128×128 透明 PNG，写入
+    // ~/.dutyon/thumbnails/<名>.png（菜单读取）。主线程同 GL 上下文，
+    // 节流 0.8s/个避免卡顿；已缓存的模型跳过（只跑一次）。
+    struct ThumbGen {
+        std::vector<ModelEntry> queue;
+        size_t idx = 0;
+        float elapsed = 0.f;
+        float next_at = 0.f;
+        bool queued = false;
+    } thumb_gen;
+
     while (g_running) {
         auto now = Clock::now();
         float delta = std::chrono::duration<float>(now - last_frame).count();
         last_frame = now;
+
+        // 缩略图生成推进（见上方 thumb_gen 声明）
+        thumb_gen.elapsed += delta;
+        if (!thumb_gen.queued && thumb_gen.elapsed >= 2.0f) {
+            thumb_gen.queued = true;
+            thumb_gen.next_at = thumb_gen.elapsed;
+            for (const auto& e : model_entries)
+                if (UserConfigStore::thumbnailFor(e.name).empty())
+                    thumb_gen.queue.push_back(e);
+        }
+        if (thumb_gen.queued && thumb_gen.idx < thumb_gen.queue.size() &&
+            thumb_gen.elapsed >= thumb_gen.next_at) {
+            thumb_gen.next_at = thumb_gen.elapsed + 0.8f;
+            const ModelEntry e = thumb_gen.queue[thumb_gen.idx++];
+            if (UserConfigStore::thumbnailFor(e.name).empty()) {
+                Live2DRenderer tmp;
+                if (tmp.loadModelFile(e.dir, e.json)) {
+                    tmp.update(0.033f);
+                    if (tmp.captureThumbnailPng(
+                            UserConfigStore::thumbnailPathFor(e.name), 128))
+                        printf("[Thumb] generated: %s\n", e.name.c_str());
+                }
+            }
+        }
 
         // 7. 窗口事件（PC: 拖拽/边缘吸附/右键菜单/托盘；返回 false = 退出）
         if (!window->pollEvents()) break;
@@ -1935,7 +2026,10 @@ int main() {
             if (online_now && !device_was_online) {
                 window->setVisible(false);
                 window->showBalloon("Duty On 桌宠", "我在这里哟");
-                printf("[Pair] device connected -> hide window + tray balloon\n");
+                // 通知设备端播放一次「欢迎」动作 + 专属音频（PC 已隐藏，
+                // 桌宠实际在硬件屏上，欢迎在设备端呈现）
+                backend.triggerWelcome();
+                printf("[Pair] device connected -> hide window + tray balloon + welcome\n");
                 // 自动检查程序版本：本机源码哈希 != 设备上报版本 则后台推送
                 // 更新（哈希计算放工作线程，主循环零阻塞；未配置仓库静默跳过）
                 const std::string repo = cfg.device_repo;
@@ -2292,6 +2386,58 @@ int main() {
                     }
                 }
             }
+            // 状态动作覆盖同步（PC「动作设定」）：变化时重应用并重放当前
+            // 状态动作，使设备与 PC 的待机/忙碌/提醒动作保持一致
+            if (current_status.state_motions != pc_state_motions) {
+                pc_state_motions = current_status.state_motions;
+                apply_state_motions();
+                if (device_mode != "frame") {
+                    const auto [g, i] = state_machine.currentMotion();
+                    if (!g.empty()) {
+                        printf("[Motion] sync from PC: %s -> %s[%d]\n",
+                               current_status.overall_state.c_str(), g.c_str(), i);
+                        if (using_gif) {
+                            if (gif_char) {
+                                const std::string f = gifFileFor(*gif_char, g);
+                                if (!f.empty())
+                                    gif.load(UserConfigStore::animationsDir() +
+                                             "/" + f);
+                            }
+                        } else {
+                            renderer.setLoopMotion(g, i);
+                            dev_motion_group = g;
+                            dev_motion_idx = i;
+                        }
+                    }
+                }
+            }
+            // 欢迎：PC 在设备连接边沿递增 welcomeSeq，序号增大即播一次欢迎
+            // 动作（一次性）+ 专属音频（未绑定则用系统默认 welcome.wav）。
+            // 基准 0：首次连上（序号 ≥ 1）即触发，之后每次重连再触发。
+            if (current_status.welcome_seq > dev_welcome_prev) {
+                dev_welcome_prev = current_status.welcome_seq;
+                printf("[Welcome] play (seq=%lld)\n", dev_welcome_prev);
+                if (!using_gif) {
+                    const auto [g, i] = state_machine.motionForState("welcome");
+                    if (!g.empty()) renderer.playMotion(g, i);
+                }
+                bool muted = current_status.sound_mute;
+                for (const auto& m : current_status.sound_muted_states)
+                    if (m == "welcome") muted = true;
+                if (!muted) {
+                    auto a = current_status.active_audio.find("welcome");
+                    if (a != current_status.active_audio.end() &&
+                        !a->second.empty()) {
+                        const std::string dst =
+                            UserConfigStore::animationsDir() + "/" + a->second;
+                        if (!std::filesystem::exists(dst))
+                            api.downloadAnimation(a->second, dst);
+                        sound_player.playFile(dst);
+                    } else {
+                        sound_player.play(SoundPlayer::Event::Welcome);
+                    }
+                }
+            }
 #endif
 #ifndef _WIN32
             // 相框模式不响应任务状态（只轮播动作，见主循环 frame 轮播段）
@@ -2590,10 +2736,11 @@ int main() {
             // 11. UI 叠加（迷你模式保留半宽状态栏 + 头顶特效，隐藏监控；
             //     设备端未就绪时不画状态栏，改画配网 QR / 配对码）
 #ifdef _WIN32
-            // 硬件显示端状态（菜单"设备模式"分组显示/隐藏 + 当前模式勾选）
+            // 硬件显示端状态（菜单"设备模式"分组显示/隐藏 + 当前模式勾选）；
+            // 颜色传当前角色的有效色（角色专属优先，否则全局），使颜色菜单勾选与之一致
             ui.setDeviceStatus(backend.deviceOnline(), cfg.device_mode,
-                               cfg.clock_color, cfg.device_brightness,
-                               cfg.screen_rotation);
+                               cfg.effectiveColor(cfg.active_character_id),
+                               cfg.device_brightness, cfg.screen_rotation);
             // 相框播放源（照片数每次开菜单才用得上：仅在菜单打开时扫目录）
             ui.setFrameSource(cfg.frame_source, cfg.frame_folder,
                               ui.isMenuOpen() ? count_frame_photos(cfg.frame_folder)

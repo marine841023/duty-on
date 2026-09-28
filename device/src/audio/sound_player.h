@@ -19,6 +19,7 @@ public:
         TaskStart,  // 任务开始：上行双音，1 次
         TaskEnd,    // 任务结束：下行双音，1 次
         Reminder,   // 任务提醒（待确认）：双短促 beep，3 次
+        Welcome,    // 欢迎（设备连接）：优先 welcome.wav，缺失回退上行三音
     };
 
     SoundPlayer();

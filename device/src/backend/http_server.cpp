@@ -40,9 +40,8 @@
 #include "backend/ide_scanner.h"
 #include "backend/pairing_manager.h"
 
-// 照片缩放重编码（仅本 TU 定义实现；解码实现在 live2d_renderer.cpp）
+// 照片缩放重编码（解码/编码实现均在 live2d_renderer.cpp，本 TU 仅引用声明）
 #include <stb_image.h>
-#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 
 namespace dutyon::backend {
@@ -606,7 +605,21 @@ void HttpServer::registerRoutes() {
             // 相框播放源（motion=动作轮播 / folder=指定文件夹照片）；旧版
             // 设备端忽略未知字段，行为保持动作轮播
             j["frameSource"] = cfg.value("frameSource", "motion");
-            j["clockColor"] = cfg.value("clockColor", "amber");
+            // 时钟颜色：当前角色专属色（characterColors[active]）优先，否则
+            // 全局 clockColor——切换角色时自动切换显示屏文字颜色
+            {
+                std::string eff = cfg.value("clockColor", "amber");
+                const std::string ckey =
+                    cfg.value("activeCharacterId", std::string{});
+                if (auto cc = cfg.find("characterColors");
+                    cc != cfg.end() && cc->is_object()) {
+                    if (auto it = cc->find(ckey);
+                        it != cc->end() && it->is_string() &&
+                        !it->get<std::string>().empty())
+                        eff = it->get<std::string>();
+                }
+                j["clockColor"] = std::move(eff);
+            }
             j["deviceBrightness"] = cfg.value("deviceBrightness", 100);
             j["screenRotation"] = cfg.value("screenRotation", 0);
             j["flipHorizontal"] = cfg.value("flipHorizontal", false);
@@ -622,6 +635,15 @@ void HttpServer::registerRoutes() {
                     audio = *it;
             }
             j["activeAudio"] = std::move(audio);
+            // 状态动作覆盖（PC「动作设定」）：仅下发当前角色的一份
+            // {状态: [组, 序号]}，设备端据此与 PC 保持一致；旧版设备忽略未知字段
+            json motions = json::object();
+            if (auto sm = cfg.find("stateMotions");
+                sm != cfg.end() && sm->is_object()) {
+                if (auto it = sm->find(akey); it != sm->end() && it->is_object())
+                    motions = *it;
+            }
+            j["stateMotions"] = std::move(motions);
             json muted = json::array();
             if (auto sam = cfg.find("stateAudioMuted");
                 sam != cfg.end() && sam->is_object()) {
@@ -632,6 +654,8 @@ void HttpServer::registerRoutes() {
             }
             j["soundMutedStates"] = std::move(muted);
         }
+        // 欢迎信号序号（设备成功连接时 PC 递增）：设备端检测到增大即播一次欢迎
+        j["welcomeSeq"] = welcome_seq_.load();
         // PC 时间（设备无 RTC/网络不可信，时钟跟随 PC）：epoch 秒 +
         // 本地时区偏移分钟（东八区=480），设备端 steady_clock 自行推进
         {

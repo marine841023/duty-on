@@ -1219,6 +1219,67 @@ struct UIRenderer::Impl {
         return r;
     }
 
+    // 音频行（动作设定）：整行主体点击=绑定/更换音频，右端 ▶ 内联按钮=试听。
+    // 把「试听」直接放到音频行上，不再单列一行。
+    struct AudioRowResult { bool clicked = false; bool play = false; };
+    AudioRowResult AudioRow(const char* id, const char* label, const char* value) {
+        const float S = scale;
+        const float font_size = 12.0f * S * kTextScale;
+        const float font_val = 11.0f * S * kTextScale;
+        const float pad_v = 7.0f * S, pad_h = 12.0f * S;
+        const float line = font_size + 3.0f * S;
+        const float w = ImGui::GetWindowSize().x - 8.0f * S;
+        const float row_h = pad_v * 2.0f + line;
+        const float btn_w = 36.0f * S;  // 右端试听按钮宽
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 rmin = ImGui::GetCursorScreenPos();
+
+        AudioRowResult res;
+        ImGui::PushID(id);
+        const bool body = ImGui::InvisibleButton("##bind", ImVec2(w - btn_w, row_h));
+        const bool body_hov = ImGui::IsItemHovered();
+        ImGui::SameLine(0.0f, 0.0f);
+        const bool play = ImGui::InvisibleButton("##play", ImVec2(btn_w, row_h));
+        const bool play_hov = ImGui::IsItemHovered();
+        ImGui::PopID();
+
+        const ImVec2 rmax(rmin.x + w, rmin.y + row_h);
+        if (body_hov || play_hov)
+            dl->AddRectFilled(rmin, rmax, IM_COL32(255, 255, 255, 26), 4.0f * S);
+        const float mid = (rmin.y + rmax.y) * 0.5f;
+        // 左：行标签
+        AddTextS(dl, font_12, font_size,
+                    ImVec2(rmin.x + pad_h, TextCenteredY(font_12, font_size, label, mid)),
+                    (body_hov || play_hov) ? IM_COL32(255, 255, 255, 255)
+                                           : IM_COL32(255, 255, 255, 204),
+                    label);
+        // 右端：▶ 试听图标（试听按钮区居中偏右）
+        const char* arrow = "\xE2\x96\xB6";
+        const float fs_arrow = 11.0f * S * kTextScale;
+        const float aw = TextW(font_10, fs_arrow, arrow);
+        AddTextS(dl, font_10, fs_arrow,
+                    ImVec2(rmax.x - pad_h * 0.5f - aw + (play_hov ? 2.0f * S : 0.0f),
+                           TextCenteredY(font_10, fs_arrow, arrow, mid)),
+                    play_hov ? IM_COL32(0x64, 0x96, 0xFF, 255)
+                             : IM_COL32(255, 255, 255, 150),
+                    arrow);
+        // 当前音频名（右对齐到 ▶ 左侧 gap 6）
+        if (value && value[0]) {
+            char name[96];
+            const float avail = (rmax.x - btn_w - 6.0f * S) -
+                                (rmin.x + pad_h + TextW(font_12, font_size, label) + 8.0f * S);
+            TruncateUtf8(value, avail, name, sizeof(name), font_11, font_val);
+            const float vw = TextW(font_11, font_val, name);
+            AddTextS(dl, font_11, font_val,
+                        ImVec2(rmax.x - btn_w - 6.0f * S - vw,
+                               TextCenteredY(font_11, font_val, name, mid)),
+                        IM_COL32(255, 255, 255, 128), name);
+        }
+        res.clicked = body;
+        res.play = play;
+        return res;
+    }
+
     // ---- 形象缩略图纹理（1.x .char-thumb；stb 解码 PNG/GIF 首帧 → GL 纹理，
     // 按路径缓存；加载失败缓存 0 用首字母占位）----
     // 显存优化：缩略图显示尺寸仅 64×S px，解码后按 2 的幂减半到 ≤128
@@ -2839,29 +2900,25 @@ void UIRenderer::renderMenu() {
             if (p->MenuRow("back", I18n::t("menu.back"), false, false, nullptr, false).clicked)
                 go(kMenuMain);
             p->MenuLabel(I18n::t("menu.actionSettings"));
-            static const char* kStates[3] = {"sleeping", "working", "alert"};
-            for (int i = 0; i < 3; i++) {
+            static const char* kStates[4] = {"sleeping", "working", "alert", "welcome"};
+            for (int i = 0; i < 4; i++) {
+                if (i > 0) p->MenuDivider();  // 动作与动作之间分隔
                 if (p->SettingsRow(kStates[i],
                             I18n::t((std::string("settings.") + kStates[i]).c_str()),
                             hint_of(std::string("assign:") + kStates[i]).c_str()).clicked) {
                     p->assign_state = kStates[i];
                     go(kMenuMotionAssign);
                 }
-                // 状态音频绑定（键=当前活动角色；点击选文件，已绑定可清除）
+                // 音频行：整行主体=绑定/更换音频；右端 ▶=试听（已绑定播
+                // 绑定文件，未绑定播系统默认音频）
                 const std::string audio =
                     hint_of(std::string("stateaudio:") + kStates[i]);
-                if (p->SettingsRow(("stateaudio:" + std::string(kStates[i])).c_str(),
-                            I18n::t("menu.audioBinding"),
-                            audio.c_str()).clicked) {
-                    activate("stateaudio:" + std::string(kStates[i]));
-                }
-                // 试听：播放当前已绑定的状态音频（仅已绑定时显示）
-                if (!audio.empty() &&
-                    p->MenuRow(("stateaudiopreview:" + std::string(kStates[i])).c_str(),
-                            I18n::t("menu.audioPreview"), false, false, nullptr,
-                            false).clicked) {
-                    activate("stateaudiopreview:" + std::string(kStates[i]));
-                }
+                const std::string shown =
+                    audio.empty() ? I18n::t("menu.audioDefault") : audio;
+                auto ar = p->AudioRow(("stateaudio:" + std::string(kStates[i])).c_str(),
+                            I18n::t("menu.audioBinding"), shown.c_str());
+                if (ar.clicked) activate("stateaudio:" + std::string(kStates[i]));
+                if (ar.play) activate("stateaudiopreview:" + std::string(kStates[i]));
                 if (!audio.empty() &&
                     p->MenuRow(("stateaudioclear:" + std::string(kStates[i])).c_str(),
                             I18n::t("menu.audioClear"), false, true, nullptr,
