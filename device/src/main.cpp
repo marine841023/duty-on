@@ -2788,26 +2788,28 @@ int main() {
                 }
                 qr_banner.render(WIN_W, WIN_H, qr_fill, qr_cx, qr_cy);
 
-                // 步骤文案（含真实热点名/密码/portal 地址；renderDate 过宽自动缩字）。
-                // 末尾追加电脑端软件下载指引（GitHub/Gitee）：配网阶段用户往往
-                // 还没装 PC 端 DutyOn，就地告知去哪搜、去哪下载、怎么装。
+                // 步骤文案（含真实热点名/密码；renderDate 过宽自动缩字）。
+                // 配网页靠 captive portal 自动弹出；没弹出时引导断开重连热点
+                // 重新触发（手动浏览器访问 portal 地址打不开，不再提示）。
+                // 末尾追加电脑端软件下载指引（GitHub/Gitee）：配网阶段用户
+                // 往往还没装 PC 端 DutyOn，就地告知去哪搜、去哪下载、怎么装。
                 const std::string steps[] = {
                     "配网步骤",
                     "① 手机连接设备热点",
                     "热点 「" + wifi.apSsid() + "」",
                     "密码 " + wifi.apPass(),
                     "② 弹出页面选家中 Wi-Fi 输密码",
+                    "没弹出页面？断开重连热点",
                     "③ 提交后设备自动联网",
                     "④ 电脑端 DutyOn 输入配对码",
-                    "或浏览器打开 " + wifi.portalUrl(),
                     "电脑端软件下载（Releases）",
                     "GitHub 搜 duty-on",
                     "Gitee 搜 dutyo",
                     "github.com/marine841023/duty-on",
                     "gitee.com/megrezsoft/dutyo",
                 };
-                const float sizes[] = {18.f, 16.f, 15.f, 15.f, 16.f, 16.f, 16.f,
-                                       12.f, 15.f, 14.f, 14.f, 12.f, 12.f};
+                const float sizes[] = {18.f, 16.f, 15.f, 15.f, 16.f, 13.f, 16.f,
+                                       16.f, 15.f, 14.f, 14.f, 12.f, 12.f};
                 const int n = (int)(sizeof(steps) / sizeof(steps[0]));
                 // 行距自适应：n 行在 [底部留白, s_top] 内均分，横竖屏都不溢出屏
                 {

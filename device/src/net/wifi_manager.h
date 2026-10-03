@@ -49,8 +49,6 @@ public:
     // AP 模式信息（供 QR 与提示文案）
     const std::string& apSsid() const { return ap_ssid_; }
     const std::string& apPass() const { return ap_pass_; }
-    // captive portal 手动访问地址（手机扫码失败时兜底）
-    const std::string& portalUrl() const { return portal_url_; }
 
     // client 模式拿到 IP 后非空（Online 状态）
     std::string clientIp() const;
