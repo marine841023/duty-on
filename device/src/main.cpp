@@ -56,12 +56,12 @@
 #ifdef _WIN32
 #include "backend/backend_service.h"  // 单进程后端（原 duty-on.exe 职责）
 #include "platform/sync_progress.h"   // 设备程序自动更新进度窗口
+#include "platform/pair_code_dialog.h"  // 配对码输入弹窗（验证码风格 6 格）
 #else
 #include <nlohmann/json.hpp>            // 用户模型 model3.json 解析（PC 同步）
 #include "net/wifi_manager.h"         // Wi-Fi 配网 + AP/client 模式切换状态机
 #include "net/pc_discovery.h"         // UDP 广播发现 PC（替代 USB ARP 发现）
 #include "net/device_identity.h"      // device_id / pair_code / token 持久化
-#include "render/qr_banner.h"         // 配网 QR 屏幕渲染
 #include "render/photo_player.h"      // 电子相框照片逐张流式播放
 #include "ui/task_panel.h"            // 下半屏任务列表（项目名 + 状态）
 #include "audio/sound_player.h"       // 事件提示音（开始/结束/提醒）
@@ -773,19 +773,18 @@ int main() {
     // Wi-Fi 配对码方案（替代 USB 直连）：
     //   wifi          AP 配网 <-> 入网 状态机（每帧 poll，内部 1s 节流）；
     //   pc_discovery  入网后 UDP 广播发现 PC，拿 base url 喂 ApiClient；
-    //   identity      device_id / pair_code / token（~/.dutyon/device.json）；
-    //   qr_banner     AP 模式把「加入热点」串画成 QR（手机扫码配网）。
+    //   identity      device_id / pair_code / token（~/.dutyon/device.json）。
     // pc_ready = 已入网 + 已配对 + 已发现 PC（= 可显示任务数据）。
     auto& identity = DeviceIdentity::instance();
     WifiManager wifi;
     wifi.start();
     PcDiscovery pc_discovery(identity.deviceId());
-    QrBanner qr_banner;
     bool pc_ready = false;
     bool pc_paired = identity.paired();  // PC 是否已认得本设备（发现回包更新）
+    std::string last_reset_cmd_id;  // 已执行的 PC"重新配网"指令序号（防重复）
 
     // 设备画面：由 Wi-Fi / 配对状态决定（主循环 poll 段计算，渲染段分派）
-    enum class DevScreen { Normal, QrProvision, JoiningWifi, PairCode, FindingPc };
+    enum class DevScreen { Normal, WifiProvision, JoiningWifi, PairCode, FindingPc };
     DevScreen dev_screen = DevScreen::Normal;
 
     // 任务列表面板（下半屏）：字体加载失败时只画底色无文字，不阻断运行
@@ -1088,29 +1087,6 @@ int main() {
                 out.push_back({"charedit:" + c.id, c.name, false, {}});
             return out;
         }
-#ifdef _WIN32
-        // 设备配对（Wi-Fi 配对码方案）：待配对请求 / 已配对设备列表。
-        // id = device_id（供 pair-unpair 用）；label = 前 8 位（+来源 IP）。
-        if (key == "pair-pending") {
-            std::vector<UIRenderer::MenuEntry> out;
-            for (const auto& pr : backend.pendingPairings()) {
-                const std::string sid = pr.device_id.size() > 8
-                                            ? pr.device_id.substr(0, 8)
-                                            : pr.device_id;
-                out.push_back({pr.device_id, sid + " @ " + pr.ip, false, {}});
-            }
-            return out;
-        }
-        if (key == "pair-paired") {
-            std::vector<UIRenderer::MenuEntry> out;
-            for (const auto& did : backend.pairedDevices()) {
-                const std::string sid =
-                    did.size() > 8 ? did.substr(0, 8) : did;
-                out.push_back({did, sid, false, {}});
-            }
-            return out;
-        }
-#endif
         return {};
     };
 
@@ -1479,19 +1455,38 @@ int main() {
                 UserConfigStore::saveScreenRotation(deg);
             }
         }
-        // ---- 设备配对（Wi-Fi 配对码方案；菜单「设备→配对设备」）----
-        else if (id.rfind("pair-confirm:", 0) == 0) {
+        // ---- 设备配对（Wi-Fi 配对码方案；菜单「设备→配对设备」直接弹窗）----
+        else if (id == "pair-input") {
 #ifdef _WIN32
-            // 用户输入设备屏幕上的 6 位码：匹配待配对请求即签发 token 持久化。
-            // 设备下次 /api/pair-request 轮询（≤3s）拿到 token 完成配对。
-            const std::string code = id.substr(13);
-            printf("[Pair] confirm code %s -> %s\n", code.c_str(),
-                   backend.confirmPairing(code) ? "paired" : "no match");
-#endif
-        } else if (id.rfind("pair-unpair:", 0) == 0) {
-#ifdef _WIN32
-            // 解除配对：移除 token；设备下次轮询得 401 → 自动清 token 重新握手
-            backend.unpairDevice(id.substr(12));
+            // 深色配对弹窗（见 platform/pair_code_dialog.h）：未配对=验证码
+            // 风格 6 格输码；已配对=状态 + 解除配对 / 清除设备 Wi-Fi。
+            // 旧方案在菜单里轮询 GetAsyncKeyState 采集物理键，桌宠窗口
+            // WS_EX_NOACTIVATE 不抢焦点，实测漏键输不进去。
+            PairDialog::Host host;
+            host.confirm = [&](const std::string& code) {
+                return backend.confirmPairing(code);
+            };
+            host.unpair = [&](const std::string& did) {
+                backend.unpairDevice(did);
+            };
+            host.reset_wifi = [&](const std::string& did) {
+                // 清设备端 Wi-Fi 凭据重进配网模式（token 保留，无需再配对）
+                backend.requestDeviceResetWifi(did);
+                MessageBoxW(
+                    pet_hwnd,
+                    L"已下发重新配网指令，设备将清除 Wi-Fi 并重启配网模式",
+                    L"Duty On", MB_OK | MB_ICONINFORMATION);
+            };
+            host.paired = [&]() {
+                std::vector<PairDialog::Device> out;
+                for (const auto& did : backend.pairedDevices()) {
+                    out.push_back({did, did.size() > 8 ? did.substr(0, 8)
+                                                       : did});
+                }
+                return out;
+            };
+            PairDialog dlg;
+            dlg.run(pet_hwnd, host);
 #endif
         }
         // ---- 形象 / 动作 ----
@@ -2090,13 +2085,13 @@ int main() {
         // → false，屏幕回落到配对码引导重新配对（自愈）。
         const bool paired = api.paired();
         // 画面分派：
-        //   AP 配网中        -> 配网 QR（手机扫码加入设备热点）
+        //   AP 配网中        -> 配网引导（热点信息大字 + 分步说明）
         //   入网中           -> "正在连接 Wi-Fi"
         //   入网 + PC 在线   -> 正常任务画面（原机器自动连上后切到这里）
         //   入网 + 未连上 PC -> 顶部恒显配对码；已配对="正在等待连接"（原机器
         //                       回来自动切正常页），未配对="没有设备连接"（待输码）
         if (wifi_state == WifiState::ApProvisioning) {
-            dev_screen = DevScreen::QrProvision;
+            dev_screen = DevScreen::WifiProvision;
         } else if (wifi_state == WifiState::Joining) {
             dev_screen = DevScreen::JoiningWifi;
         } else if (wifi_state == WifiState::Online && pc_online) {
@@ -2111,6 +2106,17 @@ int main() {
         if (auto status = api.takeStatus()) {
             current_status = std::move(*status);
 #ifndef _WIN32
+            // PC 下发的"重新配网"指令（换 WiFi 场景）：序号变化才执行（ack
+            // 已由 ApiClient 发出）——清 Wi-Fi 凭据回配网模式，wifi 状态机
+            // 自动把画面切回 WifiProvision；配对 token 保留，新网络入网后
+            // 自动恢复连接，无需重新输配对码
+            if (!current_status.reset_wifi_cmd.empty() &&
+                current_status.reset_wifi_cmd != last_reset_cmd_id) {
+                last_reset_cmd_id = current_status.reset_wifi_cmd;
+                printf("[Main] reset-wifi cmd %s -> re-provision\n",
+                       last_reset_cmd_id.c_str());
+                wifi.resetToAp();
+            }
             // 收到新状态 = PC 链路活着（HTTP 200 + token 有效）：刷新在线
             // 时刻，供上方 pc_online 判定（下一帧据此切回正常任务画面）
             last_status_ok = Clock::now();
@@ -2700,8 +2706,8 @@ int main() {
             const bool draw_character = true;
 #else
             // 设备端：仅"正常任务画面"渲染角色；配网/入网/配对引导画面
-            //（QrProvision/JoiningWifi/PairCode/FindingPc）不画 GIF/模型背景
-            // ——开机初始化时角色动画压在配对码/二维码下显得杂乱。update 照常
+            //（WifiProvision/JoiningWifi/PairCode/FindingPc）不画 GIF/模型背景
+            // ——开机初始化时角色动画压在配对码/配网引导下显得杂乱。update 照常
             // 推进（状态/包围盒保持新鲜），仅跳过绘制。相框照片显示时同样
             // 不画角色（照片满屏）。
             const bool draw_character =
@@ -2759,65 +2765,87 @@ int main() {
             // ---- 配网 / 入网 / 配对 引导画面（非正常态，覆盖待机动画）----
             // 文字复用 task_panel：renderClock=数字卡通字体（配对码），
             // renderDate=主字体（含中文提示）。位置按 WIN_H 比例，横竖屏通用。
-            if (dev_screen == DevScreen::QrProvision) {
-                // 配网引导：QR（手机扫码自动加入设备热点）+ 分步文字说明。
-                // 横屏：QR 放左列、步骤在右列；竖屏：QR 在上、步骤在下。
-                const std::string payload = "WIFI:S:" + wifi.apSsid() +
-                                            ";T:WPA;P:" + wifi.apPass() + ";;";
-                qr_banner.setPayload(payload);
-
-                float qr_cx, qr_cy, qr_fill;  // QR 中心（像素）与边长比例
-                int sx, sw;                   // 步骤文本区起点 x / 宽
-                float s_top, s_gap;           // 步骤首行顶边 / 行距
+            if (dev_screen == DevScreen::WifiProvision) {
+                // 配网引导：热点 SSID/密码大字（用户要抄的）+ portal 地址 QR。
+                // （旧版 WIFI: 凭据串 QR 已废弃——多数扫码器不识别；这里的 QR
+                // 只编码 URL，扫码直接打开配网页，是 captive portal 不自动弹
+                // 时的保底入口。）横屏：左列热点信息+QR、右列步骤；竖屏单列。
+                // 注意：本渲染系 y 轴向上（0=屏底），阅读顺序"上"= 大 y ——
+                // 标题在最大 y，步骤自上而下 = y 递减。
+                // 字距分支结束务必还原，勿影响时钟/任务页
+                task_panel.setSpacing(1.0f);
+                // 全页仅两种字号：em=凸显（标题/热点 SSID/密码）、nm=普通
+                //（标签/步骤/脚注），层级清晰不琐碎
+                const float em = landscape ? 46.f : 52.f;
+                const float nm = landscape ? 28.f : 30.f;
+                int hx, hw;             // 热点信息区起点 x / 宽
+                int sx, sw;             // 步骤文本区起点 x / 宽
+                float info_y[5];        // 标题/①/SSID/密码label/密码 的 y（文字顶）
+                float s_top;            // 步骤首行 ② 的 y（步骤区最上）
+                float foot_y;           // 底部下载指引 y（屏底小字）
                 if (landscape) {
-                    qr_cx = left_w * 0.5f;
-                    qr_cy = (float)WIN_H * 0.5f;
-                    qr_fill = 0.66f;
+                    hx = 0;
+                    hw = left_w;
                     sx = region_x;
                     sw = region_w;
-                    s_top = (float)WIN_H - 56.f;
-                    s_gap = 44.f;
+                    s_top = 436.f;
+                    foot_y = 44.f;
+                    info_y[0] = 446.f;
+                    info_y[1] = 404.f;
+                    info_y[2] = 356.f;
+                    info_y[3] = 288.f;
+                    info_y[4] = 240.f;
                 } else {
-                    qr_cx = (float)WIN_W * 0.5f;
-                    qr_cy = (float)WIN_H * 0.70f;
-                    qr_fill = 0.50f;
+                    hx = 0;
+                    hw = WIN_W;
                     sx = 0;
                     sw = WIN_W;
-                    s_top = (float)WIN_H * 0.46f;
-                    s_gap = 44.f;
+                    s_top = 440.f;
+                    foot_y = 42.f;
+                    info_y[0] = 764.f;
+                    info_y[1] = 712.f;
+                    info_y[2] = 662.f;
+                    info_y[3] = 594.f;
+                    info_y[4] = 544.f;
                 }
-                qr_banner.render(WIN_W, WIN_H, qr_fill, qr_cx, qr_cy);
-
-                // 步骤文案（含真实热点名/密码/portal 地址；renderDate 过宽自动缩字）。
-                // 末尾追加电脑端软件下载指引（GitHub/Gitee）：配网阶段用户往往
-                // 还没装 PC 端 DutyOn，就地告知去哪搜、去哪下载、怎么装。
+                // ---- ① 热点信息（SSID/密码大字）----
+                task_panel.renderDate("设备配网", info_y[0], em, WIN_W, WIN_H,
+                                      hx, hw);
+                task_panel.renderDate("① 手机连接设备热点", info_y[1], nm,
+                                      WIN_W, WIN_H, hx, hw);
+                task_panel.renderDate("「" + wifi.apSsid() + "」", info_y[2],
+                                      em, WIN_W, WIN_H, hx, hw);
+                task_panel.renderDate("热点密码", info_y[3], nm, WIN_W, WIN_H,
+                                      hx, hw);
+                task_panel.renderDate(wifi.apPass(), info_y[4], em, WIN_W,
+                                      WIN_H, hx, hw);
+                // ---- ② ~ ⑤ 步骤（自上而下正序：y 从 s_top 递减）----
+                // 配网阶段用户往往还没装 PC 端 DutyOn，就地告知去哪下载；
+                // renderDate 过宽自动缩字。
+                //（QR 已移除：实测手机连热点后会被 MIUI 自动回切到家庭路由，
+                //  扫码/浏览器路径全部失效，唯一可靠入口是 WiFi 设置页的
+                //  captive portal 入口，QR 无作用）
                 const std::string steps[] = {
-                    "配网步骤",
-                    "① 手机连接设备热点",
-                    "热点 「" + wifi.apSsid() + "」",
-                    "密码 " + wifi.apPass(),
-                    "② 弹出页面选家中 Wi-Fi 输密码",
-                    "③ 提交后设备自动联网",
-                    "④ 电脑端 DutyOn 输入配对码",
-                    "或浏览器打开 " + wifi.portalUrl(),
-                    "电脑端软件下载（Releases）",
-                    "GitHub 搜 duty-on",
-                    "Gitee 搜 dutyo",
-                    "github.com/marine841023/duty-on",
-                    "gitee.com/megrezsoft/dutyo",
+                    "② 连接后自动弹出配网页",
+                    "未弹出时浏览器打开 " + wifi.portalUrl(),
+                    "③ 选 Wi-Fi 输密码提交",
+                    "④ 联网后屏幕显示配对码",
+                    "⑤ 电脑端右键宠物头像",
+                    "    设备 → 配对设备 输码",
                 };
-                const float sizes[] = {18.f, 16.f, 15.f, 15.f, 16.f, 16.f, 16.f,
-                                       12.f, 15.f, 14.f, 14.f, 12.f, 12.f};
                 const int n = (int)(sizeof(steps) / sizeof(steps[0]));
-                // 行距自适应：n 行在 [底部留白, s_top] 内均分，横竖屏都不溢出屏
-                {
-                    const float bottom_margin = 28.f;
-                    const float avail = s_top - bottom_margin;
-                    if (n > 1 && avail > 0.f) s_gap = avail / (float)(n - 1);
-                }
+                // 行距：普通字号 1.5 倍行高
+                const float s_gap = nm * 1.5f;
                 for (int i = 0; i < n; ++i)
                     task_panel.renderDate(steps[i], s_top - s_gap * (float)i,
-                                          sizes[i], WIN_W, WIN_H, sx, sw);
+                                          nm, WIN_W, WIN_H, sx, sw);
+                // 底部脚注：软件下载指引（直接给仓库地址 —— 按名字在 Gitee/
+                // GitHub 搜索实测搜不到本仓库，搜索式引导误导用户；Gitee 在前
+                // 便于国内访问）
+                task_panel.renderDate(
+                    "下载 gitee.com/megrezsoft/duty-on",
+                    foot_y, nm, WIN_W, WIN_H, sx, sw);
+                task_panel.setSpacing(1.0f);  // 还原字距（勿影响其他画面）
             } else if (dev_screen == DevScreen::JoiningWifi) {
                 task_panel.renderDate("正在连接 Wi-Fi…", (float)WIN_H * 0.60f,
                                       44.f, WIN_W, WIN_H);
@@ -2835,10 +2863,16 @@ int main() {
                                        WIN_W, WIN_H);
                 task_panel.renderDate(waiting ? "正在等待连接" : "没有设备连接",
                                       code_top - 132.f, 38.f, WIN_W, WIN_H);
-                task_panel.renderDate(
-                    waiting ? "电脑端 DutyOn 启动后将自动连接"
-                            : "请在电脑端 DutyOn 输入此配对码",
-                    code_top - 190.f, 26.f, WIN_W, WIN_H);
+                if (waiting) {
+                    task_panel.renderDate("电脑端 DutyOn 启动后将自动连接",
+                                          code_top - 190.f, 26.f, WIN_W, WIN_H);
+                } else {
+                    // 输码入口写明 PC 菜单路径，分两行防缩字过小
+                    task_panel.renderDate("电脑端 DutyOn：右键宠物头像",
+                                          code_top - 190.f, 26.f, WIN_W, WIN_H);
+                    task_panel.renderDate("设备 → 配对设备 输入此配对码",
+                                          code_top - 228.f, 26.f, WIN_W, WIN_H);
+                }
                 // Wi-Fi 刚入网数秒内顶部提示“连接成功”（此后由右上角 Wi-Fi
                 // 信号条常绿表示已入网；是否连上 PC 由旁边的显示器图标表示）
                 if (Clock::now() < wifi_ok_until)

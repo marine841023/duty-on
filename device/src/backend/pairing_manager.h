@@ -57,13 +57,30 @@ public:
     // 解除配对：移除 token 并持久化（设备下次轮询得 401 → 自动重新握手）
     bool unpair(const std::string& device_id);
 
+    // ---- PC 端"重新配网"指令（换 WiFi 场景）----
+    // 挂起指令（仅已配对设备）：目标设备轮询 /api/status 时经 deviceCmd
+    // 字段下发，设备回执 cmd-ack 后清除。设备离线则一直挂起（持久化到
+    // config.json，PC 重启不丢），设备上线后自然收到。
+    bool requestResetWifi(const std::string& device_id);
+    // token 所属设备若有挂起的 reset 指令则返回其 id（不消费，等 ack）
+    std::string pendingResetWifiFor(const std::string& device_id) const;
+    // 设备回执（/api/cmd-ack）：id 匹配挂起指令则清除并持久化
+    void ackResetWifi(const std::string& device_id, const std::string& id);
+    // token -> device_id（status 注入 deviceCmd 时定向目标用；无匹配返回空）
+    std::string deviceByToken(const std::string& token) const;
+
 private:
     void persistLocked();               // 写 paired_ 到 config.json（调用方持锁）
+    void persistCmdLocked();            // 写挂起指令到 config.json（调用方持锁）
     static std::string generateToken(); // 随机 32 位十六进制令牌
+    static std::string newCmdId();      // 指令序号（system_clock 毫秒字符串）
 
     mutable std::mutex mtx_;
     std::map<std::string, PendingPair> pending_;  // device_id -> 待配对请求
     std::map<std::string, std::string> paired_;   // device_id -> token
+    // 挂起的"重新配网"指令（同一时刻至多一条：目标 + 序号）
+    std::string cmd_device_id_;
+    std::string cmd_id_;
 };
 
 } // namespace dutyon::backend

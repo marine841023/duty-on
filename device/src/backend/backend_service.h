@@ -85,6 +85,12 @@ public:
     bool unpairDevice(const std::string& device_id) {
         return pairing_.unpair(device_id);
     }
+    // 挂起"重新配网"指令（换 WiFi 场景）：目标设备轮询 /api/status 时经
+    // deviceCmd 下发，设备清 Wi-Fi 凭据重进配网模式；回执 cmd-ack 后清除。
+    // 设备离线则一直挂起（config.json 持久化），上线后自然收到
+    bool requestDeviceResetWifi(const std::string& device_id) {
+        return pairing_.requestResetWifi(device_id);
+    }
 
     bool quitRequested() const { return quit_requested_; }
     // ApiClient 兼容别名（菜单 quit 项调用面保持一致）

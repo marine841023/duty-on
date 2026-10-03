@@ -1,5 +1,11 @@
 # C++ build output (device)
 device/build/
+# 交叉编译输出（Windows 宿主 → aarch64；同上，构建产物不入库）
+device/build-cross/
+# 交叉编译 sysroot（从设备拉回的 EGL/GBM/DRM 头文件与 .so，含专有库）及
+# 传输归档 —— 设备特定，不入库；重建方法见 device/cmake/aarch64-toolchain.cmake 注释
+device/sysroot/
+device/sysroot*.tgz
 
 # Manually downloaded third-party SDK (see device/README.md)
 # - CubismNativeSdk: Live2D 许可禁止再分发
@@ -40,12 +46,18 @@ imgui.ini
 # gitignore 对已跟踪文件无效——上面列出的部署/构建脚本仍随库共享，不受影响；
 # 确需共享新脚本时用 git add -f 强制添加
 .userdata/*
+# 离线安装的设备 deb 包与本地依赖源码克隆（交叉编译/配网工具准备期产物）
+.userdata/*.deb
+.userdata/deps-src/
 
 # 2.0 packaging toolchain & output (NSIS portable auto-downloaded)
 tools/nsis/
 tools/dist/
 tools/*.png
 tools/*.ico
+# Arm GNU 交叉编译工具链（13.2.Rel1，~2GB，许可允许再分发但体积过大）
+# 下载放置方法见 device/cmake/aarch64-toolchain.cmake 注释
+tools/cross/
 
 # Local release artifacts (installers built during cross-branch releases)
 release/

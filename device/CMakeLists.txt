@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(dutyon-2.0 VERSION 2.0.9 LANGUAGES CXX)
+project(dutyon-2.0 VERSION 2.0.10 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -99,16 +99,40 @@ else()
     FetchContent_Declare(cpr
         GIT_REPOSITORY https://github.com/libcpr/cpr.git
         GIT_TAG 1.10.5)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(EGL REQUIRED egl)
-    # DRM/GBM 直渲（无 X11）：gbm 表面 + libdrm 的 CRTC/翻页接口
-    pkg_check_modules(GBM REQUIRED gbm)
-    pkg_check_modules(DRM REQUIRED libdrm)
-    # GLES3 头/库由 glesv2.pc 提供（libGLESv2 含 GLES3 入口）；仅少数发行版
-    # 另附 glesv3.pc，先试 glesv3 再回退 glesv2（Armbian trixie 只有后者）
-    pkg_check_modules(GLES3 glesv3)
-    if(NOT GLES3_FOUND)
-        pkg_check_modules(GLES3 REQUIRED glesv2)
+    # 交叉编译（CMAKE_CROSSCOMPILING，见 cmake/aarch64-toolchain.cmake）：
+    # Windows 宿主无 pkg-config.exe —— 变量直接指向 device/sysroot（从设备
+    # 拉回的 EGL/GBM/DRM/GLES 头文件 + .so，见 aarch64-toolchain.cmake 注释）
+    if(CMAKE_CROSSCOMPILING)
+        set(SYSROOT "${CMAKE_CURRENT_SOURCE_DIR}/sysroot")
+        set(EGL_INCLUDE_DIRS  "${SYSROOT}/usr/include")
+        set(GLES3_INCLUDE_DIRS "${SYSROOT}/usr/include")
+        set(GBM_INCLUDE_DIRS  "${SYSROOT}/usr/include")
+        # libdrm 头在 usr/include/libdrm/ 子目录（源码 include <drm_fourcc.h> 不带前缀，
+        # 对应设备端 pkg-config libdrm 的 -I/usr/include/libdrm）
+        set(DRM_INCLUDE_DIRS  "${SYSROOT}/usr/include;${SYSROOT}/usr/include/libdrm")
+        set(EGL_LIBRARY_DIRS  "${SYSROOT}/usr/lib/aarch64-linux-gnu")
+        set(GLES3_LIBRARY_DIRS "${SYSROOT}/usr/lib/aarch64-linux-gnu")
+        set(GBM_LIBRARY_DIRS  "${SYSROOT}/usr/lib/aarch64-linux-gnu")
+        set(DRM_LIBRARY_DIRS  "${SYSROOT}/usr/lib/aarch64-linux-gnu")
+        set(EGL_LIBRARIES  EGL)
+        set(GLES3_LIBRARIES GLESv2)
+        set(GBM_LIBRARIES  gbm)
+        set(DRM_LIBRARIES  drm)
+        # cpr/curl/zlib 全静态链入 —— 设备部署只推 dutyon-pet 单文件；
+        # 动态则每次要随二进制推 libcpr.so/libcurl.so/libz.so 并处理 rpath
+        set(BUILD_SHARED_LIBS OFF)
+    else()
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(EGL REQUIRED egl)
+        # DRM/GBM 直渲（无 X11）：gbm 表面 + libdrm 的 CRTC/翻页接口
+        pkg_check_modules(GBM REQUIRED gbm)
+        pkg_check_modules(DRM REQUIRED libdrm)
+        # GLES3 头/库由 glesv2.pc 提供（libGLESv2 含 GLES3 入口）；仅少数发行版
+        # 另附 glesv3.pc，先试 glesv3 再回退 glesv2（Armbian trixie 只有后者）
+        pkg_check_modules(GLES3 glesv3)
+        if(NOT GLES3_FOUND)
+            pkg_check_modules(GLES3 REQUIRED glesv2)
+        endif()
     endif()
     FetchContent_MakeAvailable(cpr json stb)
 endif()
@@ -212,7 +236,6 @@ else()
     #   net/wifi_manager   = AP/client 模式切换状态机 + 内嵌 captive portal(httplib:80)
     #   net/pc_discovery   = UDP 广播发现 PC（设备广播 DUTYON_DISCOVER）
     #   net/device_identity= device_id/pair_code/token 持久化（~/.dutyon/device.json）
-    #   render/qrcodegen   = 自包含 QR 编码器；render/qr_banner = 配网 QR 屏幕渲染
     list(APPEND SOURCES
         src/api/client.cpp
         src/audio/sound_player.cpp
@@ -221,8 +244,6 @@ else()
         src/net/device_identity.cpp
         src/platform/egl_window.cpp
         src/render/gles_context.cpp
-        src/render/qrcodegen.cpp
-        src/render/qr_banner.cpp
         src/render/photo_player.cpp
         src/render/text_renderer.cpp
         src/ui/task_panel.cpp)

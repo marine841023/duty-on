@@ -77,6 +77,10 @@ struct PetStatus {
     // flipHorizontal）：设备端同步翻转 Live2D/GIF 角色与 PC 保持一致。
     // 翻转在逻辑场景内进行，与整屏旋转合成正交、可叠加
     bool flip_horizontal = false;
+    // PC 下发的"重新配网"指令序号（换 WiFi 场景；/api/status deviceCmd）：
+    // 非空且与上次执行的不同 = 需清 Wi-Fi 凭据重进配网模式。ApiClient 收到
+    // 即自动 POST /api/cmd-ack 回执，执行由 main.cpp 消费 status 时触发
+    std::string reset_wifi_cmd;
 };
 
 // 与 PC 端 /api/metrics 返回的 MetricsSnapshot 对应

@@ -85,6 +85,7 @@ struct TextRenderer::Impl {
     std::vector<unsigned char> font_buf;  // stbtt_fontinfo 只存指针，须同生命周期
     stbtt_fontinfo font;
     bool loaded = false;
+    float spacing = 1.0f;  // 字距缩放（<1 收紧排版，配网页大字用）
 
     GLuint tex = 0;
     GLuint program = 0;
@@ -286,7 +287,7 @@ float TextRenderer::measureWidth(const std::string& text_utf8,
                                                    (int)prev, gi) * scale;
         int adv = 0, lsb = 0;
         stbtt_GetGlyphHMetrics(&impl_->font, gi, &adv, &lsb);
-        pen += adv * scale;
+        pen += adv * scale * impl_->spacing;
         prev = gi;
     }
     return pen;
@@ -298,6 +299,11 @@ float TextRenderer::lineHeight(float pixel_size) const {
     stbtt_GetFontVMetrics(&impl_->font, &ascent, &descent, &lgap);
     const float scale = stbtt_ScaleForPixelHeight(&impl_->font, pixel_size);
     return (float)(ascent - descent) * scale;
+}
+
+void TextRenderer::setSpacing(float scale) {
+    // 常规保护：极端值回落默认，防止排版错乱
+    impl_->spacing = (scale > 0.5f && scale < 2.0f) ? scale : 1.0f;
 }
 
 void TextRenderer::draw(const std::string& text_utf8, float x, float y,
@@ -340,7 +346,7 @@ void TextRenderer::draw(const std::string& text_utf8, float x, float y,
                                x1, yt, gl->u1, gl->v0,
                                x0, yt, gl->u0, gl->v0});
         }
-        pen += gl->advance;
+        pen += gl->advance * impl_->spacing;
         prev = cp;
     }
     if (v.empty()) return;

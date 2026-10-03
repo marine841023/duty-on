@@ -37,6 +37,10 @@ public:
     // 行高（ascent - descent，用于垂直居中）
     float lineHeight(float pixel_size) const;
 
+    // 字距缩放（默认 1.0；<1 收紧字距 —— 大字排版更紧凑、同样行宽能容
+    // 更大字号）。measureWidth/draw 同步生效，居中测量一致
+    void setSpacing(float scale);
+
 private:
     struct Impl;
     Impl* impl_;

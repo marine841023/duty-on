@@ -37,6 +37,11 @@ static std::optional<PetStatus> FetchStatus(cpr::Session& session, int* http_cod
         s.utc_offset_min = j.value("utcOffset", 0);
         s.sound_mute = j.value("soundMute", false);
         s.welcome_seq = j.value("welcomeSeq", 0LL);
+        // PC 下发的设备指令（目前仅"重新配网"）：收到即由 run() 自动回执，
+        // main.cpp 消费 status 时比对序号执行（同号不重复执行）
+        if (j.contains("deviceCmd") && j["deviceCmd"].is_object() &&
+            j["deviceCmd"].value("type", std::string{}) == "reset-wifi")
+            s.reset_wifi_cmd = j["deviceCmd"].value("id", std::string{});
         if (j.contains("activeAudio") && j["activeAudio"].is_object()) {
             for (auto it = j["activeAudio"].begin(); it != j["activeAudio"].end();
                  ++it)
@@ -196,6 +201,21 @@ struct ApiClient::Impl {
         }
     }
 
+    // POST /api/cmd-ack {id}：指令回执，PC 收到即清除挂起指令。失败不清：
+    // PC 端指令还在，下轮 status 会重复下发 deviceCmd，本端 ack 幂等
+    void ackDeviceCmd(const std::string& base, const std::string& cmd_id) {
+        try {
+            cpr::Header h{{"Content-Type", "application/json"}};
+            if (const std::string tok = snapshotToken(); !tok.empty())
+                h["X-DutyOn-Token"] = tok;
+            cpr::Post(cpr::Url{base + "/api/cmd-ack"}, h,
+                      cpr::Body{nlohmann::json{{"id", cmd_id}}.dump()},
+                      cpr::ConnectTimeout{1000}, cpr::Timeout{3000},
+                      cpr::Proxies{{"http", ""}, {"https", ""}});
+        } catch (...) {
+        }
+    }
+
     // 主线程与工作线程共享的缓存（seq 防止重复消费同一条数据）
     std::mutex mtx;
     PetStatus status{};
@@ -262,6 +282,10 @@ struct ApiClient::Impl {
                 last_status = now;
                 int code = 0;
                 if (auto s = FetchStatus(status_session, &code)) {
+                    // 收到"重新配网"指令：先回执再入缓存（PC 清挂起；执行
+                    // 由主线程消费 status 时触发，断网重进配网不影响本线程）
+                    if (!s->reset_wifi_cmd.empty())
+                        ackDeviceCmd(url, s->reset_wifi_cmd);
                     std::lock_guard<std::mutex> lk(mtx);
                     status = *s;
                     status_seq++;
