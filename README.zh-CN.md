@@ -2,104 +2,128 @@
 
 <img src="docs/assets/hero.png" alt="Duty On" width="720"/>
 
-# 开工啦 (Duty On) - Live2D 桌面精灵监控
+# 开工啦 (Duty On) · AI 任务桌宠 + 桌面陪伴屏
 
 **让喜欢的角色替你盯梢——AI 在忙什么，一眼就知道。**
 
 [English](README.md) · **简体中文**
 
-### 🚀 v2.0.8 — 自定义角色 + 设备端动态布局
+### 🚀 v2.0 — 原生 C++ 桌宠 + 硬件陪伴屏
 
 > **为中国 Trae 用户量身打造** — 原生 Trae CN / TraeCode CN 窗口标题识别，
-> 自动剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역），
-> 8 种语言、简体中文优先。
+> 自动剥离多根工作区后缀，8 种语言、简体中文优先。
 >
-> **v2.0：** 整个应用重写为**单个原生 C++ 进程**——无 WebView、无浏览器运行时、
-> 无 Rust 后端。一个 `dutyon-pet.exe` 内嵌 HTTP 服务器、状态机、IDE 扫描器和
-> 系统指标采样，用 GLFW + OpenGL + Cubism SDK 原生渲染 Live2D / GIF 精灵。
-> 与 1.x 可交替安装（共用 `~/.dutyon` 配置），也是移植到低成本 ARM 硬件设备的代码基线。
+> **桌面端：** 整个应用是**单个原生 C++ 进程**——无 WebView、无浏览器运行时。
+> 一个 `dutyon-pet.exe` 内嵌 HTTP 服务器、状态机、IDE 扫描器和系统指标采样，
+> 用 GLFW + OpenGL + Cubism SDK 原生渲染 Live2D / GIF 精灵，
+> 挂着精灵实测内存 ~116MB（1.x WebView 版 ~465MB）。
 >
-> **v2.0.8 更新：** 支持自定义角色——为 sleeping / working / alert 三个状态
-> 分别上传 GIF / PNG / JPG 动画并在宠物菜单中管理。硬件屏：未连上电脑开机
-> 直接进入电子相框模式；屏幕角落新增 Wi-Fi 连接状态信号图标（绿=已连上 /
-> 红=未连接）；多任务模式按任务数动态分屏、角色垂直居中。右键菜单高度
-> 按内容自适应。
->
-> **v2.0.7：** IDE 繁忙时项目检测不再闪断，状态动作即时切换（打断旧动作）。
-> 设备端：任务事件提示音（PCM 合成，无需音频文件）与紧凑任务卡片 UI。
->
-> **v2.0.5：** 修复安装版 Live2D 精灵不显示——安装包此前遗漏了
-> Cubism 运行时所需的 `FrameworkShaders` 着色器目录。
->
-> **v1.3.x 系列（WebView 版，支持 macOS/Linux）：** 仍在 `master` 分支维护——
-> 最新 [v1.3.3](https://github.com/marine841023/duty-on/releases/tag/v1.3.3)。
->
-> 下载 v2.0.8 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.8/DutyOn-v2.0.8.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.8/DutyOn-v2.0.8.zip)
+> **硬件设备端（新）：** 同一套 C++ 代码构建的**桌面 AI 任务陪伴屏**——
+> 一块小屏立在桌上，Live2D 角色实时演出电脑上所有 AI 会话的状态
+> （💤 睡觉 / ⚡ 忙碌 / 🔔 提醒）+ 底部任务清单 + 时钟。
+> ARM Linux（DRM/GBM 直渲，无 X11）+ Wi-Fi 配网 + 6 位配对码与电脑配对，
+> 未连电脑时自动切换电子相框模式。
+
+**最新版本下载**
+| 平台 | 下载 |
+|---|---|
+| 🖥 Windows 桌面版 v2.0.10 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
+| 📟 设备端源码 | [v2.0-dev 分支](https://gitee.com/megrezsoft/duty-on/tree/v2.0-dev) `device/` 目录（交叉编译，见下文"设备端构建"） |
 
 </div>
 
 ---
 
+## 它是什么？
+
 同时开着好几个 IDE 跑 AI 任务，还要不停 Alt-Tab 检查它们是在干活、干完了、还是卡在等你确认？
-「开工啦」是一个透明悬浮的 Live2D 小人儿，**为中国 Trae 用户量身打造**，
-把所有 **Trae** / Qoder / Cursor / Codex / OpenCode 会话的实时状态浓缩在一个表情上：
+「开工啦」把所有 **Trae** / Qoder / Cursor / Codex / OpenCode 会话的实时状态浓缩在一个表情上：
 
 - 💤 **睡觉**：所有 IDE 空闲时，精灵闭眼睡觉，飘出 ZZZ
 - ⚡ **忙碌**：有 AI 任务正在执行时，精灵睁眼专注工作
 - 🔔 **提醒**：需要你确认操作时，精灵抖动并弹出感叹号
 
-v2.0 是**单个原生 C++ 进程**：内嵌 HTTP 服务器 + 状态机 + IDE 扫描 + 系统指标采样，
-精灵用 GLFW + OpenGL + Live2D Cubism SDK（或 GIF 精灵）原生渲染。
-无 WebView、无浏览器运行时——同一套代码可构建低成本 ARM Linux 硬件设备版本。
+**两种形态，一套代码：**
 
-## 功能
+| | 🖥 桌面版（Windows） | 📟 设备版（ARM Linux 硬件屏） |
+|---|---|---|
+| 形态 | 桌面透明悬浮 Live2D/GIF 精灵 | 独立小屏（竖屏 480×800 / 横屏 800×480） |
+| 渲染 | GLFW + OpenGL + ImGui | DRM/GBM 直渲 GLES3（无 X11） |
+| 联动 | 本地内嵌后端直连 | Wi-Fi 轮询 PC 端 `/api/status` |
+| 角色与配置 | `~/.dutyon/` 共享 | 自动从 PC 同步角色/模型/音频 |
+| 附加 | 状态栏、系统监控、迷你模式 | 任务清单 + 时钟 + 电子相框模式 |
 
-- **🎬 自定义 GIF 角色**：用任意 **GIF / PNG / JPG / WebP / MP4 / WebM** 文件创建专属桌宠！
-  为每个状态（💤 睡觉 / ⚡ 忙碌 / 🔔 提醒）分别上传动画，随时可重新上传替换。
-  无需 Live2D 模型——选个 GIF 就能让桌宠活过来。大图自动缩放（最大 1024px）；
-  缓存失效机制确保重新上传后一定显示新动画。
-- **Live2D 精灵**：浮在桌面最顶层的透明无边框窗口，支持拖拽移动、位置记忆
-- **状态栏**：精灵下方显示所有已连接的 IDE 项目及状态，带 T/Q/C/X/O 徽章区分 Trae/Qoder/Cursor/Codex/OpenCode
-- **点击跳转**：点击状态栏中的项目名，自动激活对应的 IDE 窗口
-- **多 IDE 支持**：同时监控多个 **Trae** / Qoder / Cursor / Codex / OpenCode 实例，5 种 IDE 各有原生 Hook 集成
-- **智能点击穿透**：光标落在模型/菜单上时可点击，其余区域鼠标事件穿透到下层窗口
-- **迷你模式**：一键缩小为 130×210 的桌面角落小伙伴（菜单切换，双向还原）
-- **高清渲染**：超采样渲染（2x 分辨率缓冲），高 DPI 屏幕下边缘锐利
-- **21 个内置动作**：点击精灵随机触发，菜单可点播任意动作，状态机自动联动
-- **自定义 Live2D 模型**：把任意 Cubism 4 模型放进 `~/.dutyon/live2d/` 即可在菜单中切换
+## 📟 硬件设备版（重点介绍）
+
+一块低成本 ARM 板（如 Orange Pi Zero 2W，H616 四核 A53）接一块小屏，
+就是一台**桌面 AI 任务陪伴屏**：
+
+- **实时状态演出**：Live2D 角色按 PC 上所有 AI 会话的聚合状态切换动作
+  （睡觉 / 工作 / 提醒），任务事件带提示音
+- **两段式布局**：上段 Live2D 角色演出区，下段任务清单（每行项目名 +
+  状态徽章）；多任务时按任务数动态分屏、角色垂直居中
+- **时钟 + 状态图标**：主题色时钟/日期，右上角 Wi-Fi / PC 连接图标
+  （断链时图标叠红色大叉，一眼可辨）
+- **Wi-Fi 配网**：设备开机即建热点（`DutyOn-XXXX`），手机连接后
+  **自动弹出配网页**（captive portal）选家中 Wi-Fi，全程无需键盘；
+  PC 端可下发"重新配网"指令切换网络
+- **配对与同步**：屏幕显示 6 位配对码，PC 端右键宠物 → 设备 → 配对设备
+  输入即完成配对；角色、Live2D 模型、状态音频自动从 PC 同步
+- **电子相框模式**：未连电脑开机自动进入照片轮播；连上后切回任务屏
+- **声音**：HDMI 输出，任务开始/结束/提醒各有提示音，可绑定自定义音频
+
+### 设备端构建（本地交叉编译）
+
+Windows 宿主本地交叉编译，产物直推设备，无需设备端编译：
+
+```bash
+# 1. 放置 Arm GNU 13.2 工具链到 tools/cross/（见 device/cmake/aarch64-toolchain.cmake 注释）
+# 2. 从设备拉回 sysroot（EGL/GLES/GBM/DRM 头与库）到 device/sysroot/
+# 3. 配置 + 构建（产物：device/build-cross/dutyon-pet，单文件 ~14MB）
+cmake -G Ninja -S device -B device/build-cross ^
+  -DCMAKE_TOOLCHAIN_FILE=device/cmake/aarch64-toolchain.cmake ^
+  -DCMAKE_BUILD_TYPE=Release -DCPR_ENABLE_SSL=OFF
+cmake --build device/build-cross -j
+# 4. 推送部署（scp → 设备 deploy.sh → 重启服务，约 1 分钟）
+powershell .userdata/deploy-cross.ps1
+```
+
+> 硬件参考：Orange Pi Zero 2W（H616）+ Debian 13 + HDMI 屏。
+> Cubism Native SDK 需手动放置到 `device/third_party/CubismNativeSdk/`。
+
+## 🖥 桌面版功能
+
+- **🎬 自定义 GIF 角色**：任意 **GIF / PNG / JPG / WebP / MP4 / WebM** 创建专属桌宠，
+  每个状态（💤 / ⚡ / 🔔）分别上传动画，随时替换
+- **自定义 Live2D 模型**：任意 Cubism 4 模型放进 `~/.dutyon/live2d/` 即可在菜单切换
+- **多 IDE 监控**：同时监控多个 **Trae** / Qoder / Cursor / Codex / OpenCode 实例，
+  5 种 IDE 各有原生 Hook 集成
+- **状态栏**：精灵下方显示所有 IDE 项目及状态，点击项目名跳转对应 IDE 窗口
+- **迷你模式**：一键缩小为 130×210 桌面角落小伙伴
+- **智能点击穿透**：光标在模型/菜单上时可交互，其余区域穿透到下层窗口
+- **高清渲染**：2x 超采样，高 DPI 屏幕边缘锐利
 - **多语言**：简中/繁中/英/日/韩/法/德/西（自动跟随系统语言）
-- **开机自启**：菜单一键开关（Windows 注册表）
+- **开机自启**：菜单一键开关
 
 ## 内存占用：实测数字
-
-同一台机器、同样挂着 Live2D 精灵的实测结果：
 
 | 版本 | 进程构成 | 工作集合计 | 私有内存合计 |
 |------|----------|-----------|-------------|
 | 1.x（WebView 架构） | duty-on.exe（~70MB）+ 6 个 WebView2 浏览器进程（~396MB） | ~465MB | ~195MB |
 | **2.0（原生 C++）** | **dutyon-pet.exe 单进程，无任何隐藏进程** | **~116MB** | **~114MB** |
 
-> **勘误：** 1.x 时代的文案曾宣传"内存仅 ~80MB"，那只统计了主进程，
-> 没有算上 WebView2 运行时拉起的整组浏览器进程，实际总占用是宣传数字的
-> 数倍，是我们当时的疏忽，特此说明。2.0 用 GLFW + OpenGL 原生渲染彻底
-> 移除了 WebView2——任务管理器里只有一个进程，占用所见即所得，
-> 实际总占用真实下降一半以上。
+> **勘误：** 1.x 时代的文案曾宣传"内存仅 ~80MB"，那只统计了主进程。
+> 2.0 用 GLFW + OpenGL 原生渲染彻底移除 WebView2，占用所见即所得。
 
-## 快速开始
+## 快速开始（桌面版）
 
 ### 方式一：下载安装包（推荐）
 
-从 GitHub [Releases](https://github.com/marine841023/duty-on/releases) 或 Gitee [Releases](https://gitee.com/megrezsoft/dutyo/releases) 下载 **`.zip`** 压缩包，
-解压后运行里面的 `DutyOn_<版本>_x64-setup.exe` 安装（当前用户安装，含简/繁中/英/日/韩语言选择）。
-采用 ZIP 分发以避免 Windows SmartScreen 拦截未签名 exe。
-从 1.x 升级？安装器会自动定位原有安装目录，并共用 `~/.dutyon` 里的配置、GIF 形象和模型。
+从 GitHub [Releases](https://github.com/marine841023/duty-on/releases) 或 Gitee [Releases](https://gitee.com/megrezsoft/duty-on/releases) 下载 **`.zip`** 压缩包，
+解压后运行 `DutyOn_<版本>_x64-setup.exe` 安装（含语言选择与开机自启选项）。
+从 1.x 升级？共用 `~/.dutyon` 配置、GIF 形象和模型。
 
 ### 方式二：从源码构建
-
-环境要求：CMake 3.16+、Visual Studio 2022（MSVC），以及
-[Live2D Cubism Native SDK](https://www.live2d.com/sdk/download/native/)
-（放到 `device/third_party/CubismNativeSdk/`，因许可协议不在仓库内分发）。
-其余依赖（GLFW、nlohmann/json、stb、Dear ImGui、FreeType）由 CMake 自动拉取。
 
 ```bash
 git clone -b v2.0-dev https://github.com/marine841023/duty-on.git
@@ -109,36 +133,32 @@ cmake --build build --config Release --target dutyon-pet
 # NSIS 安装包：powershell ../tools/build-package.ps1
 ```
 
+需要 [Live2D Cubism Native SDK](https://www.live2d.com/sdk/download/native/)
+（放到 `device/third_party/CubismNativeSdk/`，因许可协议不在仓库内分发）。
+其余依赖由 CMake 自动拉取。
+
 ### 安装 Hook 集成
 
-右键精灵菜单 → **安装 Hook 集成**，
-然后**重启 IDE 或开启新的 AI 会话**即可生效。
-桥接脚本：`hooks/trae-hook-bridge.ps1`（Windows）、`hooks/trae-hook-bridge.sh`（macOS/Linux）。
+右键精灵菜单 → **安装 Hook 集成**，然后**重启 IDE 或开启新的 AI 会话**即可生效。
 
 ## 工作原理
 
 ```
 ┌─────────────────────────────────────────────┐
 │  dutyon-pet.exe (单个原生 C++ 进程)          │
-│  ┌───────────────────────────────────────┐  │
-│  │  原生客户端: GLFW + OpenGL             │  │
-│  │  Live2D Cubism SDK / GIF 精灵         │  │
-│  │  状态: 💤 睡觉 / ⚡ 忙碌 / 🔔 提醒     │  │
-│  │  Dear ImGui 菜单 / 状态栏 /           │  │
-│  │  系统监控面板                         │  │
-│  ├───────────────────────────────────────┤  │
-│  │  内嵌后端:                             │  │
-│  │  · 状态机 (多会话追踪 + 超时清理)       │  │
-│  │  · HTTP Server (127.0.0.1:17521)      │  │
-│  │  · IDE 窗口扫描 + Hook 安装           │  │
-│  │  · CPU/内存/GPU/网络 采样             │  │
-│  └───────────────────────────────────────┘  │
-└──────────────────┬──────────────────────────┘
-                   │ HTTP POST /hook (localhost)
-   ┌───────┬───────┼───────┬───────┬───────┐
-┌──┴──┐ ┌──┴──┐ ┌──┴──┐ ┌──┴──┐ ┌──┴────┐
-│Trae │ │Qoder│ │Cursor│ │Codex│ │OpenCode│
-└─────┘ └─────┘ └─────┘ └─────┘ └───────┘
+│  ┌─────────────────────────────┬───────────┐│
+│  │ 桌面客户端: GLFW + OpenGL    │ 设备端:    ││
+│  │ Live2D/GIF · ImGui 菜单     │ DRM/GBM   ││
+│  │ 状态: 💤 / ⚡ / 🔔          │ GLES3 直渲││
+│  ├─────────────────────────────┴───────────┤│
+│  │ 内嵌后端: 状态机 · HTTP Server ·         ││
+│  │ IDE 扫描 + Hook 安装 · 指标采样           ││
+│  └────────────┬───────────────┬────────────┘│
+└───────────────┼───────────────┼─────────────┘
+                │ /hook         │ /api/status 轮询 (Wi-Fi)
+   ┌────┬────┬──┴──┬────┬────┐ ┌─────────────┐
+   │Trae│Qoder│Cursor│Codex│OC │ │ 📟 硬件屏    │
+   └────┴────┴──────┴────┴───┘ └─────────────┘
 ```
 
 ### Hook 事件映射
@@ -150,88 +170,29 @@ cmake --build build --config Release --target dutyon-pet
 | `PreToolUse` / `PostToolUse` | AI 工具执行前/后 | → 忙碌 (working) |
 | `Notification` | 需要用户确认 | → 提醒 (alert) |
 | `Stop` | AI 完成任务 | → 空闲 (idle) |
-| `PreToolUse`(AskUserQuestion) _(Qoder)_ | Qoder 弹出问答 | → 提醒 (alert) |
-| `PermissionRequest` _(Qoder)_ | Qoder 请求权限 | → 提醒 (alert) |
-| `PermissionRequest` _(Codex)_ | Codex CLI 请求权限 | → 提醒 (alert) |
-| `permission.ask` _(OpenCode)_ | OpenCode 请求权限 | → 提醒 (alert) |
 
-整体状态优先级：alert > working > sleeping。模糊 `Notification` 默认按"任务完成"处理
-（白名单见 [`device/src/backend/backend_config.h`](device/src/backend/backend_config.h)）。
-
-## 自定义 GIF 角色（v1.3.0+）
-
-没有 Live2D 模型？没问题！用任意 **GIF / PNG / MP4** 文件创建专属桌宠：
-
-1. 右键精灵 → **切换形象** → **+ 新建形象**
-2. 输入名字后，为每个状态上传动画：
-   - 💤 **睡觉**（空闲）——没有 AI 任务时显示
-   - ⚡ **忙碌**——AI 任务执行中显示
-   - 🔔 **提醒**——需要确认操作时显示
-3. 点击自定义角色上的 **✎** 可随时重新上传动画
-
-支持格式：GIF（动画）、PNG/JPG/WebP（静态图）、MP4/WebM/MOV（视频）。
-大图自动缩放至最大 1024px，保持轻量。文件存储在 `~/.dutyon/animations/<角色ID>/`。
-
-## 自定义 Live2D 模型
-
-把模型目录放到 `~/.dutyon/live2d/<名字>/`（含 `<名字>.moc3` + 贴图 + `model3.json` + 动作），
-精灵菜单的"切换形象"里立刻就能看到（原生客户端直接从磁盘加载，无需重启）。
-
-## 测试
-
-```bash
-cd device
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --target dutyon-pet
-```
-
-端到端回归脚本（需先启动精灵）：`.userdata/test-notification.ps1`。
-
-## API 接口
-
-本地 HTTP 服务器 (`http://127.0.0.1:17521`)：
-
-| 接口 | 方法 | 说明 |
-|------|------|------|
-| `/hook` | POST | 接收 Hook 事件 |
-| `/status` | GET | 当前状态快照（1.x 兼容格式） |
-| `/api/status` | GET | 状态快照（2.0 原生格式） |
-| `/api/metrics` | GET | CPU / 内存 / GPU / 网络实时指标 |
-| `/api/events` | GET | 事件流（SSE） |
-| `/health` | GET | 健康检查 |
-| `/unregister` | POST | 注销会话 |
-| `/api/hooks` · `/api/hooks/install` | GET/POST | Hook 安装状态 / 触发安装 |
-| `/api/autostart` | GET/POST | 开机自启开关 |
-| `/api/quit` | POST | 退出程序 |
-
-## 技术栈
-
-- **C++20 单进程架构** — 原生客户端 + 内嵌后端，无 WebView / 浏览器运行时
-- **GLFW + OpenGL + Dear ImGui (FreeType)** — 窗口、渲染与 UI
-- **Live2D Cubism Native SDK** — Live2D 模型渲染
-- **cpp-httplib + nlohmann/json** — 内嵌 HTTP 服务器与事件处理
-- **Trae / Qoder / Cursor / Codex / OpenCode Hooks** — 5 种 IDE 的 AI 生命周期事件钩子
+整体状态优先级：alert > working > sleeping。
 
 ## 常见问题
 
 **Q: 精灵不显示 Live2D 模型？**
-A: 菜单 → "Hook 状态" / `http://127.0.0.1:17521/health` 排查进程状态；
+A: 菜单 → "Hook 状态" / `http://127.0.0.1:17521/health` 排查；
 自定义模型需确认目录结构完整（`model3.json` + `.moc3` + 贴图 + 动作）。
 
 **Q: Hook 安装后没有反应？**
-A: 确保重启了 IDE 或开启了新的 AI 会话；菜单 → "Hook 状态"可查看诊断，
-事件落盘日志在 `~/.dutyon/hook-received.log`。
-
-**Q: 精灵一直显示睡觉？**
-A: 检查 `http://127.0.0.1:17521/health` 是否存活，并确认 Hook 已安装。
-
-**Q: AI 完成了却显示"需要确认"？**
-A: 模糊 Notification 默认按完成处理；确认类型白名单见
-`device/src/backend/backend_config.h`（`kNotificationConfirmTypes`）。
+A: 确保重启了 IDE 或开启了新的 AI 会话；事件日志在 `~/.dutyon/hook-received.log`。
 
 **Q: 从 1.x 升级后配置还在吗？**
-A: 在。两版本共用 `~/.dutyon/config.json` 与形象/模型目录；安装器会自动
-装回原目录，可与 1.x 交替安装。
+A: 在。两版本共用 `~/.dutyon/config.json` 与形象/模型目录。
+
+## 技术栈
+
+- **C++20 单进程架构** — 桌面端 + 设备端共用核心，无 WebView
+- **GLFW + OpenGL + Dear ImGui (FreeType)** — 桌面端窗口与渲染
+- **DRM/GBM + GLES3** — 设备端无 X11 直渲
+- **Live2D Cubism Native SDK** — Live2D 模型渲染（两端共用）
+- **cpp-httplib + nlohmann/json + cpr** — HTTP 服务器与设备轮询
+- **Trae / Qoder / Cursor / Codex / OpenCode Hooks** — 5 种 IDE 事件钩子
 
 ## 许可证
 

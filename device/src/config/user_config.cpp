@@ -362,6 +362,40 @@ void UserConfigStore::savePairedDevices(
     });
 }
 
+std::pair<std::string, std::string> UserConfigStore::loadPendingDeviceCmd() {
+    // 挂起的设备指令 { deviceId, id }（PC 重启不丢：设备上线轮询时下发）
+    std::pair<std::string, std::string> out;
+    std::ifstream in(configPath());
+    if (!in) return out;
+    json j;
+    try {
+        in >> j;
+    } catch (...) {
+        return out;
+    }
+    if (!j.is_object()) return out;
+    if (auto it = j.find("pendingDeviceCmd");
+        it != j.end() && it->is_object()) {
+        if (auto d = it->find("deviceId"); d != it->end() && d->is_string())
+            out.first = d->get<std::string>();
+        if (auto i = it->find("id"); i != it->end() && i->is_string())
+            out.second = i->get<std::string>();
+    }
+    return out;
+}
+
+void UserConfigStore::savePendingDeviceCmd(const std::string& deviceId,
+                                           const std::string& cmdId) {
+    // 空 deviceId = 清除挂起指令（擦掉字段）
+    updateConfig([&](json& j) {
+        if (deviceId.empty() || cmdId.empty()) {
+            j.erase("pendingDeviceCmd");
+            return;
+        }
+        j["pendingDeviceCmd"] = json{{"deviceId", deviceId}, {"id", cmdId}};
+    });
+}
+
 void UserConfigStore::saveCustomCharacters(const UserConfig& cfg) {
     // 设备端从 PC 下载新自定义形象后整体覆写该数组（camelCase 同 1.x serde）
     updateConfig([&](json& j) {

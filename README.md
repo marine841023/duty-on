@@ -2,7 +2,7 @@
 
 <img src="docs/assets/hero.png" alt="Duty On" width="720"/>
 
-# Duty On · 开工啦
+# Duty On · 开工啦 — AI Task Pet + Desk Companion Screen
 
 **Your favorite character watches your AI IDE, so you don't have to.**
 
@@ -11,127 +11,145 @@
 [![Built with C++](https://img.shields.io/badge/C%2B%2B-native%20%7C%20no%20WebView-00599C?logo=cplusplus&logoColor=white)]()
 [![Release](https://img.shields.io/github/v/release/marine841023/duty-on)](https://github.com/marine841023/duty-on/releases)
 
-### 🚀 v2.0.8 — Custom characters + dynamic device layout
+**English** · [简体中文](README.zh-CN.md)
+
+### 🚀 v2.0 — Native C++ desktop pet + hardware companion screen
 
 > **Made for Chinese Trae users** — native Trae CN / TraeCode CN window-title
-> detection, multi-root workspace suffix stripping (工作区 / Workspace /
-> ワークスペース / 작업 영역), 8 languages with Simplified Chinese first.
+> detection, multi-root workspace suffix stripping, 8 languages with
+> Simplified Chinese first.
 >
-> **v2.0:** the whole app is now a **single native C++ process** — no
-> WebView, no browser runtime, no Rust backend. One `dutyon-pet.exe`
-> embeds the HTTP server, state machine, IDE scanner and metrics sampler,
-> and renders Live2D/GIF pets natively with GLFW + OpenGL + Cubism SDK.
-> Installs side-by-side with 1.x (shared `~/.dutyon` config), and is the
-> codebase we port to low-cost ARM hardware devices.
+> **Desktop:** the whole app is a **single native C++ process** — no WebView,
+> no browser runtime. One `dutyon-pet.exe` embeds the HTTP server, state
+> machine, IDE scanner and metrics sampler, and renders Live2D/GIF pets
+> natively with GLFW + OpenGL + Cubism SDK (~116 MB measured with a Live2D
+> pet on screen, vs ~465 MB for the 1.x WebView version).
 >
-> **New in v2.0.8:** create your own characters — upload GIF / PNG / JPG
-> animations for the sleeping / working / alert states and manage them
-> from the pet's menu. On the hardware display: boots straight into
-> photo-frame mode when not connected to a PC, a tiny Wi-Fi signal icon in the
-> corner shows link status (green connected / red disconnected), and multi-task
-> mode now splits the screen dynamically by task count with the character
-> vertically centered. Right-click menu height is content-fitted.
->
-> **v2.0.7:** project detection hardened against busy IDEs, and state
-> motions now switch instantly (old looping motion is force-interrupted).
-> Device: task-event chimes (PCM synthesized, no audio files) and a compact
-> task-card UI.
->
-> **v2.0.5:** fixed Live2D pets rendering blank in installed builds — the
-> installer was missing the Cubism runtime's `FrameworkShaders` directory.
->
-> **v1.3.x line (WebView-based, macOS/Linux):** still maintained on the
-> `master` branch — latest [v1.3.3](https://github.com/marine841023/duty-on/releases/tag/v1.3.3).
->
-> Download v2.0.8 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v2.0.8/DutyOn-v2.0.8.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v2.0.8/DutyOn-v2.0.8.zip)
+> **Hardware device (new):** a **desk companion screen for AI tasks** built
+> from the same C++ codebase — a small display that shows a Live2D character
+> acting out the live status of every AI session on your PC (💤 sleeping /
+> ⚡ working / 🔔 alert) plus a task list and clock. ARM Linux (DRM/GBM
+> direct rendering, no X11), Wi-Fi provisioning with a captive portal,
+> 6-digit pairing code with the PC, and an automatic photo-frame mode when
+> the PC is away.
 
-**English** · [简体中文](README.zh-CN.md)
+**Downloads**
+| Platform | Link |
+|---|---|
+| 🖥 Windows desktop v2.0.10 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
+| 📟 Device source | [v2.0-dev branch](https://github.com/marine841023/duty-on/tree/v2.0-dev), `device/` dir (cross-compiled — see "Device build" below) |
 
 </div>
 
 ---
 
+## What is it?
+
 Running AI agents in several IDE windows at once? Stop Alt-Tabbing to check
 whether they're still working, done, or waiting for your confirmation.
-**Duty On** is a tiny transparent Live2D character that floats above your
-desktop and shows the live status of every **Trae** / Qoder / Cursor / Codex / OpenCode
-session at a glance. **Made for Chinese Trae users**, with native Trae CN /
-TraeCode CN title detection and Simplified Chinese as a first-class language:
+**Duty On** condenses the live status of every **Trae** / Qoder / Cursor /
+Codex / OpenCode session into one character:
 
 - 💤 **Sleeping** — everything is idle (she naps, Zzz…)
 - ⚡ **Working** — an AI task is running right now
 - 🔔 **Alert** — an agent needs your confirmation **right now**
 
-v2.0 is a **single native C++ process**: embedded HTTP server + state
-machine + IDE scanner + system-metrics sampler, with the pet rendered
-natively via GLFW + OpenGL + Live2D Cubism SDK (or GIF sprites). No WebView,
-no browser runtime — and the same codebase builds for low-cost ARM Linux
-hardware devices.
+**Two form factors, one codebase:**
 
-## Screenshots
+| | 🖥 Desktop (Windows) | 📟 Device (ARM Linux screen) |
+|---|---|---|
+| Form | transparent floating Live2D/GIF pet | standalone small screen (480×800 portrait / 800×480 landscape) |
+| Rendering | GLFW + OpenGL + ImGui | DRM/GBM direct GLES3 (no X11) |
+| Link | embedded local backend | Wi-Fi polling of the PC's `/api/status` |
+| Characters & config | shared `~/.dutyon/` | auto-synced from the PC (models, audio) |
+| Extras | status bar, system monitor, mini mode | task list + clock + photo-frame mode |
 
-> 📸 Coming soon — see the [screenshot checklist](docs/technical-notes.md)
-> (normal mode · mini mode · context menu · the three states · status-bar jump).
+## 📟 The hardware companion screen
 
-## Features
+A low-cost ARM board (e.g. Orange Pi Zero 2W, H616 quad-core A53) with a
+small display becomes a **desk companion screen for your AI tasks**:
 
-- **🎬 Custom GIF characters** — create your own desktop pet from any **GIF /
-  PNG / JPG / WebP / MP4 / WebM** file! Upload separate animations for each
-  state (💤 sleeping / ⚡ working / 🔔 alert). Re-upload to replace anytime.
-  No Live2D model needed — just pick a GIF and your pet comes alive.
-  Large images auto-resized (max 1024px); cache-busting ensures re-uploads
-  always show the new animation.
-- **Live status at a glance** — one character reflects the aggregate state of
-  all connected IDE sessions (alert > working > sleeping)
-- **Per-project status bar** — every IDE project listed under the pet with a
-  T/Q/C/X/O badge; click a project to focus its IDE window
-- **Multi-IDE** — monitors any number of **Trae** / Qoder / Cursor / Codex / OpenCode instances
-  concurrently (5 IDEs, each with native hook integration)
-- **True click-through** — the window is transparent to the mouse except over
-  the character and menus (30 ms cursor polling, Win32/CoreGraphics/X11)
-- **Mini mode** — shrinks to a 130×210 corner buddy; toggle from the menu
-- **21 built-in motions** — tap the pet, trigger motions from the menu, or let
-  the state machine drive idle/work/alert animations
+- **Live status acting** — the Live2D character switches motions with the
+  aggregate state of all AI sessions on the PC (sleeping / working / alert),
+  with task-event chimes
+- **Two-section layout** — Live2D character on top, task list below (project
+  name + status badge per row); multi-task mode splits dynamically and keeps
+  the character vertically centered
+- **Clock + status icons** — themed clock/date, Wi-Fi / PC link icons in the
+  corner (disconnected icons get a big red X overlay — readable at a glance)
+- **Wi-Fi provisioning** — the device opens a hotspot (`DutyOn-XXXX`) on
+  boot; connect your phone and the **captive portal pops up automatically**
+  to pick your home Wi-Fi. No keyboard needed. The PC can later send a
+  "re-provision" command to switch networks
+- **Pairing & sync** — the screen shows a 6-digit pairing code; enter it on
+  the PC (right-click the pet → Device → Pair). Characters, Live2D models
+  and state audio sync automatically from the PC
+- **Photo-frame mode** — boots into a photo slideshow when no PC is
+  connected; switches back once paired
+- **Sound** — HDMI audio out; start/end/alert chimes per task, with custom
+  audio binding per state
+
+### Device build (local cross-compilation)
+
+Cross-compile on a Windows host and push the binary straight to the device —
+no on-device compiling:
+
+```bash
+# 1. Place the Arm GNU 13.2 toolchain under tools/cross/ (see the notes in
+#    device/cmake/aarch64-toolchain.cmake)
+# 2. Pull a sysroot (EGL/GLES/GBM/DRM headers + libs) from the device into
+#    device/sysroot/
+# 3. Configure + build (output: device/build-cross/dutyon-pet, a single
+#    ~14 MB file)
+cmake -G Ninja -S device -B device/build-cross ^
+  -DCMAKE_TOOLCHAIN_FILE=device/cmake/aarch64-toolchain.cmake ^
+  -DCMAKE_BUILD_TYPE=Release -DCPR_ENABLE_SSL=OFF
+cmake --build device/build-cross -j
+# 4. Deploy (scp -> on-device deploy.sh -> service restart, ~1 minute)
+powershell .userdata/deploy-cross.ps1
+```
+
+> Reference hardware: Orange Pi Zero 2W (H616) + Debian 13 + HDMI display.
+> The Cubism Native SDK must be placed manually at
+> `device/third_party/CubismNativeSdk/`.
+
+## 🖥 Desktop features
+
+- **🎬 Custom GIF characters** — create your own desktop pet from any
+  **GIF / PNG / JPG / WebP / MP4 / WebM** file; upload separate animations
+  per state (💤 / ⚡ / 🔔), replace anytime
 - **Custom Live2D models** — drop any Cubism 4 model into
-  `~/.dutyon/live2d/` and it appears in the menu (no rebuild, no restart of
-  your IDE)
-- **8 languages** — auto-follows the OS locale (简中/繁中/EN/JA/KO/FR/DE/ES)
-- **Autostart** — one-toggle login launch per platform
+  `~/.dutyon/live2d/` and it appears in the menu
+- **Multi-IDE** — monitors any number of **Trae** / Qoder / Cursor / Codex /
+  OpenCode instances (5 IDEs, each with native hook integration)
+- **Per-project status bar** — every project listed under the pet; click a
+  project to focus its IDE window
+- **Mini mode** — shrinks to a 130×210 corner buddy
+- **True click-through** — interactive only over the character and menus
+- **Hi-DPI** — 2x supersampled rendering, crisp edges
+- **8 languages** — auto-follows the OS locale
+- **Autostart** — one-toggle login launch
 
 ## Memory footprint, measured
-
-Same machine, same Live2D pet on screen:
 
 | Version | Processes | Working set (sum) | Private memory (sum) |
 |---------|-----------|-------------------|----------------------|
 | 1.x (WebView) | duty-on.exe (~70 MB) + 6 × WebView2 browser processes (~396 MB) | ~465 MB | ~195 MB |
 | **2.0 (native C++)** | **one dutyon-pet.exe, nothing hidden** | **~116 MB** | **~114 MB** |
 
-> **Correction:** 1.x marketing copy claimed "~80 MB RAM". That figure only
-> counted the main process and ignored the whole WebView2 browser-process
-> group, so real usage was several times higher — our oversight, hereby
-> corrected. 2.0 drops WebView2 entirely (GLFW + OpenGL native rendering):
-> one process in Task Manager, what you see is what it costs, a real
-> reduction of more than half.
+> 2.0 drops WebView2 entirely (GLFW + OpenGL native rendering): one process
+> in Task Manager, what you see is what it costs.
 
-## Install
+## Install (desktop)
 
 ### Download (recommended)
 
 Grab the **`.zip`** from
-GitHub [**Releases**](https://github.com/marine841023/duty-on/releases) or Gitee [**Releases**](https://gitee.com/megrezsoft/dutyo/releases),
-extract it, and run the NSIS installer inside (`DutyOn_<ver>_x64-setup.exe`).
-Distributed as ZIP to bypass Windows SmartScreen on unsigned exe.
-Upgrading from 1.x? The installer auto-detects your existing install
-location and reuses your `~/.dutyon` config, GIF characters and models.
+GitHub [**Releases**](https://github.com/marine841023/duty-on/releases) or Gitee [**Releases**](https://gitee.com/megrezsoft/duty-on/releases),
+extract it, and run the NSIS installer inside. Upgrading from 1.x? The
+installer reuses your `~/.dutyon` config, GIF characters and models.
 
 ### Build from source
-
-Requirements: CMake 3.16+, Visual Studio 2022 (MSVC), and the
-[Live2D Cubism Native SDK](https://www.live2d.com/sdk/download/native/)
-placed at `device/third_party/CubismNativeSdk/` (not redistributed in
-this repo for license reasons). All other dependencies (GLFW, nlohmann/json,
-stb, Dear ImGui, FreeType) are fetched automatically by CMake.
 
 ```bash
 git clone -b v2.0-dev https://github.com/marine841023/duty-on.git
@@ -141,35 +159,33 @@ cmake --build build --config Release --target dutyon-pet
 # NSIS installer: powershell ../tools/build-package.ps1
 ```
 
+Requires the [Live2D Cubism Native SDK](https://www.live2d.com/sdk/download/native/)
+placed at `device/third_party/CubismNativeSdk/` (not redistributed in this
+repo for license reasons). All other dependencies are fetched by CMake.
+
 ### Enable IDE hooks
 
-Right-click the pet → **安装 Hook 集成**, then restart your IDE or start
-a new AI session.
+Right-click the pet → **安装 Hook 集成**, then restart your IDE or start a
+new AI session.
 
 ## How it works
 
 ```
 ┌─────────────────────────────────────────────┐
 │  dutyon-pet.exe (single native C++ process) │
-│  ┌───────────────────────────────────────┐  │
-│  │  Native client: GLFW + OpenGL         │  │
-│  │  Live2D Cubism SDK / GIF sprites      │  │
-│  │  States: 💤 sleep / ⚡ work / 🔔 alert │  │
-│  │  Dear ImGui menus / status bar /      │  │
-│  │  system monitor panel                 │  │
-│  ├───────────────────────────────────────┤  │
-│  │  Embedded backend:                    │  │
-│  │  · State machine (multi-session)      │  │
-│  │  · HTTP server (127.0.0.1:17521)      │  │
-│  │  · IDE window scanner + hooks install │  │
-│  │  · CPU/RAM/GPU/network sampler        │  │
-│  └───────────────────────────────────────┘  │
-└──────────────────┬──────────────────────────┘
-                   │ HTTP POST /hook (localhost)
-   ┌───────┬───────┼───────┬───────┬───────┐
-┌──┴──┐ ┌──┴──┐ ┌──┴──┐ ┌──┴──┐ ┌──┴────┐
-│Trae │ │Qoder│ │Cursor│ │Codex│ │OpenCode│
-└─────┘ └─────┘ └─────┘ └─────┘ └───────┘
+│  ┌─────────────────────────────┬───────────┐│
+│  │ Desktop: GLFW + OpenGL      │ Device:   ││
+│  │ Live2D/GIF · ImGui menus    │ DRM/GBM   ││
+│  │ States: 💤 / ⚡ / 🔔        │ GLES3     ││
+│  ├─────────────────────────────┴───────────┤│
+│  │ Embedded backend: state machine · HTTP  ││
+│  │ server · IDE scanner + hooks · metrics  ││
+│  └────────────┬───────────────┬────────────┘│
+└───────────────┼───────────────┼─────────────┘
+                │ /hook         │ /api/status polling (Wi-Fi)
+   ┌────┬────┬──┴──┬────┬────┐ ┌─────────────┐
+   │Trae│Qoder│Cursor│Codex│OC │ │ 📟 device   │
+   └────┴────┴──────┴────┴───┘ └─────────────┘
 ```
 
 | Hook event | When | Pet state |
@@ -179,56 +195,17 @@ a new AI session.
 | `PreToolUse` / `PostToolUse` | AI tool runs / finishes | → working |
 | `Notification` | confirmation needed | → alert |
 | `Stop` | AI task completed | → idle |
-| `PreToolUse`(AskUserQuestion) *(Qoder)* | Qoder asks the user | → alert |
-| `PermissionRequest` *(Qoder)* | Qoder permission prompt | → alert |
-| `PermissionRequest` *(Codex)* | Codex CLI permission prompt | → alert |
-| `permission.ask` *(OpenCode)* | OpenCode permission prompt | → alert |
 
-Ambiguous `Notification` events default to "task complete" (no alert); the
-whitelist lives in [`device/src/backend/backend_config.h`](device/src/backend/backend_config.h).
-
-## Custom GIF characters (v1.3.0+)
-
-Don't have a Live2D model? No problem! Create a custom pet from any **GIF / PNG /
-MP4** file:
-
-1. Right-click the pet → **切换形象** → **+ 新建形象**
-2. Enter a name, then upload an animation for each state:
-   - 💤 **Sleeping** (idle) — shown when no AI task is running
-   - ⚡ **Working** — shown when an AI task is active
-   - 🔔 **Alert** — shown when confirmation is needed
-3. Click **✎** on any custom character to re-upload animations
-
-Supported formats: GIF (animated), PNG/JPG/WebP (static), MP4/WebM/MOV (video).
-Large images are auto-resized to max 1024px to keep things lightweight.
-Files are stored in `~/.dutyon/animations/<character_id>/`.
-
-## Custom Live2D models
-
-Drop a Cubism 4 model folder into `~/.dutyon/live2d/<name>/`
-(`<name>.moc3` + textures + `model3.json` + motions) — it shows up in the
-pet's **切换形象** menu immediately.
-
-## Development
-
-```bash
-cd device
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --target dutyon-pet
-./build/Release/dutyon-pet.exe
-```
-
-End-to-end regression script (pet must be running):
-`.userdata/test-notification.ps1`.
+Aggregate priority: alert > working > sleeping.
 
 ## Tech stack
 
-C++20 · GLFW · OpenGL · Dear ImGui (FreeType) · Live2D Cubism Native SDK ·
-cpp-httplib · nlohmann/json · stb · Trae / Qoder / Cursor / Codex / OpenCode hooks
+C++20 single-process (desktop + device share the core) · GLFW · OpenGL ·
+Dear ImGui (FreeType) · DRM/GBM + GLES3 (device) · Live2D Cubism Native SDK ·
+cpp-httplib · nlohmann/json · cpr · Trae / Qoder / Cursor / Codex / OpenCode hooks
 
 ## Roadmap
 
-- [ ] ARM Linux hardware-device builds (aarch64 cross-toolchain)
 - [ ] Per-project alert sounds
 - [ ] More IDE integrations (the hook protocol is a plain HTTP POST — PRs welcome)
 - [ ] Community model gallery

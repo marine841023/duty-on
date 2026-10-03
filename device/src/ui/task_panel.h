@@ -62,6 +62,9 @@ public:
     // 时钟字体行高（用于日期行垂直定位；卡通字体加载失败回退主字体行高）
     float clockLineHeight(float pixel_size) const;
 
+    // 字距缩放转发到两套字体（<1 收紧；配网大字页用，渲染后还原 1.0）
+    void setSpacing(float scale);
+
 private:
     struct Impl;
     Impl* impl_;

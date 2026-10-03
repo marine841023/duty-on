@@ -518,6 +518,11 @@ float TaskPanel::clockLineHeight(float pixel_size) const {
     return f.isLoaded() ? f.lineHeight(pixel_size) : pixel_size;
 }
 
+void TaskPanel::setSpacing(float scale) {
+    impl_->text.setSpacing(scale);
+    impl_->clock_font.setSpacing(scale);
+}
+
 void TaskPanel::renderDim(int brightness, int screen_w, int screen_h) {
     // 整屏叠黑色矩形压暗：alpha = 1 - 亮度/100（SRC_ALPHA 混合 =
     // 各像素乘以亮度系数），100% 时直接跳过
@@ -542,18 +547,39 @@ void TaskPanel::renderNetStatus(bool wifi_online, bool pc_online,
     const float x1 = (float)screen_w - 12.f;             // 右边距 12
     const float x0 = x1 - (bar_w * 4.f + bar_gap * 3.f);  // 信号条左缘（宽 18）
 
-    // ---- Wi-Fi 信号条：入网=绿，未入网/配网中=红 ----
+    // 红叉标记：两条对角细长四边形（fillFan 凸四边形）跨整个图标区域。
+    // 系统文字本就是多种主题色，仅靠"图标颜色"区分通断不够醒目 →
+    // 断链一律：图标灰底 + 叠加红叉（状态语义不依赖颜色也能读懂）。
+    const float xr = 0.95f, xg = 0.22f, xb = 0.22f, xa = 0.95f;
+    auto drawX = [&](float bx0, float by0, float bx1, float by1) {
+        const float t = 1.8f;  // 半线宽（整条线宽 3.6px）
+        const float diag[2][4] = {{bx0, by0, bx1, by1},   // 左下 -> 右上
+                                  {bx0, by1, bx1, by0}};  // 左上 -> 右下
+        for (const auto& d : diag) {
+            const float dx = d[2] - d[0], dy = d[3] - d[1];
+            const float len = std::sqrt(dx * dx + dy * dy);
+            if (len < 1.f) continue;
+            const float nx = -dy / len * t, ny = dx / len * t;  // 法向偏移
+            p->fillFan({d[0] + nx, d[1] + ny, d[2] + nx, d[3] + ny,
+                        d[2] - nx, d[3] - ny, d[0] - nx, d[1] - ny},
+                       xr, xg, xb, xa, screen_w, screen_h);
+        }
+    };
+
+    // ---- Wi-Fi 信号条：入网=绿；未入网/配网中=灰底 + 红叉 ----
     {
-        const float r = wifi_online ? 0.25f : 0.95f;
-        const float g = wifi_online ? 0.85f : 0.35f;
-        const float b = wifi_online ? 0.45f : 0.30f;
-        const float a = wifi_online ? 0.95f : 0.85f;
+        const bool off = !wifi_online;
+        const float r = off ? 0.55f : 0.25f;
+        const float g = off ? 0.55f : 0.85f;
+        const float b = off ? 0.58f : 0.45f;
+        const float a = off ? 0.75f : 0.95f;
         static const float kBarH[4] = {6.f, 10.f, 14.f, 18.f};
         for (int i = 0; i < 4; ++i) {
             const float bx0 = x0 + (float)i * (bar_w + bar_gap);
             p->fillRect(bx0, bottom, bx0 + bar_w, bottom + kBarH[i], r, g, b, a,
                         screen_w, screen_h);
         }
+        if (off) drawX(x0, bottom, x1, bottom + box_h);
     }
 
     // ---- PC 显示器图标（信号条左侧，间距 7；镂空屏框 + 支架 + 底座）----
@@ -565,10 +591,11 @@ void TaskPanel::renderNetStatus(bool wifi_online, bool pc_online,
         const float scr_top = bottom + 14.f;   // 屏幕上沿
         const float scr_bot = bottom + 4.f;    // 屏幕下沿
         const float t = 2.f;                   // 屏框线宽
-        const float r = pc_online ? 0.25f : 0.60f;
-        const float g = pc_online ? 0.85f : 0.62f;
-        const float b = pc_online ? 0.45f : 0.66f;
-        const float a = pc_online ? 0.95f : 0.65f;
+        const bool off = !pc_online;
+        const float r = off ? 0.55f : 0.25f;
+        const float g = off ? 0.55f : 0.85f;
+        const float b = off ? 0.58f : 0.45f;
+        const float a = off ? 0.75f : 0.95f;
         // 屏框四边（镂空，中间透出背景）
         p->fillRect(px0, scr_top - t, px1, scr_top, r, g, b, a, screen_w, screen_h);
         p->fillRect(px0, scr_bot, px1, scr_bot + t, r, g, b, a, screen_w, screen_h);
@@ -580,6 +607,7 @@ void TaskPanel::renderNetStatus(bool wifi_online, bool pc_online,
                     screen_w, screen_h);
         p->fillRect(px0 + 3.f, bottom, px1 - 3.f, bottom + 1.f, r, g, b, a,
                     screen_w, screen_h);
+        if (off) drawX(px0, bottom, px1, bottom + box_h);
     }
 }
 

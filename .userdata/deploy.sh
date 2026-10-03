@@ -7,7 +7,7 @@ mkdir -p $DST/assets
 install -m755 $SRC/device/build/dutyon-pet $DST/dutyon-pet
 # Wi-Fi 配网脚本（wifi_manager 运行期按 /opt/dutyon/wifi-*.sh 调用；剥 CRLF 防坏解释器）
 if [ -d $SRC/device/scripts ]; then
-  for s in wifi-ap.sh wifi-client.sh wifi-off.sh; do
+  for s in wifi-ap.sh wifi-client.sh wifi-off.sh arp-keepalive.sh; do
     [ -f $SRC/device/scripts/$s ] && { sed 's/\r$//' $SRC/device/scripts/$s > $DST/$s; chmod 755 $DST/$s; }
   done
 fi

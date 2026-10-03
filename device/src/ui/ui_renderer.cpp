@@ -640,7 +640,6 @@ enum MenuView {
     kMenuCharManage,  // 自定义角色管理列表
     kMenuCharEdit,    // 单个自定义角色的状态动画编辑
     kMenuSound,       // 设备声音管理：完全静音 / 按状态静音
-    kMenuPair,        // 设备配对：待配对列表 + 配对码数字键盘输入
 };
 
 struct UIRenderer::Impl {
@@ -709,7 +708,6 @@ struct UIRenderer::Impl {
     int menu_view = kMenuMain;
     std::string assign_state;  // 动作设定的目标状态（sleeping/working/alert）
     std::string edit_char;     // 角色编辑视图正在编辑的自定义角色 id（char_xxx）
-    std::string pair_code_input;  // 配对视图：物理键盘采集的配对码缓冲
     int hover_motion = -1;     // 动作列表悬停项（预览）
     float menu_h = 0.0f;       // 上一帧菜单实测高（点击关闭区域判定）
     float menu_desired_h = 0.0f;      // 上一帧菜单内容自然高（主循环增高窗口用）
@@ -1542,7 +1540,6 @@ void UIRenderer::openMenu() {
     impl_->menu_open = true;
     impl_->menu_view = kMenuMain;
     impl_->hover_motion = -1;
-    impl_->pair_code_input.clear();
     impl_->menu_desired_h = 0.0f;  // 重新测量，避免沿用上次菜单视图的高度
     // 通知主程序刷新 autostart / hook / 模型目录等缓存（避免菜单内每帧 HTTP）
     if (on_menu_open) on_menu_open();
@@ -2411,12 +2408,13 @@ void UIRenderer::renderMenu() {
             if (p->MenuRow("back", I18n::t("menu.back"), false, false,
                         nullptr, false).clicked)
                 go(kMenuMain);
-            // 配对设备（始终可达：新设备未配对时 device_online_ 为假，
-            // 仍需能进入配对流程输码）
+            // 配对设备：直接弹出深色配对弹窗（见 platform/pair_code_dialog.h，
+            // 未配对=输码 / 已配对=状态+解除配对+清除 Wi-Fi），不进子页。
+            // 始终可达：新设备未配对时 device_online_ 为假，仍需能输码配对。
             if (p->MenuRow("device-pair", I18n::t("menu.pairDevice"), false,
-                        false, nullptr, true).clicked) {
-                p->pair_code_input.clear();
-                go(kMenuPair);
+                        false, nullptr, false).clicked) {
+                activate("pair-input");
+                closeMenu();
             }
             p->MenuDivider();
             if (!device_online_) {
@@ -2619,92 +2617,6 @@ void UIRenderer::renderMenu() {
                     activate("sound-mute-state:" + std::string(kSndStates[i]));
             }
             if (!any_audio) p->MenuLabel(I18n::t("menu.soundNoBinding"));
-            break;
-        }
-        case kMenuPair: {
-            // ==== 设备配对：待配对请求 + 物理键盘输入配对码 + 已配对列表 ====
-            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
-                        nullptr, false).clicked)
-                go(kMenuDevice);
-            // 待配对请求（设备已 POST /api/pair-request，等用户输码确认）
-            p->MenuLabel(I18n::t("menu.pairPending"));
-            std::vector<MenuEntry> pending =
-                menu_collect ? menu_collect("pair-pending")
-                             : std::vector<MenuEntry>();
-            if (pending.empty()) {
-                p->MenuLabel(I18n::t("menu.pairNone"));
-            } else {
-                for (const auto& e : pending)
-                    p->MenuLabel(e.label.c_str());
-            }
-            p->MenuDivider();
-            // 配对码：物理键盘直接采集。桌宠窗口常态 WS_EX_NOACTIVATE 不抢焦点，
-            // ImGui 输入框拿不到按键，故用 GetAsyncKeyState 轮询物理键边沿
-            //（bit0=自上次查询以来按下过，快速点按也不漏）：数字追加、
-            // Backspace 删除、Enter 确认。无需窗口焦点，也不抢占焦点。
-            p->MenuLabel(I18n::t("menu.pairHint"));
-            {
-#ifdef _WIN32
-                // GetAsyncKeyState 低序位（“上次查询后按下过”）在新版 Windows
-                // 不可靠（常恒为 0），改用高序位（当前按下）+ 自维护按下沿：
-                // 按下瞬间触发一次、松开不重复；prev_down 跨帧保持（static）。
-                static bool prev_down[12] = {};
-                for (int d = 0; d <= 9; ++d) {
-                    const bool down =
-                        ((::GetAsyncKeyState(0x30 + d) & 0x8000) != 0) ||
-                        ((::GetAsyncKeyState(0x60 + d) & 0x8000) != 0);
-                    const bool tap = down && !prev_down[d];
-                    prev_down[d] = down;
-                    if (tap && p->pair_code_input.size() < 6)
-                        p->pair_code_input += (char)('0' + d);
-                }
-                {
-                    const bool down = (::GetAsyncKeyState(VK_BACK) & 0x8000) != 0;
-                    const bool tap = down && !prev_down[10];
-                    prev_down[10] = down;
-                    if (tap && !p->pair_code_input.empty())
-                        p->pair_code_input.pop_back();
-                }
-                const bool enter_down =
-                    (::GetAsyncKeyState(VK_RETURN) & 0x8000) != 0;
-                const bool enter = enter_down && !prev_down[11];
-                prev_down[11] = enter_down;
-#else
-                const bool enter = false;
-#endif
-                ImGui::Dummy(ImVec2(0, 2.0f * S));
-                // 回显当前缓冲（未满位用 - 占位）
-                const std::string shown = p->pair_code_input.empty()
-                                              ? std::string("------")
-                                              : p->pair_code_input;
-                p->MenuLabel((std::string(I18n::t("menu.pairCode")) + ": " + shown)
-                                 .c_str());
-                const bool code_ready = p->pair_code_input.size() == 6;
-                bool do_confirm = enter && code_ready;
-                if (p->MenuRow("pok", I18n::t("menu.pairConfirm"), code_ready,
-                            false, nullptr, false)
-                        .clicked &&
-                    code_ready)
-                    do_confirm = true;
-                if (do_confirm) {
-                    activate("pair-confirm:" + p->pair_code_input);
-                    p->pair_code_input.clear();
-                }
-            }
-            // 已配对设备（点击解除配对）
-            std::vector<MenuEntry> paired =
-                menu_collect ? menu_collect("pair-paired")
-                             : std::vector<MenuEntry>();
-            if (!paired.empty()) {
-                p->MenuDivider();
-                p->MenuLabel(I18n::t("menu.pairPairedTitle"));
-                for (const auto& e : paired) {
-                    if (p->MenuRow(e.id.c_str(), e.label.c_str(), false, true,
-                                I18n::t("menu.pairUnpair"), false)
-                            .clicked)
-                        activate("pair-unpair:" + e.id);
-                }
-            }
             break;
         }
         case kMenuModels: {

@@ -18,7 +18,7 @@ $credQuery = Join-Path $env:TEMP 'dutyon-cred-gitee.txt'
 $fill = cmd /c "git credential fill < `"$credQuery`"" 2>$null
 $token = ($fill | Where-Object { $_ -match '^password=' }) -replace '^password=', ''
 Remove-Item $credQuery -ErrorAction SilentlyContinue
-$ge = Invoke-RestMethod -Uri "https://gitee.com/api/v5/repos/megrezsoft/dutyo/releases?access_token=$token&page=1&per_page=20&direction=desc"
+$ge = Invoke-RestMethod -Uri "https://gitee.com/api/v5/repos/megrezsoft/duty-on/releases?access_token=$token&page=1&per_page=20&direction=desc"
 foreach ($r in $ge) {
   $assets = ($r.assets | ForEach-Object { $_.name }) -join ', '
   Write-Output ("{0} | {1} | assets: {2}" -f $r.tag_name, $r.name, $assets)

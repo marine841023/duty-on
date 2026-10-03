@@ -6,6 +6,8 @@
 #include <nlohmann/json.hpp>
 
 #include <arpa/inet.h>
+#include <cerrno>
+#include <csignal>
 #include <ifaddrs.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -69,7 +71,7 @@ bool pathExists(const std::string& p) {
 void spawnDetached(const std::string& script_and_args) {
     std::string cmd = "setsid " + scriptDir() + "/" + script_and_args +
                       " >>" + runDir() + "/wifi.log 2>&1 &";
-    printf("[Wifi] $ %s%s\n", scriptDir().c_str(), script_and_args.c_str());
+    printf("[Wifi] $ %s/%s\n", scriptDir().c_str(), script_and_args.c_str());
     // system() 带 warn_unused_result：GCC 下 (void) 转型无法消警，用分支消费返回值
     //（后台脚本的返回码无意义，setsid + 尾部 & 已立即返回）
     if (system(cmd.c_str()) != 0) { /* ignore */ }
@@ -131,6 +133,23 @@ std::vector<std::string> readScanList() {
     return out;
 }
 
+// captive portal 探测路径识别：手机/系统连网检测请求（Android generate_204、
+// Windows NCSI/connecttest、iOS hotspot-detect、Firefox canonical 等）。
+// 对这些路径回 302 重定向到配网页，系统会自动弹出配网窗口（ESP 类配网的
+// 标准做法，比返回 200 HTML 的弹窗触发率高得多）。
+bool isProbePath(const std::string& path) {
+    if (path == "/ncsi.txt" || path == "/connecttest.txt" ||
+        path == "/redirect" || path == "/hotspot-detect.html" ||
+        path == "/library/test/success.html" || path == "/canonical.html" ||
+        path == "/success.txt" || path == "/wifi")
+        return true;
+    // Android 系（含小米/华为/OPPO 等厂商变体）：路径以 generate_204 结尾
+    const char kSuffix[] = "/generate_204";
+    const size_t sl = sizeof(kSuffix) - 1;
+    return path.size() >= sl &&
+           path.compare(path.size() - sl, sl, kSuffix) == 0;
+}
+
 // ---- captive portal 页面 ----
 // 移动优先的极简内联样式；深色卡片。表单 POST /configure 提交 ssid/pass。
 std::string portalPage(const std::string& ap_ssid,
@@ -148,11 +167,17 @@ h1{font-size:20px;margin-bottom:6px}
 label{display:block;font-size:13px;color:#bdc1c6;margin:14px 0 6px}
 input{width:100%;padding:12px 14px;font-size:16px;border-radius:10px;border:1px solid #33383f;background:#12151a;color:#fff}
 input:focus{outline:none;border-color:#4c8dff}
-.nets{display:flex;flex-wrap:wrap;gap:8px}
-.net{padding:10px 13px;font-size:14px;border-radius:9px;border:1px solid #33383f;background:#12151a;color:#e8eaed}
-.net.on{border-color:#4c8dff;color:#8ab4ff}
-button{width:100%;margin-top:24px;padding:14px;font-size:16px;font-weight:600;border:none;border-radius:10px;background:#4c8dff;color:#fff}
-button:active{background:#3a76e0}
+.nets{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.net{display:flex;align-items:center;justify-content:space-between;width:100%;padding:13px 14px;font-size:15px;border-radius:10px;border:1px solid #33383f;background:#12151a;color:#e8eaed;text-align:left}
+.net.on{border-color:#4c8dff;color:#8ab4ff;background:#16203a}
+.net .arr{color:#5f6368;font-size:15px}
+.net.on .arr{color:#8ab4ff}
+.btn{width:100%;margin-top:20px;padding:14px;font-size:16px;font-weight:600;border:none;border-radius:10px;background:#4c8dff;color:#fff}
+.btn:active{background:#3a76e0}
+.btn.subtle{background:#2a2f37;color:#8ab4ff;border:1px solid #3a4150}
+.selssid{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:10px;border:1px solid #4c8dff;background:#16203a;color:#8ab4ff;font-size:15px}
+.selssid .re{font-size:13px;color:#9aa0a6;text-decoration:underline;padding:4px 6px}
+.hidden{display:none}
 .ok{text-align:center;padding:14px 0}
 .ok .big{font-size:46px;line-height:1;margin-bottom:16px}
 .dl{margin-top:26px;padding-top:20px;border-top:1px solid #2a2f37}
@@ -165,46 +190,74 @@ button:active{background:#3a76e0}
 )CSS"
       << "</style></head><body><div class=\"card\">";
     // 成功页由 POST 处理器直接返回；此处为表单页
+    // 两步式表单：① 选网络（扫描列表点选 / 手动输入）→ ② 密码 + 连接。
+    // 旧的"SSID 输入框 + 密码框同屏"信息过载，且移动端软键盘易误触。
+    // 隐藏网络/未扫到时走"手动输入其他网络"分支（仍免打 SSID 之外的任何字）。
     h << "<h1>DutyOn 设备配网</h1>"
       << "<div class=\"tag\">热点 " << ap_ssid << "</div>"
-      << "<p class=\"sub\">请输入家庭 Wi-Fi 信息。提交后设备会自动连接该网络，"
+      << "<p class=\"sub\">选择 Wi-Fi 并输入密码，提交后设备自动联网，"
          "屏幕随后显示配对码，请在电脑端 DutyOn 完成配对。</p>"
-      << "<form method=\"post\" action=\"/configure\">";
-    // 扫到的邻近网络点选免输 SSID（隐藏网络/未扫到仍用下方输入框）
+      << "<form method=\"post\" action=\"/configure\">"
+      << "<input type=\"hidden\" name=\"ssid\" id=\"f-ssid\" required>"
+      // ---- 第①步：选择网络 ----
+      << "<div id=\"step1\">";
     if (!nets.empty()) {
-        h << "<label>检测到的网络（点选免输入）</label><div class=\"nets\">";
+        h << "<label>选择 Wi-Fi 网络</label><div class=\"nets\">";
         for (const auto& s : nets)
-            h << "<button type=\"button\" class=\"net\" data-s=\"" << htmlEsc(s)
-              << "\">" << htmlEsc(s) << "</button>";
+            h << "<button type=\"button\" class=\"net\" data-s=\""
+              << htmlEsc(s) << "\"><span>" << htmlEsc(s)
+              << "</span><span class=\"arr\">›</span></button>";
         h << "</div>";
     }
-    h << "<label>Wi-Fi 名称（SSID，也可手动输入）</label>"
-      << "<input name=\"ssid\" type=\"text\" autocomplete=\"off\" autocapitalize=\"off\" spellcheck=\"false\" required>"
-      << "<label>密码</label>"
-      << "<input name=\"pass\" type=\"password\" autocomplete=\"off\">"
-      << "<button type=\"submit\">连接</button>"
+    h << "<label>" << (nets.empty() ? "输入 Wi-Fi 名称" : "或手动输入名称")
+      << "</label>"
+      << "<input id=\"manual-ssid\" type=\"text\" autocomplete=\"off\" "
+         "autocapitalize=\"off\" spellcheck=\"false\" placeholder=\"Wi-Fi 名称\">"
+      << "<button type=\"button\" class=\"btn subtle\" id=\"use-manual\""
+      << (nets.empty() ? "" : " style=\"margin-top:12px\"") << ">下一步</button>"
+      << "</div>"
+      // ---- 第②步：密码 + 连接 ----
+      << "<div id=\"step2\" class=\"hidden\">"
+      << "<label>已选择网络</label>"
+      << "<div class=\"selssid\"><span id=\"sel-name\"></span>"
+         "<a class=\"re\" href=\"javascript:void(0)\" id=\"reselect\">重新选择</a></div>"
+      << "<label>Wi-Fi 密码</label>"
+      << "<input name=\"pass\" type=\"password\" autocomplete=\"off\" "
+         "placeholder=\"留空表示开放网络\">"
+      << "<button type=\"submit\" class=\"btn\">连接</button>"
+      << "</div>"
       << "</form>"
-      << "<script>document.querySelectorAll('.net').forEach(function(b){"
-         "b.onclick=function(){document.querySelectorAll('.net').forEach("
-         "function(x){x.classList.remove('on')});b.classList.add('on');"
-         "document.getElementsByName('ssid')[0].value=b.getAttribute('data-s');};});"
+      << "<script>"
+         "function toStep2(s){document.getElementById('f-ssid').value=s;"
+         "document.getElementById('sel-name').textContent=s;"
+         "document.getElementById('step1').classList.add('hidden');"
+         "document.getElementById('step2').classList.remove('hidden');}"
+         "document.querySelectorAll('.net').forEach(function(b){"
+         "b.onclick=function(){toStep2(b.getAttribute('data-s'));};});"
+         "document.getElementById('use-manual').onclick=function(){"
+         "var v=document.getElementById('manual-ssid').value.trim();"
+         "if(v)toStep2(v);};"
+         "document.getElementById('reselect').onclick=function(){"
+         "document.getElementById('step2').classList.add('hidden');"
+         "document.getElementById('step1').classList.remove('hidden');"
+         "document.getElementById('f-ssid').value='';};"
          "</script>"
       // 电脑端软件下载指引：配网时手机在设备热点上无外网，链接可能打不开，
-      // 故同时给出纯文本网址与搜索词，方便回到有网的电脑上按步骤安装。
+      // 故同时给出纯文本网址，方便回到有网的电脑上直接输入访问。
       << "<div class=\"dl\">"
       << "<h2>还没有电脑端 DutyOn？</h2>"
       << "<p class=\"sub\">配对需要在电脑上运行 DutyOn。按以下步骤免费下载安装（链接请在有网络的电脑浏览器打开）：</p>"
       << "<ol class=\"steps\">"
-      << "<li>打开 GitHub，搜索 <b>duty-on</b>（作者 marine841023）</li>"
+      << "<li>在电脑浏览器打开 <b>gitee.com/megrezsoft/duty-on</b>（国内访问快）<br>或 <b>github.com/marine841023/duty-on</b></li>"
       << "<li>进入仓库的 <b>Releases</b> 页面</li>"
       << "<li>下载最新版本的 <b>DutyOn-vX.X.X.zip</b> 压缩包</li>"
       << "<li>解压后双击运行安装程序，按提示完成安装</li>"
-      << "<li>打开电脑端 DutyOn，输入设备屏幕上显示的 <b>配对码</b></li>"
+      << "<li>打开电脑端 DutyOn，右键宠物头像 → <b>设备</b> → <b>配对设备</b>，输入设备屏幕上显示的 <b>配对码</b></li>"
       << "</ol>"
-      << "<a class=\"dlbtn\" href=\"https://github.com/marine841023/duty-on/releases\" target=\"_blank\" rel=\"noopener\">GitHub 下载（Releases）</a>"
-      << "<a class=\"dlbtn alt\" href=\"https://gitee.com/megrezsoft/dutyo/releases\" target=\"_blank\" rel=\"noopener\">Gitee 下载（国内更快）</a>"
-      << "<p class=\"urls\">GitHub 搜 duty-on ｜ Gitee 搜 dutyo<br>"
-         "github.com/marine841023/duty-on<br>gitee.com/megrezsoft/dutyo</p>"
+      << "<a class=\"dlbtn\" href=\"https://gitee.com/megrezsoft/duty-on/releases\" target=\"_blank\" rel=\"noopener\">Gitee 下载（国内更快）</a>"
+      << "<a class=\"dlbtn alt\" href=\"https://github.com/marine841023/duty-on/releases\" target=\"_blank\" rel=\"noopener\">GitHub 下载（Releases）</a>"
+      << "<p class=\"urls\">gitee.com/megrezsoft/duty-on<br>"
+         "github.com/marine841023/duty-on</p>"
       << "</div>"
       << "</div></body></html>";
     return h.str();
@@ -258,7 +311,13 @@ struct WifiManager::PortalImpl {
 
     void start(WifiManager* o) {
         owner = o;
-        svr.Get(R"(/.*)", [this](const httplib::Request&, httplib::Response& res) {
+        svr.Get(R"(/.*)", [this](const httplib::Request& req, httplib::Response& res) {
+            // 系统连网探测 -> 302 到配网页触发自动弹窗；其余 GET 直接配网页
+            if (isProbePath(req.path)) {
+                res.status = 302;
+                res.set_header("Location", owner->portalUrl() + "/");
+                return;
+            }
             res.set_content(portalPage(owner->apSsid(), readScanList()), "text/html; charset=utf-8");
         });
         svr.Post("/configure", [this](const httplib::Request& req, httplib::Response& res) {
@@ -406,7 +465,44 @@ void WifiManager::poll() {
         break;
 
     case WifiState::ApProvisioning:
-        // 等待手机经 portal 提交凭据（pending_join_），无需轮询射频
+        // 等待手机经 portal 提交凭据（pending_join_）。hostapd 存活自愈：
+        // 起初 10s 宽限（脚本含 sleep/起进程耗时），此后每 5s 查一次进程，
+        // 挂了/没起来就重跑 wifi-ap.sh（脚本幂等）。重跑连续 3 次仍失败
+        // → Unisoc WCN 驱动 beacon 槽位泄漏（hostapd 起过一次后，同 boot
+        // 内第二次启动必 ENOMEM，接口/模块层均无法复位）→ 自动重启设备，
+        // 冷启动后第一任 hostapd 必成功，回到配网模式闭环。
+        if (now - state_since_ms_ > 10000 &&
+            now - last_ap_check_ms_ >= 5000) {
+            last_ap_check_ms_ = now;
+            if (!hostapdAlive()) {
+                if (++ap_revives_ >= 3) {
+                    printf("[Wifi] hostapd dead after %d revives "
+                           "(driver beacon leak), rebooting device\n",
+                           ap_revives_);
+                    fflush(stdout);
+                    // reboot 是系统命令（不走 spawnDetached 的脚本目录拼接）
+                    if (system("/usr/sbin/reboot") != 0) { /* ignore */ }
+                    return;
+                }
+                printf("[Wifi] hostapd not alive, restarting AP "
+                       "(attempt %d)\n", ap_revives_);
+                spawnDetached("wifi-ap.sh " + wlan_);
+                // 重跑脚本全程 ~8s（含扫描/hostapd/dnsmasq 起停），期间 pid
+                // 文件会被脚本删除重建——把检查点推后 15s 防止重复触发
+                last_ap_check_ms_ = now + 15000;
+            } else {
+                // 起来了（或复用短路成功），清零失败计数
+                ap_revives_ = 0;
+            }
+        }
+        // ARP 保活：配网态每 5s ping 一次广播地址，把网关 MAC 刷进所有
+        // 已连接手机的 ARP 表。手机刚关联/DHCP 完成后 ARP 未解析时访问
+        // 192.168.4.1 会被丢包（配网页"有一定概率打不开"的主因）——
+        // 广播 ping 让手机提前应答并学到我们的 MAC，消除这个窗口。
+        if (now - last_arp_keepalive_ms_ >= 5000) {
+            last_arp_keepalive_ms_ = now;
+            spawnDetached("arp-keepalive.sh " + wlan_);
+        }
         break;
 
     default:
@@ -476,14 +572,19 @@ void WifiManager::saveCreds() {
 void WifiManager::enterAp() {
     stopPortal();  // 若从 client 回退，先停旧 portal（下面重起）
     // 先停 client 侧守护进程（脚本内部会 kill wpa_supplicant/dhcpcd）
-    // hostapd.conf：WPA2-PSK，SSID/口令由 device_id 派生
+    // hostapd.conf：WPA2-PSK，SSID/口令由 device_id 派生。country_code：
+    // 无国家码时部分驱动按最低功率发射、部分手机兼容差（搜不到/连不上）；
+    // wmm：802.11n 依赖 WMM，部分手机无 WMM 不关联
     std::ostringstream h;
     h << "interface=" << wlan_ << "\n"
       << "driver=nl80211\n"
       << "ssid=" << ap_ssid_ << "\n"
       << "hw_mode=g\n"
-      << "channel=6\n"
+      << "channel=6\n"  // 起始值；wifi-ap.sh 扫描后按占用改写为 1/6/11 最空闲
+      << "country_code=CN\n"
+      << "ieee80211d=1\n"
       << "ieee80211n=1\n"
+      << "wmm_enabled=1\n"
       << "wpa=2\n"
       << "wpa_passphrase=" << ap_pass_ << "\n"
       << "wpa_key_mgmt=WPA-PSK\n"
@@ -547,6 +648,33 @@ void WifiManager::stopPortal() {
     delete portal_;
     portal_ = nullptr;
     printf("[Wifi] captive portal stopped\n");
+}
+
+// hostapd 进程是否存活（wifi-ap.sh 启动时落盘 pid 文件）。pid 文件缺失/
+// 进程不存在都视为不活；EPERM（进程存在但不属当前用户）算活
+bool WifiManager::hostapdAlive() const {
+    std::ifstream in(runDir() + "/hostapd.pid");
+    long pid = 0;
+    if (!(in >> pid) || pid <= 0) return false;
+    if (kill((pid_t)pid, 0) == 0) return true;
+    return errno == EPERM;
+}
+
+void WifiManager::resetToAp() {
+    // 清内存 + 删凭据文件，重回 AP 配网模式。配对关系（token）不动：
+    // 新网络入网后自动恢复与 PC 的连接，无需重新输配对码
+    {
+        std::lock_guard<std::mutex> lk(cred_mu_);
+        has_creds_ = false;
+        home_ssid_.clear();
+        home_pass_.clear();
+    }
+    std::error_code ec;
+    fs::remove(wifiJsonPath(), ec);
+    pending_join_ = false;
+    join_attempts_ = 0;
+    printf("[Wifi] reset to AP provisioning (wifi.json removed)\n");
+    enterAp();
 }
 
 } // namespace dutyon

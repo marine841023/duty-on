@@ -30,6 +30,12 @@ PairingManager::PairingManager() {
     paired_ = dutyon::UserConfigStore::loadPairedDevices();
     if (!paired_.empty())
         printf("[Pairing] loaded %zu paired device(s)\n", paired_.size());
+    // 挂起的"重新配网"指令（PC 重启前点过、设备还没上线收到）
+    std::tie(cmd_device_id_, cmd_id_) =
+        dutyon::UserConfigStore::loadPendingDeviceCmd();
+    if (!cmd_device_id_.empty())
+        printf("[Pairing] pending reset-wifi cmd for %s (id=%s)\n",
+               cmd_device_id_.c_str(), cmd_id_.c_str());
 }
 
 std::string PairingManager::generateToken() {
@@ -129,6 +135,60 @@ bool PairingManager::unpair(const std::string& device_id) {
 
 void PairingManager::persistLocked() {
     dutyon::UserConfigStore::savePairedDevices(paired_);
+}
+
+// ---- PC 端"重新配网"指令 ----
+
+std::string PairingManager::newCmdId() {
+    // system_clock 毫秒（wall clock：PC 重启后序号仍单调递增，设备端按
+    // id 串比较防重复执行旧指令）
+    return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now()
+                                  .time_since_epoch())
+                              .count());
+}
+
+bool PairingManager::requestResetWifi(const std::string& device_id) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    // 未配对设备收不到 /api/status（401），挂了也送不出去
+    if (!paired_.count(device_id)) return false;
+    cmd_device_id_ = device_id;
+    cmd_id_ = newCmdId();
+    persistCmdLocked();
+    printf("[Pairing] reset-wifi queued for %s (id=%s)\n", device_id.c_str(),
+           cmd_id_.c_str());
+    return true;
+}
+
+std::string PairingManager::pendingResetWifiFor(
+    const std::string& device_id) const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (cmd_device_id_ == device_id && !cmd_id_.empty()) return cmd_id_;
+    return std::string{};
+}
+
+void PairingManager::ackResetWifi(const std::string& device_id,
+                                  const std::string& id) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (cmd_device_id_ == device_id && cmd_id_ == id) {
+        cmd_device_id_.clear();
+        cmd_id_.clear();
+        persistCmdLocked();
+        printf("[Pairing] reset-wifi acked by %s (id=%s)\n", device_id.c_str(),
+               id.c_str());
+    }
+}
+
+std::string PairingManager::deviceByToken(const std::string& token) const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    for (const auto& [did, tok] : paired_)
+        if (tok == token) return did;
+    return std::string{};
+}
+
+void PairingManager::persistCmdLocked() {
+    // 空目标 = 清除挂起指令
+    dutyon::UserConfigStore::savePendingDeviceCmd(cmd_device_id_, cmd_id_);
 }
 
 } // namespace dutyon::backend

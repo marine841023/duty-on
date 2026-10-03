@@ -16,15 +16,15 @@ $token = ($fill | Where-Object { $_ -match '^password=' }) -replace '^password='
 Remove-Item $credQuery, $credOut -ErrorAction SilentlyContinue
 if (-not $token) { throw 'no credential token for gitee.com' }
 
-$api = 'https://gitee.com/api/v5/repos/megrezsoft/dutyo'
+$api = 'https://gitee.com/api/v5/repos/megrezsoft/duty-on'
 
 # 仓库根（本脚本在 tools\ 下）——用相对路径，避免仓库迁移后硬编码绝对路径失效
 $root = Split-Path $PSScriptRoot -Parent
 
 $releases = @(
-  @{ Tag = 'v2.0.9'
-     Notes = (Join-Path $root 'docs\release-notes\v2.0.9.md')
-     Zip   = (Join-Path $root 'tools\dist\DutyOn-v2.0.9.zip') }
+  @{ Tag = 'v2.0.10'
+     Notes = (Join-Path $root 'docs\release-notes\v2.0.10.md')
+     Zip   = (Join-Path $root 'tools\dist\DutyOn-v2.0.10.zip') }
 )
 
 $curl = 'C:\Windows\System32\curl.exe'

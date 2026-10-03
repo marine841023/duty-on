@@ -1,122 +1,94 @@
-﻿# DutyOn — 同步最新程序到设备（源码整树推送 + 设备端增量编译 + 部署重启）
+# sync-device.ps1 —— 设备程序自动更新（本地交叉编译 + 直推部署）
 #
-# 由 PC 端桌宠菜单「同步程序到设备」触发，也可手动执行：
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .userdata\sync-device.ps1
+# 由 PC 端 dutyon-pet 的 launchDeviceSync() 调用（设备连上 PC 且源码哈希与
+# 设备上报版本不一致时触发），CLI 接口与进度标记沿用旧设备端编译版：
+#   powershell -File sync-device.ps1 -Repo <仓库根> -LogFile <进度日志> -Version <源码哈希>
+# 日志标记：PROGRESS=<0-100> <stage>（stage ∈ remote/configure/build/deploy/
+#   restart/done，首词映射进度窗文案）+ 最后一行 RESULT=OK / RESULT=FAIL:<原因>
 #
-# 凭据（不入库）：同目录 deploy.env，字段见 deploy.env.example
-#   DUTYON_DEVICE=root@192.168.7.1
-#   DUTYON_DEVICE_PASS=<设备SSH口令>
-# 无 deploy.env 时先尝试 ssh 免密；都不行则报错退出。
-#
-# 日志：-LogFile 指定（默认 %TEMP%\dutyon-device-sync.log），统一 UTF-8；
-# 最后一行固定输出 RESULT=OK 或 RESULT=FAIL:<原因>，供调用方解析弹窗。
-#
-# 注意：本文件必须保存为「UTF-8 带 BOM」—— Windows PowerShell 5.1 对无
-# BOM 的 .ps1 按系统 ANSI(GBK) 解码，中文字节序列会破坏字符串解析。
+# 与旧版差异（设备性能低，不再用设备编译）：
+#   旧版: tar 源码 → 推设备 → 设备 cmake 编译(1-5 分钟) → deploy.sh → 重启
+#   新版: 本地交叉编译(增量 ~10-60 秒) → scp 单二进制 → deploy.sh → 重启
+# 流程: SSH 探活 → (必要时) configure → 本地增量构建 → 推送二进制+脚本 →
+#   远端 deploy.sh → 写 /opt/dutyon/VERSION(哈希) → 重启服务
 
 param(
-    [string]$Repo = "",
-    [string]$LogFile = "",
-    [string]$Version = ""
+    [string]$Repo = 'd:\src\traeSprite',
+    [string]$LogFile = '',
+    [string]$Version = '',
+    [string]$Device = 'root@192.168.7.1'
 )
 
-$ErrorActionPreference = 'Continue'
-
-if (-not $Repo)    { $Repo = Split-Path -Parent $PSScriptRoot }
-if (-not $LogFile) { $LogFile = Join-Path $env:TEMP 'dutyon-device-sync.log' }
+$ErrorActionPreference = 'Stop'
 
 function Log([string]$msg) {
-    $line = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg
-    # 统一 UTF-8（Out-File/Tee-Object 默认 UTF-16，会与 cmd 追加的字节流混编）
-    $line | Out-File -FilePath $LogFile -Append -Encoding utf8
-    Write-Host $line
+    if ($LogFile) { Add-Content -Path $LogFile -Value $msg -Encoding ASCII }
+    Write-Host $msg
 }
 function Fail([string]$msg) { Log "RESULT=FAIL:$msg"; exit 1 }
 
-"=== device sync $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" | Out-File $LogFile -Encoding utf8
+# VS BuildTools 自带 cmake（PATH 里没有）；找不到则回退 PATH cmake
+$cmake = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
+if (-not (Test-Path $cmake)) { $cmake = 'cmake' }
 
-# ---- 凭据 ----
-$Device = $null; $Pass = $null; $Hostkey = $null
-$envFile = Join-Path $PSScriptRoot 'deploy.env'
-if (Test-Path $envFile) {
-    foreach ($l in (Get-Content $envFile)) {
-        if ($l -match '^\s*DUTYON_DEVICE=(.+)$')          { $Device  = $Matches[1].Trim() }
-        elseif ($l -match '^\s*DUTYON_DEVICE_PASS=(.+)$') { $Pass    = $Matches[1].Trim() }
-        elseif ($l -match '^\s*DUTYON_DEVICE_HOSTKEY=(.+)$') { $Hostkey = $Matches[1].Trim() }
-    }
+$sshOpts = @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'StrictHostKeyChecking=no')
+$buildDir = Join-Path $Repo 'device\build-cross'
+$bin = Join-Path $buildDir 'dutyon-pet'
+
+# ---- 1. SSH 探活（设备不可达时干净失败，进度窗 4 秒后自动关）----
+Log 'PROGRESS=5 remote'
+ssh @sshOpts $Device 'echo ok' *> $null
+if ($LASTEXITCODE -ne 0) { Fail 'device unreachable' }
+
+# ---- 2. 本地交叉构建（增量；首次/工具链变更时自动 configure）----
+$ninja = Join-Path $buildDir 'build.ninja'
+if (-not (Test-Path $ninja)) {
+    Log 'PROGRESS=15 configure'
+    # FetchContent 本地源码覆盖（离线加速；目录不存在时留空走网络拉取）
+    $jsonSrc = Join-Path $Repo '.userdata\deps-src\json'
+    $stbSrc = Join-Path $Repo 'device\third_party\deps\stb-master'
+    $extra = @()
+    if (Test-Path $jsonSrc) { $extra += "-DFETCHCONTENT_SOURCE_DIR_JSON=$jsonSrc" }
+    if (Test-Path $stbSrc) { $extra += "-DFETCHCONTENT_SOURCE_DIR_STB=$stbSrc" }
+    & $cmake -G Ninja -S (Join-Path $Repo 'device') -B $buildDir `
+        -DCMAKE_TOOLCHAIN_FILE="$Repo\device\cmake\aarch64-toolchain.cmake" `
+        -DCMAKE_BUILD_TYPE=Release -DCPR_ENABLE_SSL=OFF @extra `
+        *> $null
+    if ($LASTEXITCODE -ne 0) { Fail 'cross configure failed' }
 }
-if (-not $Device) { $Device = 'root@192.168.7.1' }
 
-# ---- 传输通道：ssh 免密优先，否则 plink -pw ----
-$plink = Join-Path $Repo 'tools\plink.exe'
-& ssh -o BatchMode=yes -o ConnectTimeout=4 -o StrictHostKeyChecking=no $Device "echo ok" *> $null
-$usePlink = ($LASTEXITCODE -ne 0)
-if ($usePlink -and (-not $Pass -or -not (Test-Path $plink))) {
-    Fail "cannot connect $Device (ssh key auth failed, and missing deploy.env password or tools/plink.exe)"
+Log 'PROGRESS=30 build'
+# 构建输出进临时文件防污染进度日志（解析器只认 PROGRESS= 行）
+$buildLog = Join-Path $env:TEMP 'dutyon-cross-build.log'
+& $cmake --build $buildDir -j *> $buildLog
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $bin)) {
+    Get-Content $buildLog -Tail 15 | ForEach-Object { Log "  $_" }
+    Fail 'cross build failed'
 }
-Log "device=$Device transport=$(if ($usePlink) {'plink'} else {'ssh'}) repo=$Repo"
 
-# 远端命令组装（只含安全字符，避免多层引号地狱）
-# plink 走 -hostkey 免交互确认新设备指纹（未缓存主机密钥时 -batch 会直接拒绝）
-$sshArgs = if ($usePlink) {
-    $pa = @('-batch')
-    if ($Hostkey) { $pa += @('-hostkey', $Hostkey) }
-    $pa += @('-pw', $Pass, $Device)
-    $pa
-} else { @('-o', 'ConnectTimeout=8', '-o', 'StrictHostKeyChecking=no', $Device) }
-$sshExe  = if ($usePlink) { $plink } else { 'ssh' }
+# ---- 3. 推送二进制 + wifi 脚本 + deploy.sh ----
+Log 'PROGRESS=70 deploy'
+scp @sshOpts $bin "${Device}:/opt/dutyon-src/device/build/dutyon-pet" *> $null
+if ($LASTEXITCODE -ne 0) { Fail 'scp binary failed' }
+scp @sshOpts `
+    "$Repo\device\scripts\wifi-ap.sh" `
+    "$Repo\device\scripts\wifi-client.sh" `
+    "$Repo\device\scripts\wifi-off.sh" `
+    "${Device}:/opt/dutyon-src/device/scripts/" *> $null
+if ($LASTEXITCODE -ne 0) { Fail 'scp wifi scripts failed' }
+ssh @sshOpts $Device 'mkdir -p /opt/dutyon-src/.userdata' *> $null
+scp @sshOpts "$Repo\.userdata\deploy.sh" "${Device}:/opt/dutyon-src/.userdata/deploy.sh" *> $null
+if ($LASTEXITCODE -ne 0) { Fail 'scp deploy.sh failed' }
 
-# ---- 第 1 步：tar 推送源码包（二进制走 cmd 管道，PS5.1 管道会毁字节流）----
-# 整树推 device/src：设备 CMake 是显式源文件清单，多推的 PC 端文件不参与编译
-$tarPipe = "tar -cf - -C `"$Repo`" device/CMakeLists.txt device/src device/scripts frontend/assets/device .userdata/deploy.sh | `"$sshExe`" $($sshArgs -join ' ') `"cat > /tmp/dutyon-sync.tar`""
-Log "PROGRESS=15 push source tarball..."
-cmd /c "$tarPipe >> `"$LogFile`" 2>&1"
-if ($LASTEXITCODE -ne 0) { Fail "source push failed (rc=$LASTEXITCODE)" }
-
-# ---- 第 2 步：远端解包 + 增量编译 + 部署重启 ----
-# 脚本 base64 化后传输，彻底规避本地 PS/远端 bash 双层引号转义问题；
-# trap EXIT 兜底：任何一步失败都回传 SYNC-FAIL + 编译日志尾巴
-$remoteScript = @'
-trap 'RC=$?; if [ $RC -ne 0 ]; then echo SYNC-FAIL; tail -15 /tmp/sync-build.log 2>/dev/null; exit $RC; fi' EXIT
-set -e
-echo "PROGRESS=30 unpack"
-mkdir -p /opt/dutyon-src
-cd /opt/dutyon-src
-tar -xf /tmp/dutyon-sync.tar
-rm -f /tmp/dutyon-sync.tar
-sed -i 's/\r$//' .userdata/deploy.sh
-cd device
-: > /tmp/sync-build.log
-echo "PROGRESS=45 configure"
-cmake -B build -DCMAKE_BUILD_TYPE=Release >> /tmp/sync-build.log 2>&1
-echo "PROGRESS=60 build"
-cmake --build build -j2 >> /tmp/sync-build.log 2>&1
-echo "PROGRESS=85 deploy"
-bash ../.userdata/deploy.sh >> /tmp/sync-build.log 2>&1
-printf '%s' '__VERSION__' > /opt/dutyon/VERSION
-echo "PROGRESS=95 restart"
-systemctl restart dutyon
-sleep 3
-systemctl is-active --quiet dutyon
-echo "PROGRESS=100 done"
-echo SYNC-OK
-'@ -replace "`r`n", "`n"
-
-# 注入本次源码哈希作为设备程序版本（写入 /opt/dutyon/VERSION；设备下次
-# 启动读取并经 X-DutyOn-Version 头上报，PC 端据此判定已是最新）
+# ---- 4. 远端部署 + 写版本哈希 + 重启 ----
 if (-not $Version) { $Version = 'unknown' }
-$remoteScript = $remoteScript -replace '__VERSION__', $Version
+$remote = "bash /opt/dutyon-src/.userdata/deploy.sh >/tmp/deploy.log 2>&1 && printf '%s' '$Version' > /opt/dutyon/VERSION && systemctl restart dutyon && sleep 2 && systemctl is-active dutyon"
+Log 'PROGRESS=90 restart'
+ssh @sshOpts $Device $remote *> $null
+if ($LASTEXITCODE -ne 0) {
+    ssh @sshOpts $Device 'tail -15 /tmp/deploy.log' | ForEach-Object { Log "  $_" }
+    Fail 'deploy/restart failed'
+}
 
-$b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remoteScript))
-Log "PROGRESS=20 remote build+deploy (incremental, 1-5 min typical)..."
-& $sshExe @sshArgs "echo $b64 | base64 -d | bash" 2>&1 |
-    Out-File -FilePath $LogFile -Append -Encoding utf8
-if ($LASTEXITCODE -ne 0) { Fail "remote build/deploy failed (rc=$LASTEXITCODE)" }
-
-# ---- 结果确认（回执丢失败判，不回传 SYNC-OK 一律算失败）----
-$tail = Get-Content $LogFile -Tail 30
-if ($tail -match 'SYNC-FAIL') { Fail "device reported failure" }
-if (-not ($tail -match 'SYNC-OK')) { Fail "no success ack from device" }
-Log "PROGRESS=100 done"
-Log "RESULT=OK"
-exit 0
+Log 'PROGRESS=100 done'
+Log 'RESULT=OK'

@@ -34,9 +34,9 @@ $up   = "https://uploads.github.com/repos/$repo"
 $root = Split-Path $PSScriptRoot -Parent
 
 $releases = @(
-  @{ Tag = 'v2.0.9'; Name = 'DutyOn v2.0.9 - Wi-Fi pairing, photo frame & full Qoder hooks'
-     Notes = (Join-Path $root 'docs\release-notes\v2.0.9.md')
-     Zip   = (Join-Path $root 'tools\dist\DutyOn-v2.0.9.zip')
+  @{ Tag = 'v2.0.10'; Name = 'DutyOn v2.0.10 - Provisioning hardening & pairing dialog rework'
+     Notes = (Join-Path $root 'docs\release-notes\v2.0.10.md')
+     Zip   = (Join-Path $root 'tools\dist\DutyOn-v2.0.10.zip')
      Latest = $true }
 )
 

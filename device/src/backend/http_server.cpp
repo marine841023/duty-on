@@ -593,7 +593,7 @@ void HttpServer::registerRoutes() {
                        okJson(res, {{"status", "pending"}});
                });
 
-    svr_->Get("/api/status", [this, add_cors](const httplib::Request&, httplib::Response& res) {
+    svr_->Get("/api/status", [this, add_cors](const httplib::Request& req, httplib::Response& res) {
         add_cors(res);
         json j = sm_.snapshotJson();
         // 当前形象键 + 设备模式随快照下发（"char_xxx" = 自定义 GIF；否则
@@ -671,7 +671,42 @@ void HttpServer::registerRoutes() {
             j["serverTime"] = (double)now_sec;
             j["utcOffset"] = (int)(offset_sec / 60);
         }
+        // 挂起的"重新配网"指令（换 WiFi 场景）：token 反查请求者身份，
+        // 匹配目标设备才注入；设备执行后 POST /api/cmd-ack 清除
+        if (const std::string tok = req.get_header_value("X-DutyOn-Token");
+            !tok.empty()) {
+            const std::string cmd_id =
+                pairing_.pendingResetWifiFor(pairing_.deviceByToken(tok));
+            if (!cmd_id.empty())
+                j["deviceCmd"] = {{"type", "reset-wifi"}, {"id", cmd_id}};
+        }
         okJson(res, j);
+    });
+
+    // POST /api/cmd-ack —— 设备指令回执。body {id}；设备身份从请求 token
+    // 反查（不采信 body 里的自报 deviceId），id 匹配挂起指令即清除。
+    // 失败不清：设备下一轮 status 会重复收到 deviceCmd，ack 幂等
+    svr_->Post("/api/cmd-ack", [this, add_cors](const httplib::Request& req,
+                                               httplib::Response& res) {
+        add_cors(res);
+        json body;
+        try {
+            body = json::parse(req.body, nullptr, /*allow_exceptions=*/false);
+        } catch (...) {
+        }
+        if (!body.is_object()) {
+            res.status = 400;
+            return;
+        }
+        const std::string tok = req.get_header_value("X-DutyOn-Token");
+        const std::string did = pairing_.deviceByToken(tok);
+        const std::string id = body.value("id", std::string{});
+        if (did.empty() || id.empty()) {
+            res.status = 400;
+            return;
+        }
+        pairing_.ackResetWifi(did, id);
+        okJson(res, {{"status", "ok"}});
     });
 
     // GET /api/character —— 当前角色详情（硬件屏拉取自定义 GIF 定义用）。

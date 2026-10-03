@@ -144,6 +144,13 @@ public:
     static std::map<std::string, std::string> loadPairedDevices();
     static void savePairedDevices(const std::map<std::string, std::string>& devices);
 
+    // 挂起的设备指令（"重新配网"）：{deviceId, 指令序号}，PC 重启不丢
+    // （设备离线时指令一直挂起，上线轮询 /api/status 时下发）。save 时传
+    // 空 deviceId 即清除挂起
+    static std::pair<std::string, std::string> loadPendingDeviceCmd();
+    static void savePendingDeviceCmd(const std::string& deviceId,
+                                     const std::string& cmdId);
+
     // ---- 模型目录（内置 frontend/assets/live2d + 用户 ~/.dutyon/live2d）----
     // builtin_roots: 内置模型搜索目录（相对 exe 解析，main 传入）
     static std::vector<ModelEntry> listModels(const std::vector<std::string>& builtin_roots);
