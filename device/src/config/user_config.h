@@ -61,6 +61,9 @@ struct UserConfig {
     // 硬件显示端屏幕亮度：10-100（百分比）。当前屏无内核背光接口时，
     // 设备端以渲染层整屏压暗实现；有 sysfs 背光则直接写背光
     int device_brightness = 100;
+    // 设备端音量：0-100（百分比）。软件缩放（SoundPlayer 写 PCM 前乘系数），
+    // 经 /api/status deviceVolume 下发，断连保持最近值
+    int device_volume = 80;
     // 源码仓库根路径（菜单「同步程序到设备」的源码来源，手动写入 config.json
     // 的 deviceRepo；为空时菜单点击给出配置指引）
     std::string device_repo;
@@ -76,14 +79,49 @@ struct UserConfig {
     // HDMI 屏物理竖装（逻辑竖屏 480x800 上横 mode 800x480）送 90/270，
     // 倒装送 180。设备端离屏 FBO + quad 旋转 blit 实现
     int screen_rotation = 0;
+    // 云端账户（cloudServer/cloudToken/cloudUsername；token 空 = 未登录，
+    // server/username 保留以便登录弹窗回填）。登录后后台线程每 60s 自动
+    // 增量上传自定义角色/音色 + 配置白名单快照（cloud_client.cpp）
+    std::string cloud_server;
+    std::string cloud_token;
+    std::string cloud_username;
 
-    // 指定角色的有效显示文字颜色：该角色专属色优先，未设定则回退全局 clock_color
+    // 内置角色的出厂默认主题色（key 同 characterColors 的模型 URL 键）：
+    // 角色设定里未配色时的初始色。用户配过色则 characterColors 优先，
+    // 此表只在配置缺失（新装机/重置 config）时兜底
+    static std::string builtinDefaultColor(const std::string& char_key) {
+        static const std::map<std::string, std::string> defaults = {
+            {"assets/live2d/ni-j.model3.json", "ice"},
+            {"assets/live2d/nietzsche.model3.json", "ice"},
+            {"assets/live2d/nipsilon.model3.json", "pink"},
+            {"assets/live2d/nito.model3.json", "white"},
+        };
+        const auto it = defaults.find(char_key);
+        return it != defaults.end() ? it->second : std::string();
+    }
+
+    // 指定角色的有效显示文字颜色：该角色专属色优先，其次内置角色出厂
+    // 默认色，最后回退全局 clock_color
     std::string effectiveColor(const std::string& char_key) const {
         auto it = character_colors.find(char_key);
         if (it != character_colors.end() && !it->second.empty()) return it->second;
+        const std::string def = builtinDefaultColor(char_key);
+        if (!def.empty()) return def;
         return clock_color;
     }
 };
+
+// 云同步白名单（config.json 顶层键）：仅角色/音频/显示偏好随账户走；
+// 本机属性（windowPosition/monitor*/frameFolder/deviceRepo/pairedDevices/
+// cloudServer 等）不参与云同步。cloud_client.cpp 据此构建上传快照与恢复合并
+inline const std::vector<const char*>& cloudSyncFields() {
+    static const std::vector<const char*> fields = {
+        "flipHorizontal", "miniMode", "language", "activeCharacterId",
+        "stateMotions", "customCharacters", "deviceMode", "frameSource",
+        "clockColor", "characterColors", "deviceBrightness", "deviceVolume",
+        "stateAudio", "soundMute", "stateAudioMuted", "screenRotation"};
+    return fields;
+}
 
 // 模型目录条目
 struct ModelEntry {
@@ -124,6 +162,7 @@ public:
     static void saveCharacterColor(const std::string& key, const std::string& color);
     // 硬件显示端屏幕亮度（10-100；同上经 /api/status 下发）
     static void saveDeviceBrightness(int v);
+    static void saveDeviceVolume(int v);
     // 状态音频绑定（file 为空串 = 清除该状态绑定）
     static void saveStateAudio(const std::string& key, const std::string& state,
                                const std::string& file);
@@ -135,6 +174,10 @@ public:
 
     // 屏幕旋转角（度）；/api/status 每次轮询读文件下发设备端
     static void saveScreenRotation(int deg);
+
+    // 云端账户持久化（token 空串 = 注销：清 token/username，server 保留回填）
+    static void saveCloudAccount(const std::string& server, const std::string& token,
+                                 const std::string& username);
 
     // ---- 已配对设备（Wi-Fi 配对码方案，PC 端）----
     // ~/.dutyon/config.json 的 pairedDevices 字段：{ device_id: token }。

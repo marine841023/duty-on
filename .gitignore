@@ -61,3 +61,12 @@ tools/cross/
 
 # Local release artifacts (installers built during cross-branch releases)
 release/
+
+# 云服务器：Go 编译产物与运行时数据（用户/令牌/上传文件/更新包）
+server/dutyon-cloud
+server/data/
+
+# 语音识别资产：大模型与引擎二进制不入库（239MB/22MB，随 .userdata/x-deploy.sh
+# 分发到设备与 frontend/assets 正式副本以外的渠道）；小文件（pinyin/tokens/vad）入库
+frontend/assets/device/kws/asr-offline
+frontend/assets/device/kws/sense-voice/model.int8.onnx

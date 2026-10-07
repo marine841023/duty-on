@@ -50,6 +50,15 @@ fi
 rfkill unblock wifi 2>/dev/null || true
 rfkill unblock all  2>/dev/null || true
 
+# 等 wlan0 出现（最多 10s）：dutyon.service 已不等网络（提早启动抢占屏幕），
+# 本脚本可能跑在 sprdwl_ng 驱动加载完成之前。放在 clean/复用短路之后，
+# 保证周期性 clean 调用与 hostapd 复用路径仍然快进快出
+for i in $(seq 1 20); do
+    ip link show "$IFACE" >/dev/null 2>&1 && break
+    [ "$i" = 1 ] && log "waiting for $IFACE (driver loading...)"
+    sleep 0.5
+done
+
 # NetworkManager 若存在，别让它管这个 iface（会与 hostapd 抢占）
 if command -v nmcli >/dev/null 2>&1; then nmcli dev set "$IFACE" managed no 2>/dev/null || true; fi
 

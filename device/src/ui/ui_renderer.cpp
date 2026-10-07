@@ -635,11 +635,13 @@ enum MenuView {
     kMenuFrameSource, // 设备·相框播放源（动作轮播/指定文件夹照片）
     kMenuDeviceColor, // 设备·时钟颜色（琥珀橙/冰晶蓝/暖白/翠竹绿/樱花粉）
     kMenuDeviceBrightness, // 设备·亮度（30/50/70/85/100%）
+    kMenuDeviceVolume,     // 设备·音量（0/25/50/75/100%，软件缩放）
     kMenuDeviceRotate,     // 设备·屏幕旋转（0/90/180/270）
     kMenuIntegration, // 集成：开机自启动 + IDE 集成 Hook 状态
     kMenuCharManage,  // 自定义角色管理列表
     kMenuCharEdit,    // 单个自定义角色的状态动画编辑
     kMenuSound,       // 设备声音管理：完全静音 / 按状态静音
+    kMenuCloud,       // 云端账户：登录/同步/恢复/退出 + 一键更新入口
 };
 
 struct UIRenderer::Impl {
@@ -698,9 +700,6 @@ struct UIRenderer::Impl {
     bool has_model_rect = false;
     bool model_bounds_tight = true;  // Live2D=紧贴内容；GIF=整图框（含留白）
     float effect_k = 0.0f;  // 平滑缩放（对齐 1.x updateHeadEffectAnchor._k）
-
-    // 预览提醒效果（头顶 ! 特效显示到该时刻）
-    double alert_preview_until = -1.0;
 
     // 右键菜单状态
     bool menu_open = false;
@@ -1561,6 +1560,7 @@ void UIRenderer::openMenuView(const std::string& view) {
     else if (view == "language") impl_->menu_view = kMenuLanguage;
     else if (view == "visibility" || view == "display") impl_->menu_view = kMenuDisplay;
     else if (view == "integration") impl_->menu_view = kMenuIntegration;
+    else if (view == "cloud") impl_->menu_view = kMenuCloud;
     else impl_->menu_view = kMenuMain;  // "main" / 未知值
 }
 
@@ -1642,10 +1642,6 @@ void UIRenderer::setScale(float s) {
     if (s == impl_->scale) return;
     impl_->scale = s;
     impl_->fonts_dirty = true;  // 字号随 scale 重建图集（帧末生效）
-}
-
-void UIRenderer::previewAlert() {
-    impl_->alert_preview_until = ImGui::GetTime() + 3.0;
 }
 
 // ---------------------------------------------------------------------------
@@ -2204,12 +2200,9 @@ void UIRenderer::renderHeadEffect(const PetStatus& s) {
     if (!impl_->imgui_ready) return;
     auto* p = impl_;
     const float S = p->scale;
-    const double now = ImGui::GetTime();
+    const double now = ImGui::GetTime();  // 动画相位（点点点/ZZZ 呼吸）
 
-    // 预览提醒优先（动作设定 → 预览提醒效果）
-    const bool previewing = now < p->alert_preview_until;
     std::string state = s.overall_state;
-    if (previewing) state = "alert";
     if (state != "sleeping" && state != "working" && state != "alert") return;
 
     // 锚点：模型 bounds 顶中下移（1.x updateHeadEffectAnchor：
@@ -2378,24 +2371,50 @@ void UIRenderer::renderMenu() {
             if (p->MenuRow("settings", I18n::t("menu.actionSettings"), false, false,
                         nullptr, true).clicked)
                 go(kMenuSettings);
-            // 显示：左右翻转 / 迷你模式 / 最小化 + 监控项显隐（统一收纳）
+            // 显示：左右翻转 / 迷你模式 + 监控项显隐（统一收纳；隐藏提至一级）
             if (p->MenuRow("display", I18n::t("menu.display"), false, false,
                         nullptr, true).clicked)
                 go(kMenuDisplay);
             if (p->MenuRow("lang", I18n::t("menu.language"), false, false,
                         nullptr, true).clicked)
                 go(kMenuLanguage);
-            // ---- 硬件显示端 + 系统集成：均带右侧状态 ----
+            // ---- 硬件显示端 + 声音管理 + 系统集成：均带右侧状态 ----
             p->MenuDivider();
             if (p->MenuRow("device", I18n::t("menu.device"), false, false,
                         device_online_ ? I18n::t("menu.deviceOnline")
                                        : I18n::t("menu.deviceOffline"),
                         true).clicked)
                 go(kMenuDevice);
+            // 声音管理（设备端状态音频+静音开关），紧随设备入口；右侧显示静音状态
+            if (p->MenuRow("sound", I18n::t("menu.soundManage"),
+                        false, false, hint_of("sound-status").c_str(),
+                        true).clicked)
+                go(kMenuSound);
             if (p->MenuRow("integration", I18n::t("menu.integration"), false, false,
                         hint_of("integration-status").c_str(), true).clicked)
                 go(kMenuIntegration);
+            // 云端账户：登录/同步/恢复（子页）；右侧显示用户名或未登录
+            if (p->MenuRow("cloud", I18n::t("menu.cloud"), false, false,
+                        cloud_logged_in_
+                            ? (cloud_username_.empty()
+                                   ? I18n::t("menu.cloudLoggedIn")
+                                   : cloud_username_.c_str())
+                            : I18n::t("menu.cloudLoggedOut"),
+                        true).clicked)
+                go(kMenuCloud);
             p->MenuDivider();
+            // 应用内一键更新（未配置服务器时 hint 为空，行仍可点 → 提示配置）
+            if (p->MenuRow("update", I18n::t("menu.checkUpdate"), false, false,
+                        hint_of("app:update").c_str(), false).clicked) {
+                activate("app:update");
+                closeMenu();
+            }
+            // 隐藏：缩到系统托盘（托盘图标左键单击/双击唤回）
+            if (p->MenuRow("hide", I18n::t("menu.minimize"), false, false,
+                        nullptr, false).clicked) {
+                activate("minimize");
+                closeMenu();
+            }
             if (p->MenuRow("quit", I18n::t("menu.quit"), false, true, nullptr,
                         false).clicked) {
                 activate("quit");
@@ -2426,6 +2445,7 @@ void UIRenderer::renderMenu() {
             const char* mode_hint =
                 device_mode_ == "single" ? I18n::t("menu.modeSingle")
                 : device_mode_ == "multi" ? I18n::t("menu.modeMulti")
+                : device_mode_ == "voice" ? I18n::t("menu.modeVoice")
                                           : I18n::t("menu.modeFrame");
             const char* color_hint =
                 clock_color_ == "amber" ? I18n::t("menu.colorAmber")
@@ -2459,18 +2479,19 @@ void UIRenderer::renderMenu() {
             if (p->MenuRow("dbright", I18n::t("menu.brightness"), false, false,
                         bright_hint.c_str(), true).clicked)
                 go(kMenuDeviceBrightness);
+            const std::string volume_hint =
+                std::to_string(device_volume_) + "%";
+            if (p->MenuRow("dvolume", I18n::t("menu.volume"), false, false,
+                        volume_hint.c_str(), true).clicked)
+                go(kMenuDeviceVolume);
             if (p->MenuRow("drotate", I18n::t("menu.screenRotate"), false, false,
                         rotate_hint, true).clicked)
                 go(kMenuDeviceRotate);
-            p->MenuDivider();
-            // 声音管理（设备端状态音频播放与静音开关）
-            if (p->MenuRow("device-sound", I18n::t("menu.soundManage"),
-                        false, false, nullptr, true).clicked)
-                go(kMenuSound);
             break;
         }
         case kMenuDeviceMode: {
-            // ==== 设备·模式（三选一；config.json deviceMode 经 /api/status 下发）====
+            // ==== 设备·模式（四选一；config.json deviceMode 经 /api/status
+            //      下发。voice=语音交互：唤醒词+中文动作指令，仅该模式收音）====
             if (p->MenuRow("back", I18n::t("menu.back"), false, false,
                         nullptr, false).clicked)
                 go(kMenuDevice);
@@ -2484,6 +2505,9 @@ void UIRenderer::renderMenu() {
             if (p->MenuRow("dmode-frame", I18n::t("menu.modeFrame"),
                         device_mode_ == "frame", false, nullptr, false).clicked)
                 activate("device-mode:frame");
+            if (p->MenuRow("dmode-voice", I18n::t("menu.modeVoice"),
+                        device_mode_ == "voice", false, nullptr, false).clicked)
+                activate("device-mode:voice");
             break;
         }
         case kMenuFrameSource: {
@@ -2588,11 +2612,29 @@ void UIRenderer::renderMenu() {
                 activate("device-rotate:270");
             break;
         }
-        case kMenuSound: {
-            // ==== 设备声音管理：完全静音 + 当前角色按状态静音 ====
+        case kMenuDeviceVolume: {
+            // ==== 设备·音量（五档；SoundPlayer 软件缩放，0%=听不见）====
             if (p->MenuRow("back", I18n::t("menu.back"), false, false,
                         nullptr, false).clicked)
                 go(kMenuDevice);
+            p->MenuLabel(I18n::t("menu.volume"));
+            for (int v : {0, 25, 50, 75, 100}) {
+                const std::string row_id = "dvol-" + std::to_string(v);
+                const std::string act_id =
+                    "device-volume:" + std::to_string(v);
+                if (p->MenuRow(row_id.c_str(),
+                            (std::to_string(v) + "%").c_str(),
+                            device_volume_ == v, false, nullptr,
+                            false).clicked)
+                    activate(act_id);
+            }
+            break;
+        }
+        case kMenuSound: {
+            // ==== 设备声音管理：完全静音 + 当前角色按状态静音（一级菜单直入）====
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                        nullptr, false).clicked)
+                go(kMenuMain);
             p->MenuLabel(I18n::t("menu.soundManage"));
             if (p->MenuRow("snd-mute-all", I18n::t("menu.soundMuteAll"),
                         checked("sound-mute"), false, nullptr,
@@ -2808,10 +2850,14 @@ void UIRenderer::renderMenu() {
             break;
         }
         case kMenuSettings: {
-            // ==== 动作设定（1.x #menu-settings-view：状态行=状态名+当前动作名+▶）====
+            // ==== 角色设定（1.x #menu-settings-view：状态行=状态名+当前动作名+▶）====
+            // 动作/音频/主题颜色均按当前角色 key 存（stateMotions/stateAudio/
+            // characterColors），切换角色自动带出各自的设定
             if (p->MenuRow("back", I18n::t("menu.back"), false, false, nullptr, false).clicked)
                 go(kMenuMain);
-            p->MenuLabel(I18n::t("menu.actionSettings"));
+            // 页面顶部显示当前角色名（GIF=角色名 / Live2D=模型名）：
+            // 本页动作/音频/主题颜色均随该角色保存与带出
+            p->MenuLabel(hint_of("character-name").c_str());
             static const char* kStates[4] = {"sleeping", "working", "alert", "welcome"};
             for (int i = 0; i < 4; i++) {
                 if (i > 0) p->MenuDivider();  // 动作与动作之间分隔
@@ -2839,10 +2885,24 @@ void UIRenderer::renderMenu() {
                 }
             }
             p->MenuDivider();
-            if (p->MenuRow("test", I18n::t("menu.previewAlert"), false, false,
-                        nullptr, false).clicked) {
-                activate("preview-alert");
-            }
+            // 主题颜色（角色级 characterColors[当前角色]，随角色保存/切换带出；
+            // 复用 clock-color: 处理器写入，设备端时钟/文字 ≤2s 变色）
+            p->MenuLabel(I18n::t("menu.themeColor"));
+            if (p->MenuRow("ccolor-amber", I18n::t("menu.colorAmber"),
+                        clock_color_ == "amber", false, nullptr, false).clicked)
+                activate("clock-color:amber");
+            if (p->MenuRow("ccolor-ice", I18n::t("menu.colorIce"),
+                        clock_color_ == "ice", false, nullptr, false).clicked)
+                activate("clock-color:ice");
+            if (p->MenuRow("ccolor-white", I18n::t("menu.colorWhite"),
+                        clock_color_ == "white", false, nullptr, false).clicked)
+                activate("clock-color:white");
+            if (p->MenuRow("ccolor-green", I18n::t("menu.colorGreen"),
+                        clock_color_ == "green", false, nullptr, false).clicked)
+                activate("clock-color:green");
+            if (p->MenuRow("ccolor-pink", I18n::t("menu.colorPink"),
+                        clock_color_ == "pink", false, nullptr, false).clicked)
+                activate("clock-color:pink");
             break;
         }
         case kMenuLanguage: {
@@ -2858,7 +2918,7 @@ void UIRenderer::renderMenu() {
             break;
         }
         case kMenuDisplay: {
-            // ==== 显示（左右翻转 / 迷你模式 / 最小化 + 监控项显隐）====
+            // ==== 显示（左右翻转 / 迷你模式 + 监控项显隐；隐藏已提至一级菜单）====
             if (p->MenuRow("back", I18n::t("menu.back"), false, false, nullptr, false).clicked)
                 go(kMenuMain);
             p->MenuLabel(I18n::t("menu.display"));
@@ -2868,12 +2928,6 @@ void UIRenderer::renderMenu() {
             if (p->MenuRow("mini", I18n::t("menu.miniMode"), checked("mini"),
                         false, nullptr, false).clicked)
                 activate("mini");
-            // 最小化：隐藏到系统托盘（托盘图标左键单击/双击唤回）
-            if (p->MenuRow("minimize", I18n::t("menu.minimize"), false, false,
-                        nullptr, false).clicked) {
-                activate("minimize");
-                closeMenu();
-            }
             p->MenuDivider();
             // 系统监控：总开关——开启即显示 CPU/内存/显卡/网络/自身全部指标
             //（子项不再单独提供开关）
@@ -2901,6 +2955,37 @@ void UIRenderer::renderMenu() {
             if (p->MenuRow("autostart", I18n::t("menu.autoLaunch"),
                         checked("autostart"), false, nullptr, false).clicked)
                 activate("autostart");
+            break;
+        }
+        case kMenuCloud: {
+            // ==== 云端账户：登录 / 同步 / 恢复 / 退出 ====
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                        nullptr, false).clicked)
+                go(kMenuMain);
+            p->MenuLabel(I18n::t("menu.cloud"));
+            if (!cloud_logged_in_) {
+                if (p->MenuRow("login", I18n::t("menu.cloudLogin"), false,
+                            false, nullptr, false).clicked) {
+                    activate("cloud:login");
+                    closeMenu();
+                }
+                p->MenuLabel(I18n::t("menu.cloudIntro"));
+            } else {
+                // 同步/恢复：右侧 hint 显示进度/结果（menu_hint 回调，
+                // 由 main 从 CloudClient::syncHint() 注入）
+                if (p->MenuRow("sync", I18n::t("menu.cloudSync"), false,
+                            false, hint_of("cloud:sync").c_str(),
+                            false).clicked)
+                    activate("cloud:sync");
+                if (p->MenuRow("restore", I18n::t("menu.cloudRestore"), false,
+                            false, hint_of("cloud:restore").c_str(),
+                            false).clicked)
+                    activate("cloud:restore");
+                p->MenuDivider();
+                if (p->MenuRow("logout", I18n::t("menu.cloudLogout"), false,
+                            false, nullptr, false).clicked)
+                    activate("cloud:logout");
+            }
             break;
         }
         default:
@@ -3160,7 +3245,6 @@ bool UIRenderer::isPointClickable(float, float) const { return false; }
 std::vector<Rect> UIRenderer::clickRegions() const { return {}; }
 void UIRenderer::reloadFonts() {}
 void UIRenderer::setScale(float) {}
-void UIRenderer::previewAlert() {}
 
 #endif
 

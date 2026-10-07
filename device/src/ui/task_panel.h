@@ -7,6 +7,7 @@
 #ifndef _WIN32
 
 #include <string>
+#include <vector>
 
 #include "api/client.h"
 
@@ -47,6 +48,19 @@ public:
     void renderDate(const std::string& text, float y_top, float size,
                     int screen_w, int screen_h,
                     int region_x = 0, int region_w = -1);
+
+    // 语音会话动作区（设备端，布局：上时钟/中人物/下动作 ≤2 行）：
+    // pill 网格展示当前角色可执行指令（仅展示，无触摸），highlight 指令
+    // 主题色高亮闪烁；commands 为空 = 角色不支持（画 voice.unsupported 提示）。
+    // area_top = 动作区顶边（GL y）；返回面板实际高度（px，主循环压缩人物视口用）
+    float renderVoicePanel(const std::vector<std::string>& commands, int highlight,
+                           const std::string& hint, int screen_w, int screen_h,
+                           float area_top, int region_x = 0, int region_w = -1);
+
+    // 语音面板高度测量（与 renderVoicePanel 同公式）：主循环设人物视口时
+    // 需先知道面板高度（面板贴底、卡片占 [0, 高度]），渲染时 area_top 传
+    // 该值即可精确贴底。字体未加载返回 0（面板不画、人物视口不压缩）。
+    float voicePanelHeight(int command_count);
 
     // 屏幕右上角连接状态图标（两块，纯色几何、无贴图）：
     //   最右 Wi-Fi 信号条（4 根递增）——设备是否已入网：入网=绿，未入网/配网中=红；

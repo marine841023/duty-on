@@ -31,6 +31,7 @@ static std::optional<PetStatus> FetchStatus(cpr::Session& session, int* http_cod
         s.frame_source = j.value("frameSource", std::string{});
         s.clock_color = j.value("clockColor", "amber");
         s.device_brightness = j.value("deviceBrightness", 100);
+        s.device_volume = j.value("deviceVolume", 80);
         s.screen_rotation = j.value("screenRotation", 0);
         s.flip_horizontal = j.value("flipHorizontal", false);
         s.server_time = j.value("serverTime", 0.0);

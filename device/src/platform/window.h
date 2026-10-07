@@ -65,6 +65,13 @@ public:
         (void)new_w; (void)new_h; (void)keep_right;
     }
 
+    // 调整窗口尺寸并保持顶边不动（底边向下生长）：宠物被拖到屏幕上部、
+    // 顶部空间不足以容纳展开的菜单时用（菜单向下伸展）。keep_right 语义
+    // 同 resizeKeepBottom
+    virtual void resizeKeepTop(int new_w, int new_h, bool keep_right = false) {
+        (void)new_w; (void)new_h; (void)keep_right;
+    }
+
     // 窗口当前屏幕位置（物理像素；设备端不实现）
     virtual void windowPos(int& x, int& y) const { x = 0; y = 0; }
     // 位置记忆恢复：把窗口放到左缘 x、底边 bottom_y（物理像素）。

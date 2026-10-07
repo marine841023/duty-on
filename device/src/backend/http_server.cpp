@@ -39,6 +39,7 @@
 #include "backend/hooks_installer.h"
 #include "backend/ide_scanner.h"
 #include "backend/pairing_manager.h"
+#include "config/user_config.h"  // UserConfig::builtinDefaultColor（内置角色出厂色）
 
 // 照片缩放重编码（解码/编码实现均在 live2d_renderer.cpp，本 TU 仅引用声明）
 #include <stb_image.h>
@@ -597,30 +598,39 @@ void HttpServer::registerRoutes() {
         add_cors(res);
         json j = sm_.snapshotJson();
         // 当前形象键 + 设备模式随快照下发（"char_xxx" = 自定义 GIF；否则
-        // Live2D 模型 key；deviceMode = single/multi/frame），硬件屏据此
-        // 热切换形象/布局模式与 PC 保持一致。旧版客户端忽略未知字段。
+        // Live2D 模型 key；deviceMode = single/multi/frame/voice），硬件屏
+        // 据此热切换形象/布局模式与 PC 保持一致。旧版客户端忽略未知字段。
         if (json cfg = readConfigJson(); cfg.is_object()) {
             j["activeCharacter"] = cfg.value("activeCharacterId", std::string{});
             j["deviceMode"] = cfg.value("deviceMode", "multi");
             // 相框播放源（motion=动作轮播 / folder=指定文件夹照片）；旧版
             // 设备端忽略未知字段，行为保持动作轮播
             j["frameSource"] = cfg.value("frameSource", "motion");
-            // 时钟颜色：当前角色专属色（characterColors[active]）优先，否则
-            // 全局 clockColor——切换角色时自动切换显示屏文字颜色
+            // 时钟颜色：当前角色专属色（characterColors[active]）优先，
+            // 其次内置角色出厂默认色，否则全局 clockColor——切换角色时
+            // 自动切换显示屏文字颜色
             {
                 std::string eff = cfg.value("clockColor", "amber");
                 const std::string ckey =
                     cfg.value("activeCharacterId", std::string{});
+                bool has_char_color = false;
                 if (auto cc = cfg.find("characterColors");
                     cc != cfg.end() && cc->is_object()) {
                     if (auto it = cc->find(ckey);
                         it != cc->end() && it->is_string() &&
-                        !it->get<std::string>().empty())
+                        !it->get<std::string>().empty()) {
                         eff = it->get<std::string>();
+                        has_char_color = true;
+                    }
+                }
+                if (!has_char_color) {
+                    const std::string def = UserConfig::builtinDefaultColor(ckey);
+                    if (!def.empty()) eff = def;
                 }
                 j["clockColor"] = std::move(eff);
             }
             j["deviceBrightness"] = cfg.value("deviceBrightness", 100);
+            j["deviceVolume"] = cfg.value("deviceVolume", 80);
             j["screenRotation"] = cfg.value("screenRotation", 0);
             j["flipHorizontal"] = cfg.value("flipHorizontal", false);
             // 状态音频（设备端状态切换时播放）：activeAudio = 当前角色

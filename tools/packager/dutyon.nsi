@@ -19,8 +19,10 @@
 !define APP_NAME_CN "开工啦"
 !define APP_EXE "dutyon-pet.exe"
 ; 版本可由命令行覆盖：makensis /DAPP_VERSION=x.y.z
+; （build-package.ps1 已自动从 device\CMakeLists.txt project VERSION 解析传入；
+;  下面的默认值仅为直接调用 makensis 时的兜底，勿手改——以 CMake 为准）
 !ifndef APP_VERSION
-  !define APP_VERSION "2.0.8"
+  !define APP_VERSION "2.0.11"
 !endif
 !define APP_PUBLISHER "DutyOn"
 !define APP_REGKEY "Software\DutyOn"

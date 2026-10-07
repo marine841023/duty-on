@@ -51,6 +51,14 @@ public:
     // 设置状态循环动作（动作结束后自动重播；对应 1.x playStateMotion）
     void setLoopMotion(const std::string& group, int index);
 
+    // 设备端语音指令：动作播 N 遍（Force 起播抢占，播放中重复调用即打断
+    // 重启计次；播完自动回落状态循环动作/Idle）。PC 端不调用。
+    void playMotionTimes(const std::string& group, int index, int times);
+    // 取消剩余遍数（语音会话退出时调用；当前这遍自然播完）
+    void cancelTimesMotion();
+    // N 遍播完的一次性通知（true 后自动清零；语音会话回到监听态用）
+    bool takeTimesFinished();
+
     // 每帧调用：更新动作/物理/眨眼/呼吸，然后渲染
     void update(float delta_seconds);
     void render();

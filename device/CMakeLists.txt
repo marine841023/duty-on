@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(dutyon-2.0 VERSION 2.0.10 LANGUAGES CXX)
+project(dutyon-2.0 VERSION 2.0.11 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -228,7 +228,8 @@ if(WIN32)
         src/backend/autostart.cpp
         src/backend/http_server.cpp
         src/backend/pairing_manager.cpp
-        src/backend/backend_service.cpp)
+        src/backend/backend_service.cpp
+        src/cloud/cloud_client.cpp)
 else()
     # ApiClient（HTTP 轮询 PC 端 API）仅设备端使用；PC 端内嵌后端直连。
     # text_renderer/task_panel = 下半屏任务列表（字形图集文字 + 面板）
@@ -239,6 +240,8 @@ else()
     list(APPEND SOURCES
         src/api/client.cpp
         src/audio/sound_player.cpp
+        src/audio/voice_kws.cpp
+        src/audio/voice_match.cpp
         src/net/wifi_manager.cpp
         src/net/pc_discovery.cpp
         src/net/device_identity.cpp
@@ -264,7 +267,16 @@ target_include_directories(dutyon-pet PRIVATE
 target_include_directories(dutyon-pet PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/deps/httplib)
 
-target_compile_definitions(dutyon-pet PRIVATE ${CSM_TARGET})
+# SHA-256 单头（third_party/deps/sha256/sha256.h）：云同步清单哈希 +
+# 升级包完整性校验（cloud_client.cpp）
+target_include_directories(dutyon-pet PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/deps/sha256)
+
+target_compile_definitions(dutyon-pet PRIVATE
+    ${CSM_TARGET}
+    # 版本号唯一定义处（project VERSION）→ 注入 C++（config.h 有 dev 兜底；
+    # cloud_client 的升级检查在 "dev" 下禁用）
+    DUTYON_VERSION="${PROJECT_VERSION}")
 
 # 诊断：生成 link map（含行号），崩溃偏移可直查源码位置
 if(MSVC)

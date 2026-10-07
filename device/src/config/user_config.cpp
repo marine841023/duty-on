@@ -130,6 +130,8 @@ UserConfig UserConfigStore::load() {
     if (j.contains("deviceBrightness") && j["deviceBrightness"].is_number())
         cfg.device_brightness =
             std::clamp(j["deviceBrightness"].get<int>(), 10, 100);
+    if (j.contains("deviceVolume") && j["deviceVolume"].is_number())
+        cfg.device_volume = std::clamp(j["deviceVolume"].get<int>(), 0, 100);
     if (j.contains("deviceRepo") && j["deviceRepo"].is_string())
         cfg.device_repo = j["deviceRepo"].get<std::string>();
     if (j.contains("soundMute") && j["soundMute"].is_boolean())
@@ -152,6 +154,12 @@ UserConfig UserConfigStore::load() {
     }
     if (j.contains("screenRotation") && j["screenRotation"].is_number())
         cfg.screen_rotation = std::clamp(j["screenRotation"].get<int>(), 0, 270);
+    if (j.contains("cloudServer") && j["cloudServer"].is_string())
+        cfg.cloud_server = j["cloudServer"].get<std::string>();
+    if (j.contains("cloudToken") && j["cloudToken"].is_string())
+        cfg.cloud_token = j["cloudToken"].get<std::string>();
+    if (j.contains("cloudUsername") && j["cloudUsername"].is_string())
+        cfg.cloud_username = j["cloudUsername"].get<std::string>();
     if (j.contains("stateMotions") && j["stateMotions"].is_object()) {
         for (auto it = j["stateMotions"].begin(); it != j["stateMotions"].end(); ++it)
             cfg.state_motions[it.key()] = parseMotions(it.value());
@@ -289,6 +297,11 @@ void UserConfigStore::saveDeviceBrightness(int v) {
     updateConfig([&](json& j) { j["deviceBrightness"] = v; });
 }
 
+void UserConfigStore::saveDeviceVolume(int v) {
+    // 设备端音量（软件缩放）；/api/status 每次轮询读文件下发
+    updateConfig([&](json& j) { j["deviceVolume"] = v; });
+}
+
 void UserConfigStore::saveStateAudio(const std::string& key,
                                      const std::string& state,
                                      const std::string& file) {
@@ -330,6 +343,23 @@ void UserConfigStore::saveScreenRotation(int deg) {
     // 屏幕旋转角（度：0/90/180/270）：设备端 rotation 0 直出，非 0 走
     // 逻辑 FBO + 纯旋转合成（UV 已修正去镜像），并按朝向选左/上下布局
     updateConfig([&](json& j) { j["screenRotation"] = deg; });
+}
+
+void UserConfigStore::saveCloudAccount(const std::string& server,
+                                       const std::string& token,
+                                       const std::string& username) {
+    // 云端账户：server 始终保留（登录弹窗回填 + 断线后仍知道连哪）；
+    // token/username 成对写（token 空 = 注销，两者都清）
+    updateConfig([&](json& j) {
+        j["cloudServer"] = server;
+        if (token.empty()) {
+            j.erase("cloudToken");
+            j.erase("cloudUsername");
+        } else {
+            j["cloudToken"] = token;
+            j["cloudUsername"] = username;
+        }
+    });
 }
 
 std::map<std::string, std::string> UserConfigStore::loadPairedDevices() {

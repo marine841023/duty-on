@@ -254,6 +254,21 @@ public:
         height_ = new_h;
     }
 
+    void resizeKeepTop(int new_w, int new_h, bool keep_right) override {
+        if (!hwnd_) return;
+        if (new_w == width_ && new_h == height_) return;
+        RECT rc;
+        GetWindowRect(hwnd_, &rc);
+        // 顶边固定：y 不动、底边下移（宠物在屏幕上部时菜单向下伸展，
+        // 内容随 offset 下移让位；菜单关闭后窗口复原、宠物回位）；
+        // 宽度语义同 resizeKeepBottom
+        const int x = keep_right ? rc.right - new_w : rc.left;
+        SetWindowPos(hwnd_, HWND_TOPMOST, x, rc.top, new_w, new_h,
+                     SWP_NOACTIVATE);
+        width_ = new_w;
+        height_ = new_h;
+    }
+
     void windowPos(int& x, int& y) const override {
         RECT rc;
         if (hwnd_ && GetWindowRect(hwnd_, &rc)) {

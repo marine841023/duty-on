@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -13,8 +14,12 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <poll.h>
+#include <signal.h>
 #include <string>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "config.h"
@@ -246,15 +251,32 @@ std::string shellQuote(const std::string& s) {
 // （实测 amixer mute 状态在播放期间不被驱动重置，但首尾 pop 依然存在）。
 // 改为后台线程持续喂 50ms 静音块保持流不断，提示音 PCM 插进队列由同一线程
 // 取出写入，pop 便只剩服务启动/退出各一次（开机、关机时刻，日常无感）。
+// aplay 意外退出（如开机早于 HDMI 声卡注册）或卡死时由 respawn() 重建流。
+//
+// v4.2（2026-10-06）：popen/pclose → fork/execv 直控 aplay PID。
+// 根因：H616 HDMI DMA 偶发死锁（USB 麦持续采集时高发），aplay 阻塞在
+// snd_pcm_writei 永不退出——pclose() 死等 aplay → worker 卡死，pre-ack
+// 重建与 15 分钟健康重建全部失效（实测 stream rebuild 后无 respawned 日志）。
+// 直控 PID 后：writeChunk 用 poll 超时检测管道拥塞（aplay 不读 stdin），
+// respawn 先 SIGKILL 再 waitpid（无条件、不阻塞），卡死流必能重建。
 // ---------------------------------------------------------------------------
 struct SoundPlayer::Impl {
-    FILE* pipe_ = nullptr;
+    int pipe_fd_ = -1;      // aplay stdin 管道写端（父进程持有）
+    pid_t aplay_pid_ = -1;  // aplay 子进程（直控，可 SIGKILL）
     std::deque<std::vector<int16_t>> queue_;
     std::mutex mu_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};  // 正在停机：抑制管道断开的误报警
+    std::atomic<bool> rebuild_requested_{false};  // 唤醒应答前强制重建请求
+    std::atomic<int> volume_{80};  // 软件音量 0-100（PC 菜单「设备→音量」下发）
     std::thread worker_;
     bool warn_once_ = false;
+    // pcm 流最近一次打开时刻：HDMI 链路保活用（见 run 中的定期重建）
+    std::chrono::steady_clock::time_point stream_opened_at_{};
+    // 保活间隔：USB 麦在位时 HDMI 音频通道可能一次性卡死（ALSA 层仍在
+    // 消费、物理输出无声，流重开即恢复）。15 分钟空闲重建一次，
+    // pclose→popen 约 100ms 静音缝隙 + 一次轻微 codec 上下电 pop，无感。
+    static constexpr int kHealthIntervalMin = 15;
 
     // 输出设备：环境变量 DUTYON_AUDIODEV 覆盖（接 I2S/USB 声卡后指向它），
     // 否则用 config.h 默认值
@@ -263,13 +285,54 @@ struct SoundPlayer::Impl {
         return (env && *env) ? std::string(env) : std::string(kAudioDevice);
     }
 
+    // fork/execv 启动 aplay（stdin = 管道读端，raw 流模式）
+    bool spawnAplay() {
+        int fds[2];
+        if (::pipe(fds) != 0) return false;
+        const std::string rate = std::to_string(kStreamRate);
+        const std::string ch = std::to_string(kStreamCh);
+        // argv 在 fork 前构建（子进程内不 malloc）
+        std::vector<std::string> argsStr = {
+            "aplay", "-q", "-D", device(), "-t", "raw",
+            "-f", "S16_LE", "-r", rate, "-c", ch, "-"};
+        std::vector<char*> argv;
+        for (auto& a : argsStr) argv.push_back(const_cast<char*>(a.c_str()));
+        argv.push_back(nullptr);
+        const pid_t pid = ::fork();
+        if (pid < 0) {
+            ::close(fds[0]);
+            ::close(fds[1]);
+            return false;
+        }
+        if (pid == 0) {  // 子进程：stdin←管道读端，exec aplay
+            ::dup2(fds[0], STDIN_FILENO);
+            ::close(fds[0]);
+            ::close(fds[1]);
+            ::execvp("aplay", argv.data());
+            _exit(127);  // exec 失败
+        }
+        ::close(fds[0]);
+        pipe_fd_ = fds[1];
+        aplay_pid_ = pid;
+        return true;
+    }
+
+    // 强杀并回收 aplay（SIGKILL 无条件，HDMI DMA 卡死也能解除；不阻塞）
+    void killAplay() {
+        if (aplay_pid_ > 0) {
+            ::kill(aplay_pid_, SIGKILL);
+            ::waitpid(aplay_pid_, nullptr, 0);
+            aplay_pid_ = -1;
+        }
+        if (pipe_fd_ >= 0) {
+            ::close(pipe_fd_);
+            pipe_fd_ = -1;
+        }
+    }
+
     void start() {
-        char cmd[256];
-        snprintf(cmd, sizeof(cmd),
-                 "aplay -q -D %s -t raw -f S16_LE -r %d -c %d -",
-                 device().c_str(), kStreamRate, kStreamCh);
-        pipe_ = popen(cmd, "w");
-        if (!pipe_) {
+        ::signal(SIGPIPE, SIG_IGN);  // aplay 被杀后 write 得 EPIPE 而非进程终止
+        if (!spawnAplay()) {
             fprintf(stderr, "[Sound] aplay unavailable, sound disabled\n");
             return;
         }
@@ -278,6 +341,7 @@ struct SoundPlayer::Impl {
         // 预缓冲：先灌静音建立水位，再启动写线程，避免开局 underrun
         const std::vector<int16_t> silence(kChunkSamples, 0);
         for (int i = 0; i < kPrebufferChunks; ++i) writeChunk(silence);
+        stream_opened_at_ = std::chrono::steady_clock::now();
 
         worker_ = std::thread([this] { run(); });
         printf("[Sound] stream ready: %s %dHz/%dch (content %dHz)\n",
@@ -285,39 +349,45 @@ struct SoundPlayer::Impl {
     }
 
     void stop() {
-        // 注意：systemd 默认 KillMode=control-group，SIGTERM 会连 aplay 一起杀掉，
-        // 写线程会在本函数被调之前就拿到 EPIPE（无法用 stopping_ 完全拦住）。
-        // 不能改成 KillMode=process：那样 SIGTERM 只到主进程，若主进程未注册
-        // 信号处理就直接终止，aplay 会成为孤儿进程持续占用声卡。
         stopping_ = true;
         running_ = false;
         if (worker_.joinable()) worker_.join();
-        if (pipe_) {
-            pclose(pipe_);  // 关闭流，codec 下电（此刻有最后一次 pop）
-            pipe_ = nullptr;
-        }
+        killAplay();  // 关闭流，codec 下电（此刻有最后一次 pop）
     }
 
-    // 写一块到管道；fwrite 受管道背压自然限速，无需额外 sleep
+    // 写一块到 aplay stdin。poll 250ms 超时检测 aplay 卡死（DMA 死锁时不读
+    // stdin、管道满 → POLLOUT 不就绪 → false → 上层 respawn 强杀重建）
     bool writeChunk(const std::vector<int16_t>& chunk) {
-        if (!pipe_) return false;
-        const size_t n = fwrite(chunk.data(), sizeof(int16_t), chunk.size(), pipe_);
-        if (n != chunk.size()) {
+        if (pipe_fd_ < 0) return false;
+        struct pollfd pfd;
+        pfd.fd = pipe_fd_;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        if (::poll(&pfd, 1, 250) != 1) return false;  // 超时 = 流卡死
+        const size_t bytes = chunk.size() * sizeof(int16_t);
+        const ssize_t n = ::write(pipe_fd_, chunk.data(), bytes);
+        if (n != (ssize_t)bytes) {
             if (!warn_once_ && !stopping_.load()) {
                 warn_once_ = true;
-                // 措辞中性：正常停机时 systemd 连 aplay 一起 SIGTERM，这里必然
-                // 拿到 EPIPE，属预期路径；运行中 aplay 意外退出也走同一分支。
+                // 措辞中性：正常停机时连 aplay 一起杀，这里必然拿到 EPIPE，
+                // 属预期路径；运行中 aplay 意外退出也走同一分支。
                 fprintf(stderr, "[Sound] aplay stream closed\n");
             }
             return false;
         }
-        fflush(pipe_);
         return true;
     }
 
     void run() {
         std::vector<int16_t> chunk(kChunkSamples, 0);
         while (running_.load()) {
+            // 应答前强制重建请求（唤醒应答防 H616 HDMI 间歇静音）：
+            // 重建后本轮流空 chunk 预热，下一轮恢复常规输出
+            if (rebuild_requested_.exchange(false)) {
+                printf("[Sound] stream rebuild (pre-ack)\n");
+                if (!respawn()) break;
+                continue;
+            }
             bool filled = false;
             {
                 std::lock_guard<std::mutex> lk(mu_);
@@ -335,12 +405,59 @@ struct SoundPlayer::Impl {
             }
             if (!filled) std::fill(chunk.begin(), chunk.end(), 0);  // 空闲喂静音
 
-            if (!writeChunk(chunk)) break;  // 管道断了就不再空转
+            // HDMI 链路保活：空闲且距上次开流超过间隔时主动重建 pcm 流。
+            // 卡死时 ALSA 层照常消费（writeChunk 不会失败），只能靠定时
+            // pclose→popen 强制 HDMI 音频通道重新初始化来自愈。
+            if (!filled && std::chrono::steady_clock::now() - stream_opened_at_ >
+                               std::chrono::minutes(kHealthIntervalMin)) {
+                printf("[Sound] stream health rebuild (every %dmin idle)\n",
+                       kHealthIntervalMin);
+                if (!respawn()) break;  // 停机中 / 重建最终失败
+                continue;               // respawn 已预缓冲，进入下一轮
+            }
+
+            // 软件音量（0-100，PC 菜单「设备→音量」下发）：写入前按系数
+            // 缩放；>=100 直通省 CPU。无声问题已确认是 USB 麦克风在位时
+            // HDMI 链路一次性卡死（与软件无关），缩放逻辑恢复启用
+            const int vol = volume_.load(std::memory_order_relaxed);
+            if (vol < 100) {
+                const float f = (float)vol / 100.f;
+                for (auto& s : chunk) s = (int16_t)((float)s * f);
+            }
+            if (writeChunk(chunk)) continue;
+            if (stopping_.load()) break;  // 正常停机（systemd 连 aplay 一起杀）
+            if (!respawn()) break;        // aplay 意外退出：重建流（见 respawn）
         }
     }
 
+    // 流重建：aplay 意外退出或卡死（H616 HDMI DMA 死锁）后的恢复路径。
+    // 典型场景：① 开机竞态——dutyon.service 不再等 HDMI 声卡注册（内核
+    // deferred probe ~9s）就启动，早于它起的 aplay 打不开设备即退；② DMA
+    // 死锁——aplay 阻塞在 snd_pcm_writei，writeChunk poll 超时，必须
+    // SIGKILL 才能解除。失败退避 1s 重试，期间入队丢弃。
+    bool respawn() {
+        killAplay();  // SIGKILL + waitpid：不阻塞，卡死的 aplay 也必死
+        const std::vector<int16_t> silence(kChunkSamples, 0);
+        while (running_.load() && !stopping_.load()) {
+            if (spawnAplay()) {
+                bool ok = true;
+                for (int i = 0; i < kPrebufferChunks; ++i)
+                    ok = writeChunk(silence) && ok;
+                if (ok) {
+                    stream_opened_at_ = std::chrono::steady_clock::now();
+                    printf("[Sound] stream respawned: %s\n", device().c_str());
+                    return true;
+                }
+                killAplay();  // aplay 起了但立刻死（设备未就绪），继续等
+            }
+            for (int w = 0; w < 10 && running_.load() && !stopping_.load(); ++w)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        return false;
+    }
+
     void enqueue(std::vector<int16_t> buf) {
-        if (buf.empty() || !pipe_) return;
+        if (buf.empty() || pipe_fd_ < 0) return;
         std::lock_guard<std::mutex> lk(mu_);
         if (queue_.size() >= 4) queue_.pop_front();  // 防提示音堆积
         queue_.push_back(std::move(buf));
@@ -411,6 +528,13 @@ SoundPlayer::~SoundPlayer() {
     delete impl_;
 }
 
+void SoundPlayer::setVolume(int percent) {
+    // 软件音量（0-100）：clamp 后原子写入，worker 下一块生效（≤50ms）
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    impl_->volume_.store(percent, std::memory_order_relaxed);
+}
+
 void SoundPlayer::play(Event ev) {
     printf("[Sound] play ev=%d\n", (int)ev);
     switch (ev) {
@@ -435,6 +559,12 @@ void SoundPlayer::playFile(const std::string& path) {
     // 流队列后播放时序由流保证。主进程退出时析构 SoundPlayer，此线程若
     // 仍在解码会随进程终止（全局对象生命周期覆盖全部业务场景）
     std::thread([path, this] { impl_->decodeFile(path); }).detach();
+}
+
+// 唤醒应答前调用：请求 worker 线程 pclose→popen 强制重建 HDMI PCM 流
+// （防 H616 间歇静音，见 run 循环头部消费点）
+void SoundPlayer::requestRebuild() {
+    impl_->rebuild_requested_.store(true);
 }
 
 }  // namespace dutyon

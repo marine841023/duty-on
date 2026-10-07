@@ -518,6 +518,123 @@ float TaskPanel::clockLineHeight(float pixel_size) const {
     return f.isLoaded() ? f.lineHeight(pixel_size) : pixel_size;
 }
 
+// 语音会话动作区（布局见 task_panel.h 注释）。pill 网格自适应列数：
+// 竖屏整屏宽 5 列，横屏右列窄时收缩；每 pill 文字超宽自动缩字号
+float TaskPanel::voicePanelHeight(int command_count) {
+    auto* p = impl_;
+    if (!p->text.isLoaded() && !p->clock_font.isLoaded()) return 0.f;
+    constexpr float kPillGap = 8.f;
+    constexpr float kPillH = 46.f;
+    constexpr float kHintGap = 8.f;
+    constexpr float kHintSize = 32.f;  // 待机提示行（"说在吗扣扣唤醒"）
+    // 空列表（角色不支持）只画提示行；有指令按 ≤2 行 × 每行 5 个
+    const int rows = command_count > 0 ? (command_count + 4) / 5 : 0;
+    const float hint_h = p->text.lineHeight(kHintSize);
+    return hint_h + kHintGap + rows * kPillH + (rows > 1 ? kPillGap : 0.f);
+}
+
+float TaskPanel::renderVoicePanel(const std::vector<std::string>& commands,
+                                  int highlight, const std::string& hint,
+                                  int screen_w, int screen_h, float area_top,
+                                  int region_x, int region_w) {
+    auto* p = impl_;
+    if (screen_w <= 0 || screen_h <= 0 || area_top <= 0.f) return 0.f;
+    if (region_w < 0) region_w = screen_w;
+    if (!p->text.isLoaded() && !p->clock_font.isLoaded()) return 0.f;
+    TextRenderer& font = p->text;
+
+    // 布局常量（与任务卡片同风格）
+    constexpr float kMargin = 12.f;      // 区左右边距
+    constexpr float kPillGap = 8.f;      // pill 间距
+    constexpr float kPillH = 46.f;       // pill 高
+    constexpr float kPillRadius = 14.f;  // pill 圆角
+    constexpr float kHintSize = 32.f;    // 提示行字号（醒目，待机即引导语）
+    constexpr float kHintGap = 8.f;      // 提示行与 pill 网格间距
+    constexpr float kPillFont = 26.f;    // pill 名字号（超宽自动缩）
+
+    // ---- 高度计算：提示行 + pill 两行 ----
+    const int n = (int)commands.size();
+    const int rows = n > 0 ? (n + 4) / 5 : 0;  // ≤2 行（每行最多 5）
+    const float hint_h = p->text.lineHeight(kHintSize);
+    float panel_h = hint_h + kHintGap + rows * kPillH + (rows > 1 ? kPillGap : 0.f);
+    if (area_top - panel_h < 0.f) panel_h = area_top;  // 防越界（极端小屏）
+    const float panel_bottom = area_top - panel_h;
+
+    // ---- 半透明黑底卡片（与任务列表同款）----
+    const float x0 = region_x + kMargin;
+    const float x1 = region_x + region_w - kMargin;
+    p->fillRoundedRect(x0, panel_bottom, x1, area_top, kCardRadius, 0.f, 0.f,
+                       0.f, kCardAlpha, screen_w, screen_h);
+
+    // ---- 提示行（灰色小字，居中）----
+    if (!hint.empty() && font.isLoaded()) {
+        const float w = font.measureWidth(hint, kHintSize);
+        const float hx = (x0 + x1) * 0.5f - w * 0.5f;
+        font.draw(hint, hx, area_top - 4.f, kHintSize, 0.72f, 0.74f, 0.80f,
+                  0.95f, screen_w, screen_h);
+    }
+
+    if (rows == 0) return panel_h;
+
+    // ---- pill 网格 ----
+    // 每行列数 = min(5, 剩余个数)；pill 宽 = (可用宽 - 间距) / 列数
+    const float usable = x1 - x0;
+    // 高亮闪烁（主题色 alpha 呼吸，周期 1.2s）
+    static const auto t0 = std::chrono::steady_clock::now();
+    const float now_s = std::chrono::duration<float>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+    const float blink =
+        0.55f + 0.45f * (0.5f + 0.5f * std::sin(now_s * 6.2831853f / 1.2f));
+
+    float top = area_top - hint_h - kHintGap;  // 第 1 行 pill 顶边
+    for (int r = 0; r < rows; ++r) {
+        const int cols = std::min(5, n - r * 5);
+        const float pill_w = (usable - kPillGap * (cols - 1)) / (float)cols;
+        for (int c = 0; c < cols; ++c) {
+            const int idx = r * 5 + c;
+            const float px0 = x0 + c * (pill_w + kPillGap);
+            const float px1 = px0 + pill_w;
+            const float py1 = top - r * (kPillH + kPillGap);  // 行顶（GL y）
+            const float py0 = py1 - kPillH;
+            const bool hi = (idx == highlight);
+
+            if (hi) {
+                // 高亮：主题色描边（呼吸闪烁）+ 深色内底 + 白色粗体字
+                p->fillRoundedRect(px0, py0, px1, py1, kPillRadius, p->body_r,
+                                   p->body_g, p->body_b, blink, screen_w,
+                                   screen_h);
+                p->fillRoundedRect(px0 + 1.5f, py0 + 1.5f, px1 - 1.5f,
+                                   py1 - 1.5f, kPillRadius - 1.5f, 0.f, 0.f,
+                                   0.f, 0.45f, screen_w, screen_h);
+            } else {
+                // 常态：灰白淡底 + 浅灰文字
+                p->fillRoundedRect(px0, py0, px1, py1, kPillRadius, 0.85f,
+                                   0.87f, 0.92f, 0.10f, screen_w, screen_h);
+            }
+
+            if (!font.isLoaded()) continue;
+            // pill 文字：超宽自动缩字号，垂直居中
+            float size = kPillFont;
+            const float max_text = pill_w - 10.f;
+            while (size > 14.f && font.measureWidth(commands[idx], size) > max_text)
+                size -= 2.f;
+            const float tw = font.measureWidth(commands[idx], size);
+            const float lh = font.lineHeight(size);
+            const float cy = (py0 + py1) * 0.5f;
+            if (hi)
+                font.drawBold(commands[idx], (px0 + px1) * 0.5f - tw * 0.5f,
+                              cy + lh * 0.5f, size, 1.0f, 1.0f, 1.0f, 1.0f,
+                              screen_w, screen_h, size * 0.03f);
+            else
+                font.draw(commands[idx], (px0 + px1) * 0.5f - tw * 0.5f,
+                          cy + lh * 0.5f, size, 0.86f, 0.88f, 0.92f, 0.95f,
+                          screen_w, screen_h);
+        }
+    }
+    return panel_h;
+}
+
 void TaskPanel::setSpacing(float scale) {
     impl_->text.setSpacing(scale);
     impl_->clock_font.setSpacing(scale);
@@ -538,8 +655,8 @@ void TaskPanel::renderNetStatus(bool wifi_online, bool pc_online,
     if (screen_w <= 0 || screen_h <= 0) return;
 
     // 右上角两块连接状态图标（纯色几何，无贴图），分别表示两段链路：
-    //   最右 = Wi-Fi 信号条（4 根递增）：设备是否已入网（入网=绿/未入网=红）；
-    //   其左 = 显示器图标（镂空屏框+支架）：是否已连上 PC（连上=绿/未连=灰）。
+    //   最右 = Wi-Fi 信号条（4 根递增）：设备是否已入网（入网=时钟主题色/未入网=灰+红叉）；
+    //   其左 = 显示器图标（镂空屏框+支架）：是否已连上 PC（连上=时钟主题色/未连=灰+红叉）。
     const float top = (float)screen_h - 12.f;            // 顶边距 12
     const float box_h = 20.f;                            // 图标高
     const float bottom = top - box_h;
@@ -566,12 +683,12 @@ void TaskPanel::renderNetStatus(bool wifi_online, bool pc_online,
         }
     };
 
-    // ---- Wi-Fi 信号条：入网=绿；未入网/配网中=灰底 + 红叉 ----
+    // ---- Wi-Fi 信号条：入网=时钟主题色（与时钟/日期统一）；未入网=灰底 + 红叉 ----
     {
         const bool off = !wifi_online;
-        const float r = off ? 0.55f : 0.25f;
-        const float g = off ? 0.55f : 0.85f;
-        const float b = off ? 0.58f : 0.45f;
+        const float r = off ? 0.55f : p->body_r;
+        const float g = off ? 0.55f : p->body_g;
+        const float b = off ? 0.58f : p->body_b;
         const float a = off ? 0.75f : 0.95f;
         static const float kBarH[4] = {6.f, 10.f, 14.f, 18.f};
         for (int i = 0; i < 4; ++i) {
@@ -592,9 +709,9 @@ void TaskPanel::renderNetStatus(bool wifi_online, bool pc_online,
         const float scr_bot = bottom + 4.f;    // 屏幕下沿
         const float t = 2.f;                   // 屏框线宽
         const bool off = !pc_online;
-        const float r = off ? 0.55f : 0.25f;
-        const float g = off ? 0.55f : 0.85f;
-        const float b = off ? 0.58f : 0.45f;
+        const float r = off ? 0.55f : p->body_r;
+        const float g = off ? 0.55f : p->body_g;
+        const float b = off ? 0.58f : p->body_b;
         const float a = off ? 0.75f : 0.95f;
         // 屏框四边（镂空，中间透出背景）
         p->fillRect(px0, scr_top - t, px1, scr_top, r, g, b, a, screen_w, screen_h);

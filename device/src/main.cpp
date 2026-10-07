@@ -57,6 +57,8 @@
 #include "backend/backend_service.h"  // 单进程后端（原 duty-on.exe 职责）
 #include "platform/sync_progress.h"   // 设备程序自动更新进度窗口
 #include "platform/pair_code_dialog.h"  // 配对码输入弹窗（验证码风格 6 格）
+#include "cloud/cloud_client.h"         // 云端账户：登录/同步/一键更新
+#include "platform/cloud_login_dialog.h"  // 云端登录弹窗（服务器/用户名/密码）
 #else
 #include <nlohmann/json.hpp>            // 用户模型 model3.json 解析（PC 同步）
 #include "net/wifi_manager.h"         // Wi-Fi 配网 + AP/client 模式切换状态机
@@ -65,6 +67,7 @@
 #include "render/photo_player.h"      // 电子相框照片逐张流式播放
 #include "ui/task_panel.h"            // 下半屏任务列表（项目名 + 状态）
 #include "audio/sound_player.h"       // 事件提示音（开始/结束/提醒）
+#include "audio/voice_kws.h"          // 语音唤醒/关键词监听（子进程 KWS）
 #endif
 
 using namespace dutyon;
@@ -88,6 +91,46 @@ static std::string gifFileFor(const CustomCharacter& c, const std::string& state
     if (!f && !c.alert.empty()) f = &c.alert;
     return f ? *f : std::string();
 }
+
+#ifndef _WIN32
+// ---------------------------------------------------------------------------
+// 语音互动（仅设备端；设备第四种模式 device_mode=="voice"，PC 菜单"语音交互
+// 模式"下发，仅该模式收音，切走即停）：唤醒词 "在吗扣扣"（"DutyOn" 为匹配
+// 事件名）-> 应答"我在" -> 10s 监听窗口内收中文动作指令，命中即播动作
+// 3 遍（新指令打断旧动作重启计次），播完回监听重新计时；超时退出会话回
+// 模式待机（面板常驻显示唤醒提示，不退出模式；恢复状态循环动作）。
+//
+// 引擎：sherpa-onnx 流式 ASR（zh-14M，子进程 asr-spotter）持续转写，
+// hotwords.txt 热词偏置提高词表命中率，voice_match 按无声调拼音模糊
+// 匹配（同音字/前后鼻音均兜底，如"金亚"=惊讶、"亮俏"=踉跄）。
+//
+// 指令词表与 frontend/assets/device/kws/hotwords.txt 一致；group/index
+// 为 Live2D 动作组/组内序号，按当前模型实际拥有的动作过滤（不同角色
+// 动作组差异大，取交集，上限 10 条 = 面板 ≤2 行）。"耶" = FlickLeft
+// 组 yeah 动作的中文语音形式。
+// ---------------------------------------------------------------------------
+struct VoiceCmdEntry {
+    const char* kw;     // 语音匹配命中名（voice_match 事件，恒用此字段匹配）
+    const char* group;  // Live2D 动作组名
+    int index;          // 组内动作序号
+};
+static const VoiceCmdEntry kVoiceMotionTable[] = {
+    {"发呆", "Idle", 0},        {"开心", "Idle", 1},
+    {"叹气", "Idle", 2},        {"睡觉", "Idle", 3},
+    {"生气", "Tap", 0},         {"难过", "Tap", 1},
+    {"哭泣", "Tap", 2},         {"喜悦", "Tap", 3},
+    {"点头", "Tap", 4},         {"再见", "FlickUp", 0},
+    {"高兴", "FlickUp", 1},     {"威胁", "FlickUp", 2},
+    {"肌肉", "FlickDown", 0},   {"恐惧", "FlickDown", 1},
+    {"惊讶", "FlickRight", 0},  {"爱心", "Flick3", 0},
+    {"哈欠", "Flick3", 1},      {"耶", "FlickLeft", 0},
+    {"走路", "FlickLeft", 1},   {"踉跄", "Shake", 0},
+    {"摇头", "Shake", 1},
+};
+// 会话状态：None=待机（只认唤醒词）/ Listen=监听指令（10s 超时）/
+// Playing=指令动作播 3 遍中（播完回 Listen）
+enum class VoiceSess { None, Listen, Playing };
+#endif
 
 #ifdef _WIN32
 // ---------------------------------------------------------------------------
@@ -478,6 +521,11 @@ int main() {
 
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
+#ifndef _WIN32
+    // aplay 管道断裂（声卡未就绪/意外退出）按 EPIPE 错误码处理，由
+    // SoundPlayer 重建流；不能让默认 SIGPIPE 直接杀掉整个进程
+    signal(SIGPIPE, SIG_IGN);
+#endif
 #ifdef _WIN32
     SetUnhandledExceptionFilter(CrashHandler);
 #endif
@@ -662,23 +710,32 @@ int main() {
     std::vector<ModelEntry> model_entries = UserConfigStore::listModels(builtin_roots);
     std::string current_model_key;  // 1.x activeCharacterId（Live2D 模型唯一键）
 #ifndef _WIN32
-    // 最近一次状态动作（模型热切换后重放，避免新模型停在待机）
-    std::string dev_motion_group;
-    int dev_motion_idx = 0;
     // PC「动作设定」下发的状态动作覆盖（/api/status stateMotions，按当前
     // 角色过滤）；优先于设备本地 stateMotions，断连后保持最近值
     std::map<std::string, std::pair<std::string, int>> pc_state_motions;
     // 欢迎信号序号基准（/api/status welcomeSeq）：增大即播一次欢迎
     long long dev_welcome_prev = 0;
     // 硬件屏布局模式（PC 经 /api/status 下发；断连后保持最近值）：
-    // multi=角色半屏+任务列表 / single=角色全屏+大时钟 / frame=相框全屏轮播。
-    // 初始 frame：未连上 PC 时当电子相框用（连上后 PC 下发模式覆盖）
-    std::string device_mode = "frame";
+    // multi=角色半屏+任务列表 / single=角色全屏+大时钟 / frame=相框全屏轮播
+    // / voice=语音交互（唤醒词+中文动作指令，仅该模式收音）。
+    // 初始值取本机 config 持久化的上次模式（PC 每次下发都会保存，见模式
+    // 同步段 saveDeviceMode）——开机/配网完成后继续上一次的模式，无需重选
+    std::string device_mode = cfg.device_mode;
+    // ---- 语音互动会话（见文件头 kVoiceMotionTable 注释；主循环推进）----
+    VoiceSess voice_sess = VoiceSess::None;
+    Clock::time_point voice_deadline{};  // Listen 超时 / Playing 兜底超时
+    int voice_highlight = -1;            // 面板高亮 pill 下标（-1 无）
+    bool voice_bye_pending = false;      // "再见"播完即结束会话（回待机）
+    std::vector<VoiceCmdEntry> voice_cmds;   // 当前角色可用指令（kw->动作）
+    std::vector<std::string> voice_names;    // 面板显示名（与 voice_cmds 同序）
+    std::string voice_sig;               // 指令列表签名（形象/模型切换时重建）
     // 时钟颜色主题（PC 菜单下发；断连保持最近值）
     std::string clock_color = "amber";
     // 屏幕亮度（PC 菜单"设备→亮度"下发，10-100）：有 sysfs 背光写背光，
     // 否则渲染层整屏压暗（renderDim）
     int device_brightness = 100;
+    // 音量（PC 菜单"设备→音量"下发，0-100）：SoundPlayer 软件缩放
+    int device_volume = 80;
     // 整屏旋转角（PC 菜单"设备→屏幕旋转"下发，0/90/180/270）：设备端逻辑
     // FBO + 旋转合成；断连后保持最近值
     int screen_rotation = 0;
@@ -701,6 +758,7 @@ int main() {
                WIN_W, WIN_H);
     }
 #endif
+
     // 提示音边沿检测基准（首帧仅记录不发声，避免开机误报）
     std::string snd_prev_overall;
     bool snd_prev_confirm = false;
@@ -757,9 +815,11 @@ int main() {
         }
     }
 #ifndef _WIN32
-    // 设备端无用户目录：固定模型目录 + 默认模型
-    if (!renderer.isLoaded() && renderer.loadModel(kModelDir, kDefaultModel))
-        current_model_key = kDefaultModel;
+    // 设备端无用户目录：固定模型目录 + 默认模型。延迟到主循环第 3 帧
+    // 之后才加载（见循环内 boot_model_pending 段）：默认模型只是兜底显示，
+    // PC 连上后即被同步的模型替换，不值得让它（3.6s 阻塞）挡在首帧上屏
+    // 的关键路径上——首帧渲染走 GIF 形象/面板即可。
+    bool boot_model_pending = !renderer.isLoaded();
 #endif
 
     // 5. UI 叠加层（PC: ImGui / 设备: 占位）
@@ -792,6 +852,10 @@ int main() {
     task_panel.init(kFontPath);
     // 事件提示音（后台线程播放；无可用声音设备时静默）
     SoundPlayer sound_player;
+    // 语音互动：KWS 子进程监听线程。收音随"语音交互模式"启停（PC 菜单
+    // 下发 deviceMode=voice 才 start，切走 stop，见主循环模式同步段），
+    // 模型在子进程内加载不阻塞启动；资产缺失自动降级 available()=false
+    VoiceKws voice;
 #endif
 
     // 1.x 配置生效：翻转 / 迷你 / 监控显隐
@@ -818,6 +882,14 @@ int main() {
     backend.start();
     backend.setMonitorActive(cfg.monitor_enabled);  // 面板关 = 采样零开销
     auto& api = backend;  // 方法面与 ApiClient 兼容（takeStatus/菜单动作）
+    // 云端账户 + 应用内更新（cloud/cloud_client.h）：恢复上次登录态（token
+    // 90 天滑动）；worker 单线程 1s 节拍 = 60s 自动增量上传 + 请求类任务；
+    // 升级检查与登录解耦（未登录也可检查/下载更新）
+    CloudClient cloud;
+    cloud.cleanupUpdateLeftovers();  // 上次升级的 %TEMP% 残留兜底清理
+    cloud.setAccount(cfg.cloud_server, cfg.cloud_token, cfg.cloud_username);
+    cloud.startWorker();
+    cloud.checkUpdate();  // 异步；未配置服务器时仅置 hint 提示
 #else
     // 初始地址为空 = 轮询暂停；入网后由 pc_discovery 发现经 setBaseUrl 接入。
     // 提供设备身份：已配对则用持久化 token 直连，否则工作线程自动握手配对。
@@ -840,6 +912,8 @@ int main() {
 
     std::string pending_bring_to_front; // 项目行点击（帧结束后处理，避免阻塞 ImGui 帧）
     bool menu_left_active = false;      // 菜单向左展开（右侧屏幕空间不足）
+    bool menu_keep_top = false;         // 菜单增高方向：顶边固定向下生长
+                                        //（宠物在屏幕上部，顶上空间不足时）
 
     // 状态动作映射：GIF 形象状态名即动作组（1.x selectAnimBackend 固定
     // STATE_MOTIONS）；Live2D 按当前模型的 stateMotions 应用到状态机
@@ -1000,12 +1074,30 @@ int main() {
         if (id == "integration-status")
             return I18n::t(hook_hint_cache == "已安装" ? "menu.integrated"
                                                         : "menu.notIntegrated");
+        // 声音管理状态（主菜单「声音管理」右侧）：已静音 / 声音开启
+        if (id == "sound-status")
+            return I18n::t(cfg.sound_mute ? "menu.soundMuted"
+                                          : "menu.soundOn");
+#ifdef _WIN32
+        // 云端同步/恢复状态（云端子页右侧）+ 应用内更新状态（主菜单右侧）
+        if (id == "cloud:sync" || id == "cloud:restore") return cloud.syncHint();
+        if (id == "app:update") return cloud.updateHint();
+#endif
         if (id.rfind("assign:", 0) == 0) {
             auto [g, i] = state_machine.motionForState(id.substr(7));
             // 与播放/选择网格显示一致：GIF 形象用状态名，Live2D 用动作显示名
             //（原样返回 "组[序号]" 是动作原始名，未本地化）
             if (using_gif) return I18n::t(("state." + g).c_str());
             return I18n::motionName(g, i);
+        }
+        // character-name —— 角色设定页顶部：当前角色显示名
+        //（GIF=自定义角色名；Live2D=当前模型名）
+        if (id == "character-name") {
+            for (const auto& c : cfg.custom_characters)
+                if (c.id == cfg.active_character_id) return c.name;
+            for (const auto& e : model_entries)
+                if (e.key == current_model_key) return e.name;
+            return {};
         }
         // charname:<charid> —— 角色编辑视图标题（角色显示名）
         if (id.rfind("charname:", 0) == 0) {
@@ -1373,13 +1465,15 @@ int main() {
                 UserConfigStore::saveLanguage(code);
             }
         }
-        // ---- 硬件显示端模式（菜单"设备模式"三选一）----
+        // ---- 硬件显示端模式（菜单"设备模式"四选一）----
         else if (id.rfind("device-mode:", 0) == 0) {
             const std::string mode = id.substr(12);
-            if (mode == "single" || mode == "multi" || mode == "frame") {
+            if (mode == "single" || mode == "multi" || mode == "frame" ||
+                mode == "voice") {
                 cfg.device_mode = mode;
                 UserConfigStore::saveDeviceMode(mode);
-                // 立即生效（设备端下一次 /api/status 轮询 ≤2s 收到）
+                // 立即生效（设备端下一次 /api/status 轮询 ≤2s 收到；
+                // voice=语音交互模式，设备端仅在该模式收音）
             }
         }
         // ---- 相框播放源（菜单「设备→相框播放」：动作轮播 / 指定文件夹）----
@@ -1442,6 +1536,15 @@ int main() {
             if (v >= 10 && v <= 100) {
                 cfg.device_brightness = v;
                 UserConfigStore::saveDeviceBrightness(v);
+                // 设备端下一次 /api/status 轮询 ≤2s 收到
+            }
+        }
+        // ---- 硬件显示端音量（菜单"设备→音量"五档）----
+        else if (id.rfind("device-volume:", 0) == 0) {
+            const int v = atoi(id.c_str() + 14);
+            if (v >= 0 && v <= 100) {
+                cfg.device_volume = v;
+                UserConfigStore::saveDeviceVolume(v);
                 // 设备端下一次 /api/status 轮询 ≤2s 收到
             }
         }
@@ -1796,8 +1899,6 @@ int main() {
                 auto [g, i] = state_machine.currentMotion();
                 if (!using_gif) renderer.setLoopMotion(g, i);
             }
-        } else if (id == "preview-alert") {
-            ui.previewAlert();  // 头顶 ! 特效 + 状态栏闪红 3s
         }
         // ---- 系统集成 ----
         else if (id == "open-models-dir") {
@@ -1850,6 +1951,60 @@ int main() {
             api.quitApp();  // 后端一起退出
             g_running = false;
         }
+#ifdef _WIN32
+        // ---- 云端账户（登录/注册弹窗 → 成功后全量云恢复）----
+        else if (id == "cloud:login") {
+            // 深色登录弹窗（platform/cloud_login_dialog.h，照配对弹窗骨架）；
+            // 回调在 UI 线程同步执行 HTTP（弹窗状态行显示「连接中…」）
+            CloudLoginDialog::Host host;
+            host.auth = [&](const std::string& action,
+                            const std::string& server, const std::string& user,
+                            const std::string& pass) {
+                const std::string err =
+                    action == "register"
+                        ? cloud.registerAccount(server, user, pass)
+                        : cloud.login(server, user, pass);
+                if (err.empty()) {
+                    // 成功：token 已持久化 config.json；同步内存 cfg 并触发
+                    // 一次全量云恢复（worker 下载差异文件 + 合并配置，主循环
+                    // 消费 restoreDone 应用角色切换）
+                    cfg.cloud_server = server;
+                    cfg.cloud_username = user;
+                    cloud.requestRestore();
+                }
+                return err;
+            };
+            CloudLoginDialog dlg;
+            dlg.run(pet_hwnd, host, cfg.cloud_server);
+        } else if (id == "cloud:sync") {
+            cloud.syncNow();
+        } else if (id == "cloud:restore") {
+            cloud.requestRestore();
+        } else if (id == "cloud:logout") {
+            cloud.logout();  // 服务器注销 + 清 token + worker 重启
+            cfg.cloud_token.clear();
+            cfg.cloud_username.clear();
+        }
+        // ---- 应用内一键更新（按当前状态分派；与登录解耦）----
+        else if (id == "app:update") {
+            switch (cloud.updateState()) {
+            case CloudClient::UpdateState::kReady:
+                // 就绪：写 updater.cmd + 分离启动（等本进程退出 → 覆盖 →
+                // 重启），随后走正常退出路径释放 exe/dll 锁
+                if (cloud.applyUpdate()) {
+                    api.quitApp();
+                    g_running = false;
+                }
+                break;
+            case CloudClient::UpdateState::kAvailable:
+                cloud.startUpdateDownload();  // 发现新版本 → 下载+校验+解压
+                break;
+            default:  // kIdle / kDownloading / kFailed →（重新）检查
+                cloud.checkUpdate();
+                break;
+            }
+        }
+#endif
     };
 
     // 监控面板内部操作（↺ 恢复默认 / ▾ 收起）→ 持久化
@@ -2063,14 +2218,17 @@ int main() {
         // 配对握手成功后工作线程产出 token：取走持久化（重启免再配）。
         if (std::string tok = api.takePairToken(); !tok.empty())
             identity.setToken(tok);
-        // 仅入网(Online)后广播发现 PC：拿到 base url 喂 ApiClient；未入网/
-        // 未发现则清空地址（ApiClient 自动暂停轮询）。发现回包的 paired 标记
-        // PC 是否已认得本设备，记入 pc_paired（诊断用）。
+        // 仅入网(Online)后广播发现 PC。发现应答只用于「找到 PC / 跟随 PC
+        // 换 IP」，不作为拆除链路的依据——UDP 发现（2s 广播 + 8s 回包 TTL）
+        // 在弱信号（实测 -81dBm）下丢几对包就超时，若据此清空地址会白白
+        // 拆掉仍可用的 HTTP 轮询，屏幕周期性闪「正在等待连接」。无新
+        // offer 时保留最近地址继续轮询：PC 真离开由 HTTP 成败判定
+        // （pc_online 5s 无新状态即断开）；PC 换 IP 由下一个 offer 切换。
         if (wifi_state == WifiState::Online) {
             bool disc_paired = false;
             const auto url = pc_discovery.poll(&disc_paired);
             if (disc_paired) pc_paired = true;
-            api.setBaseUrl(url.value_or(""));
+            if (url) api.setBaseUrl(*url);
         } else {
             api.setBaseUrl("");
         }
@@ -2103,6 +2261,126 @@ int main() {
         }
         pc_ready = (dev_screen == DevScreen::Normal);
 #endif
+#ifndef _WIN32
+        // ---- 语音互动会话推进（每帧；详见文件头 kVoiceMotionTable 注释）----
+        {
+            // 开机即处于语音模式（继续上次模式）时补启动收音：模式同步
+            // 段只在"切换边沿"启停，开机已是 voice、PC 下发也是 voice 时
+            // 无边沿 → asr-offline 从未启动，面板误报"不支持"。start()
+            // 幂等（running_ 守卫），每帧调用开销可忽略；PC 下发非 voice
+            // 模式时由同步段 voice.stop() 停掉
+            if (device_mode == "voice") voice.start();
+            // 指令列表按角色签名重建（切形象/模型后词表变化）：
+            // 仅 Live2D 有动作组；过滤当前模型没有的项，上限 10（面板 ≤2 行）
+            const std::string vsig =
+                using_gif ? (gif_char ? gif_char->id : std::string("?"))
+                          : current_model_key;
+            if (vsig != voice_sig) {
+                voice_sig = vsig;
+                voice_cmds.clear();
+                voice_names.clear();
+                if (!vsig.empty()) {
+                    const auto groups = renderer.motionGroups();
+                    for (const auto& e : kVoiceMotionTable) {
+                        bool ok = false;
+                        for (const auto& g : groups)
+                            if (g.group == e.group && e.index < g.count) {
+                                ok = true;
+                                break;
+                            }
+                        if (!ok) continue;
+                        voice_cmds.push_back(e);
+                        voice_names.push_back(I18n::motionName(e.group, e.index));
+                        if ((int)voice_cmds.size() >= 10) break;
+                    }
+                    if (!voice_cmds.empty())
+                        printf("[Voice] %d commands for %s\n",
+                               (int)voice_cmds.size(), vsig.c_str());
+                }
+            }
+            // 会话维持条件：语音交互模式 + 正常画面 + 非 GIF 形象
+            //（切走模式/换 GIF 形象即结束，走统一超时退出；待机时面板
+            //  常驻显示唤醒提示，见渲染段）
+            const bool voice_ok_ctx = !using_gif && device_mode == "voice" &&
+                                      dev_screen == DevScreen::Normal;
+            if (voice_sess != VoiceSess::None && !voice_ok_ctx)
+                voice_deadline = now;  // 立即到期，下方统一恢复退出
+            if (voice.available()) {
+                const std::string kw = voice.takeKeyword();
+                if (kw == "DutyOn") {
+                    // 唤醒词"在吗扣扣"：待机态进监听（仅语音模式 + 非 GIF
+                    // 形象响应，voice_ok_ctx 已含全部条件）；播应答"我在"。
+                    // 应答前强制重建 HDMI 流：H616 间歇静音（软件正常但无
+                    // 声，用户实测"一开始听得到后来没了"），重建 PCM 逼内核
+                    // 重初始化 I2S/DMA/IEC958 通道
+                    if (voice_ok_ctx) {
+                        const bool rewake = (voice_sess != VoiceSess::None);
+                        voice_sess = VoiceSess::Listen;
+                        voice_deadline = now + std::chrono::seconds(15);
+                        voice_highlight = -1;
+                        sound_player.requestRebuild();
+                        sound_player.playFile(std::string(kSoundDir) +
+                                              "voice_ack.wav");
+                        printf(rewake ? "[Voice] re-wake -> listen\n"
+                                      : "[Voice] wake -> listen\n");
+                    }
+                } else if (!kw.empty() && voice_sess != VoiceSess::None) {
+                    // 动作指令：命中即播 3 遍；播放中重复调用即打断重启计次
+                    for (int i = 0; i < (int)voice_cmds.size(); ++i) {
+                        if (kw == voice_cmds[i].kw) {
+                            voice_sess = VoiceSess::Playing;
+                            voice_highlight = i;
+                            renderer.playMotionTimes(voice_cmds[i].group,
+                                                     voice_cmds[i].index, 3);
+                            // 动作音效（用户要求 2026-10-06）：每个动作随播
+                            // 一遍声音——"再见"用专属 voice_bye，其余用
+                            // welcome 通用音；"再见"播完直接回待机
+                            voice_bye_pending = (kw == "再见");
+                            sound_player.playFile(
+                                std::string(kSoundDir) +
+                                (voice_bye_pending ? "voice_bye.wav"
+                                                   : "welcome.wav"));
+                            // 播完由 takeTimesFinished 转 Listen 重新计时；
+                            // 60s 兜底防完成事件丢失卡死会话
+                            voice_deadline = now + std::chrono::seconds(60);
+                            printf("[Voice] cmd: %s -> %s[%d] x3\n",
+                                   kw.c_str(), voice_cmds[i].group,
+                                   voice_cmds[i].index);
+                            break;
+                        }
+                    }
+                }
+                // 3 遍播完：回监听重新计时（"再见"则直接结束会话回待机）
+                if (voice_sess == VoiceSess::Playing &&
+                    renderer.takeTimesFinished()) {
+                    if (voice_bye_pending) {
+                        voice_bye_pending = false;
+                        if (!using_gif) {
+                            const auto [g, i] = state_machine.currentMotion();
+                            if (!g.empty()) renderer.setLoopMotion(g, i);
+                        }
+                        voice_sess = VoiceSess::None;
+                        voice_highlight = -1;
+                        printf("[Voice] session end (bye)\n");
+                    } else {
+                        voice_sess = VoiceSess::Listen;
+                        voice_deadline = now + std::chrono::seconds(15);
+                    }
+                }
+            }
+            // 超时/条件失效退出：取消剩余遍数 + 恢复状态机当前循环动作
+            if (voice_sess != VoiceSess::None && now >= voice_deadline) {
+                if (!using_gif) {
+                    renderer.cancelTimesMotion();
+                    const auto [g, i] = state_machine.currentMotion();
+                    if (!g.empty()) renderer.setLoopMotion(g, i);
+                }
+                voice_sess = VoiceSess::None;
+                voice_highlight = -1;
+                printf("[Voice] session end\n");
+            }
+        }
+#endif
         if (auto status = api.takeStatus()) {
             current_status = std::move(*status);
 #ifndef _WIN32
@@ -2120,12 +2398,23 @@ int main() {
             // 收到新状态 = PC 链路活着（HTTP 200 + token 有效）：刷新在线
             // 时刻，供上方 pc_online 判定（下一帧据此切回正常任务画面）
             last_status_ok = Clock::now();
-            // 布局模式同步（single/multi/frame；断连后保持最近值）
+            // 布局模式同步（single/multi/frame/voice；断连后保持最近值）
             if (!current_status.device_mode.empty() &&
                 current_status.device_mode != device_mode) {
                 const std::string prev_mode = device_mode;
                 device_mode = current_status.device_mode;
+                // 持久化到本机 config：开机/配网后继续上一次的模式（L723 读回）
+                UserConfigStore::saveDeviceMode(device_mode);
                 printf("[Mode] device mode -> %s\n", device_mode.c_str());
+                if (device_mode == "voice") {
+                    // 进入语音交互模式：启动收音（幂等；资产缺失自动
+                    // 降级 available()=false，面板提示"不支持"）
+                    voice.start();
+                } else if (prev_mode == "voice") {
+                    // 切走语音交互模式：停收音。进行中的会话下一帧由
+                    // voice_ok_ctx 失效走统一超时退出（恢复状态机动作）
+                    voice.stop();
+                }
                 if (device_mode == "frame") {
                     frame_timer = 0.f;  // 进入相框模式立即从头轮播
                     frame_sig.clear();  // 强制下次轮播段重建并从头播放
@@ -2145,8 +2434,6 @@ int main() {
                             }
                         } else {
                             renderer.setLoopMotion(g, i);
-                            dev_motion_group = g;
-                            dev_motion_idx = i;
                         }
                     }
                 }
@@ -2209,6 +2496,13 @@ int main() {
                 }
                 printf("[Mode] brightness -> %d (%s)\n", device_brightness,
                        wrote_backlight ? "backlight" : "software dim");
+            }
+            // 音量同步（0-100，软件缩放）：PC 菜单「设备→音量」设定，
+            // SoundPlayer 写 PCM 前乘系数（0=听不见，与完全静音开关正交）
+            if (current_status.device_volume != device_volume) {
+                device_volume = current_status.device_volume;
+                sound_player.setVolume(device_volume);
+                printf("[Mode] volume -> %d%%\n", device_volume);
             }
             // 整屏旋转同步（0/90/180/270；PC 菜单"设备→屏幕旋转"下发）：
             // rotation!=0 时切换逻辑 FBO + 旋转合成；刷新布局尺寸（90/270
@@ -2365,10 +2659,15 @@ int main() {
                                 gif_char = nullptr;
                                 current_model_key = e.key;
                                 apply_state_motions();
-                                // 重放当前状态动作，避免切换后停在 idle
-                                if (!dev_motion_group.empty())
-                                    renderer.setLoopMotion(dev_motion_group,
-                                                           dev_motion_idx);
+                                // 重放当前状态动作，避免切换后停在随机 Idle。
+                                // 用状态机 currentMotion（当前状态+当前映射）
+                                // 而非记录的最近动作：GIF 形象期间状态切换
+                                // 只走 gif.load 不经过这里，记录值会过期/为空
+                                //（为空时曾跳过重放 → 新模型落入随机 Idle，
+                                // 播到 20_sleep 与 PC 的状态动作不同步）
+                                const auto [rg, ri] = state_machine.currentMotion();
+                                if (!rg.empty())
+                                    renderer.setLoopMotion(rg, ri);
                                 switched = true;
                                 printf("[Model] sync from PC: %s (%s)\n",
                                        e.name.c_str(), e.key.c_str());
@@ -2397,7 +2696,9 @@ int main() {
             if (current_status.state_motions != pc_state_motions) {
                 pc_state_motions = current_status.state_motions;
                 apply_state_motions();
-                if (device_mode != "frame") {
+                // 语音会话中不抢动作（映射照常更新，会话退出时按新映射恢复）
+                if (device_mode != "frame" &&
+                    voice_sess == VoiceSess::None) {
                     const auto [g, i] = state_machine.currentMotion();
                     if (!g.empty()) {
                         printf("[Motion] sync from PC: %s -> %s[%d]\n",
@@ -2411,8 +2712,6 @@ int main() {
                             }
                         } else {
                             renderer.setLoopMotion(g, i);
-                            dev_motion_group = g;
-                            dev_motion_idx = i;
                         }
                     }
                 }
@@ -2423,7 +2722,8 @@ int main() {
             if (current_status.welcome_seq > dev_welcome_prev) {
                 dev_welcome_prev = current_status.welcome_seq;
                 printf("[Welcome] play (seq=%lld)\n", dev_welcome_prev);
-                if (!using_gif) {
+                // 语音会话中不抢动作（欢迎音频照播）
+                if (!using_gif && voice_sess == VoiceSess::None) {
                     const auto [g, i] = state_machine.motionForState("welcome");
                     if (!g.empty()) renderer.playMotion(g, i);
                 }
@@ -2453,7 +2753,13 @@ int main() {
 #endif
             {
                 auto [group, idx] = state_machine.onStatus(current_status);
-                if (!group.empty()) {
+                // 语音会话中不切动作（状态机照常推进，会话退出恢复时用新状态）
+#ifndef _WIN32
+                const bool voice_free = (voice_sess == VoiceSess::None);
+#else
+                const bool voice_free = true;  // PC 端无语音会话
+#endif
+                if (!group.empty() && voice_free) {
                     printf("[State] %s -> %s[%d]\n",
                            current_status.overall_state.c_str(), group.c_str(),
                            idx);
@@ -2468,10 +2774,6 @@ int main() {
                     } else {
                         // 状态动作为循环动作（对齐 1.x playStateMotion）
                         renderer.setLoopMotion(group, idx);
-#ifndef _WIN32
-                        dev_motion_group = group;  // 记录供模型热切换后重放
-                        dev_motion_idx = idx;
-#endif
                     }
 #ifndef _WIN32
                     // 状态音频：切换到的状态绑定了音频且未被静音 → 文件缺失
@@ -2589,14 +2891,27 @@ int main() {
                 if (need > base_h) {
                     menu_top_offset = need - base_h;
                     target_h = need;
+                    // 增高方向：顶上有空间 → 底边固定向上生长（宠物不动）；
+                    // 顶上空间不足（宠物被拖到屏幕上部）→ 顶边固定向下
+                    // 生长，菜单向下伸展（内容随 top_offset 下移让位，
+                    // 菜单关闭后窗口复原、宠物回位）
+                    int wx = 0, wy = 0;
+                    window->windowPos(wx, wy);
+                    menu_keep_top = (float)(wy - wt) < menu_top_offset;
                 }
             }
             ui.setContentTopOffset(menu_top_offset);
             const int target_w = (int)(base_w_f + extra);
-            window->resizeKeepBottom(target_w, (int)target_h, menu_left_active);
+            if (menu_keep_top)
+                window->resizeKeepTop(target_w, (int)target_h, menu_left_active);
+            else
+                window->resizeKeepBottom(target_w, (int)target_h, menu_left_active);
             // 菜单已收起且窗口回到基础宽 → 退出 menu-left（展开与收回都保持右缘）
-            if (extra == 0.0f && window->width() == (int)base_w_f)
+            // 与 menu-keep-top（增高与缩回用同方向，窗口才能回到原位）
+            if (extra == 0.0f && window->width() == (int)base_w_f) {
                 menu_left_active = false;
+                if (menu_top_offset == 0.0f) menu_keep_top = false;
+            }
         }
 
         // 位置记忆二次校准：首帧布局把窗口高度从估算值（~350）校正为
@@ -2654,13 +2969,28 @@ int main() {
             const int left_w = landscape ? WIN_H : WIN_W;   // 横屏左列（正方形）宽
             const int region_x = landscape ? left_w : 0;     // 信息区起点 x
             const int region_w = landscape ? (WIN_W - left_w) : WIN_W;
-            float panel_h = 0.f;  // 竖屏 multi 面板区高度（横屏不用）
+            float panel_h = 0.f;  // 竖屏面板区高度（multi 任务列表 / 语音面板）
+            // 语音交互模式：面板常驻——待机=唤醒提示行（单行矮面板）、
+            // 会话=指令列表；底部（竖屏）/ 右列下半（横屏）让位
+            const bool voice_active = (device_mode == "voice");
+            if (voice_active)
+                panel_h = task_panel.voicePanelHeight(
+                    voice_sess == VoiceSess::None ? 0
+                                                  : (int)voice_names.size());
             renderer.setCenterV(true);
             gif.setCenterV(true);
             if (landscape) {
-                // 左右布局：人偶占满高左列（列内居中），右列留给时钟/日期/任务
+                // 左右布局：人偶占满高左列（列内居中），右列留给时钟/日期/任务；
+                // 语音面板画右列底部（叠加段），人偶不动
                 renderer.setViewport(0, 0, left_w, WIN_H);
                 gif.setViewport(0, 0, left_w, WIN_H);
+            } else if (voice_active) {
+                // 竖屏语音模式：上时钟（预留 110）+ 中人物 + 下面板
+                //（待机提示行 / 会话指令列表）
+                const int clock_reserve = 110;
+                const int char_h = WIN_H - clock_reserve - (int)panel_h;
+                renderer.setViewport(0, (int)panel_h, WIN_W, char_h);
+                gif.setViewport(0, (int)panel_h, WIN_W, char_h);
             } else if (device_mode == "multi") {
                 // 竖屏多任务：动态分屏（角色区 = 时钟下沿 ~ 面板顶，内容
                 // 在该区域内垂直居中）。时钟区预留 ≈ 110px
@@ -2746,11 +3076,30 @@ int main() {
             // 颜色传当前角色的有效色（角色专属优先，否则全局），使颜色菜单勾选与之一致
             ui.setDeviceStatus(backend.deviceOnline(), cfg.device_mode,
                                cfg.effectiveColor(cfg.active_character_id),
-                               cfg.device_brightness, cfg.screen_rotation);
+                               cfg.device_brightness, cfg.device_volume,
+                               cfg.screen_rotation);
             // 相框播放源（照片数每次开菜单才用得上：仅在菜单打开时扫目录）
             ui.setFrameSource(cfg.frame_source, cfg.frame_folder,
                               ui.isMenuOpen() ? count_frame_photos(cfg.frame_folder)
                                               : -1);
+            // 云端账户状态注入（云端菜单行/子页）+ 云恢复完成应用
+            ui.setCloudStatus(cloud.loggedIn(), cloud.username());
+            if (cloud.restoreDone()) {
+                cloud.consumeRestore();
+                // 云恢复已落盘（~/.dutyon 配置白名单字段 + 差异文件）：重载
+                // 配置、重建模型列表，复用角色切换分支（含 stateMotions 应用）
+                cfg = UserConfigStore::load();
+                model_entries = UserConfigStore::listModels(builtin_roots);
+                // cfg 重载后旧 gif_char 指针失效：先复位自定义形象再切换
+                using_gif = false;
+                gif_char = nullptr;
+                gif.unload();
+                const std::string active = cfg.active_character_id;
+                if (active.rfind("char_", 0) == 0)
+                    ui.menu_activate("char:" + active);  // 自定义 GIF 形象
+                else if (!active.empty())
+                    ui.menu_activate("model:" + active);  // Live2D 模型
+            }
             ui.beginFrame();
             ui.renderStatus(current_status);
             if (!mini_mode && has_metrics) ui.renderMetrics(current_metrics);
@@ -2768,8 +3117,9 @@ int main() {
             if (dev_screen == DevScreen::WifiProvision) {
                 // 配网引导：热点 SSID/密码大字（用户要抄的）+ 分步说明。
                 //（QR 与浏览器手动地址均已移除——实测手机连热点后会被 MIUI
-                //  自动回切到家庭路由，扫码/浏览器路径全部失效，配网页只能靠
-                //  captive portal 自动弹出，未弹出时引导断开重连热点重触发。）
+                //  自动回切到家庭路由，扫码/浏览器路径全部失效。配网页入口
+                //  实测是手机 captive portal 检测弹出的「登录到网络」系统
+                //  通知，点击通知打开，就此引导。）
                 //  横屏：左列热点信息、右列步骤；竖屏单列。
                 // 注意：本渲染系 y 轴向上（0=屏底），阅读顺序"上"= 大 y ——
                 // 标题在最大 y，步骤自上而下 = y 递减。
@@ -2820,21 +3170,26 @@ int main() {
                                       hx, hw);
                 task_panel.renderDate(wifi.apPass(), info_y[4], em, WIN_W,
                                       WIN_H, hx, hw);
-                // ---- ② ~ ⑤ 步骤（自上而下正序：y 从 s_top 递减）----
+                // ---- ② ~ ⑥ 步骤（自上而下正序：y 从 s_top 递减）----
                 // 配网阶段用户往往还没装 PC 端 DutyOn，就地告知去哪下载；
                 // renderDate 过宽自动缩字。
-                //（QR 已移除：实测手机连热点后会被 MIUI 自动回切到家庭路由，
-                //  扫码/浏览器路径全部失效，唯一可靠入口是 WiFi 设置页的
-                //  captive portal 入口，QR 无作用。配网页未弹出时引导断开
-                //  重连热点重新触发；浏览器手动打开 portal 地址实测打不开，
-                //  不再提示。）
+                //（QR 已移除：扫码/浏览器路径实测全部失效。配网页真实入口：
+                //  手机连上热点后，系统 captive portal 检测会在通知栏弹出
+                //  「登录到网络」消息，点击它即打开配网页——实测唯一可靠的
+                //  打开方式，浏览器手动输入 portal 地址打不开。）
+                // ⑥：DutyOn 安装 hooks 只写 hooks.json 文件；Trae 出于安全
+                //  要求在应用内（设置 → Hooks）手动启用开关才真正生效——
+                //  不启用则宠物对 AI 活动无反应（实测：装完不启用，宠物
+                //  一直睡觉、无声）。放在最后一步完成整个开箱引导闭环。
                 const std::string steps[] = {
-                    "② 连接后自动弹出配网页",
-                    "没弹出页面？断开重连热点",
+                    "② 手机弹出「登录到网络」",
+                    "    点击通知打开配网页",
                     "③ 选 Wi-Fi 输密码提交",
                     "④ 联网后屏幕显示配对码",
                     "⑤ 电脑端右键宠物头像",
                     "    设备 → 配对设备 输码",
+                    "⑥ 打开 Trae 的 Hooks",
+                    "    设置 → Hooks → 启用",
                 };
                 const int n = (int)(sizeof(steps) / sizeof(steps[0]));
                 // 行距：普通字号 1.5 倍行高
@@ -2904,14 +3259,40 @@ int main() {
                 task_top = panel_h;
             }
 
-            // ---- 任务列表（multi；仅正常画面且已就绪）----
-            if (dev_screen == DevScreen::Normal && device_mode == "multi" && pc_ready)
+            // ---- 任务列表（multi；仅正常画面且已就绪；语音模式不显示）----
+            if (dev_screen == DevScreen::Normal && device_mode == "multi" &&
+                pc_ready && voice_sess == VoiceSess::None)
                 task_panel.render(current_status, WIN_W, WIN_H, task_top,
                                   region_x, region_w);
 
+            // ---- 语音交互面板（底部/右列下半，与任务列表互斥；语音模式
+            //      常驻——待机只画唤醒提示行，会话中画指令列表）----
+            if (dev_screen == DevScreen::Normal && voice_active) {
+                const bool standby = (voice_sess == VoiceSess::None);
+                const char* hint =
+                    voice_sess == VoiceSess::Playing
+                        ? I18n::t("voice.playing")
+                        : standby
+                              ? (voice.available()
+                                     ? I18n::t("voice.wake")
+                                     : I18n::t("voice.unsupported"))
+                              : (voice_names.empty()
+                                     ? I18n::t("voice.unsupported")
+                                     : I18n::t("voice.hint"));
+                // 卡片贴（region）底边：area_top = 面板总高（同任务列表约定）；
+                // 待机不传指令列表 = 只画提示行（与 panel_h 测量一致）
+                static const std::vector<std::string> kNoCmds;
+                task_panel.renderVoicePanel(standby ? kNoCmds : voice_names,
+                                            voice_highlight, hint, WIN_W, WIN_H,
+                                            panel_h, region_x, region_w);
+            }
+
             // ---- 时钟 + 日期文本（仅正常画面；优先 PC 下发时间，设备本地
-            //      钟不可信，断连兜底本地时间）。相框照片满屏时隐藏，避免叠字
-            if (dev_screen == DevScreen::Normal && !photo_showing) {
+            //      钟不可信，断连兜底本地时间）。相框照片满屏时隐藏，避免叠字。
+            //      语音模式独立运行（无 PC）时 clock_epoch 恒 0——设备无 RTC，
+            //      本地时间不可信，未同步过时间就不画，避免显示错误时钟
+            if (dev_screen == DevScreen::Normal && !photo_showing &&
+                (device_mode != "voice" || clock_epoch > 0)) {
                 char time_buf[16] = {};
                 char date_buf[40] = {};
                 static const char* kWeek[] = {"日", "一", "二", "三",
@@ -2944,8 +3325,10 @@ int main() {
                 task_panel.renderClock(time_buf, clock_top, clock_size,
                                        WIN_W, WIN_H, region_x, region_w);
                 // 日期：横屏右列恒显示（时钟下方）；竖屏仅单任务/相框
-                //（竖屏 multi 底部是任务列表，会重叠）
-                if (landscape || device_mode != "multi") {
+                //（竖屏 multi 底部是任务列表、voice 底部是语音面板，
+                // 均会重叠 → 隐藏）
+                if (landscape || (device_mode != "multi" &&
+                                  device_mode != "voice")) {
                     task_panel.renderDate(date_buf, date_top, date_size,
                                           WIN_W, WIN_H, region_x, region_w);
                 }
@@ -2959,6 +3342,21 @@ int main() {
 #endif
         }
 
+#ifndef _WIN32
+        // 开机兜底模型延迟加载：前两帧先把 GIF 形象/面板推上屏（setCrtc），
+        // 第 3 帧起做一次 3.6s 的阻塞加载（期间动画短暂停住，开机场景可
+        // 接受）。主循环中途换模型是既有模式（PC 同步即如此），无副作用。
+        {
+            static int boot_frame = 0;
+            if (boot_model_pending && ++boot_frame >= 3) {
+                // 已有模型（如 PC 极速连上并同步）则不再覆盖
+                if (!renderer.isLoaded() &&
+                    renderer.loadModel(kModelDir, kDefaultModel))
+                    current_model_key = kDefaultModel;
+                boot_model_pending = false;
+            }
+        }
+#endif
         // ---- 一次性 GL 诊断（第 90 帧左右，稳定后）----
         {
             static int diag_frame = 0;

@@ -113,17 +113,26 @@ public:
     // 对齐 1.x menu-left 模式：菜单贴窗口左缘、角色区右锚）
     void setMenuLeft(bool left);
     // 硬件显示端状态（主循环每帧注入）：菜单"设备"子页显示模式/时钟
-    // 颜色/亮度/旋转/同步（menu_activate 收 "device-mode:<m>" /
-    // "clock-color:<c>" / "device-brightness:<n>" / "device-rotate:<deg>"）
+    // 颜色/亮度/音量/旋转/同步（menu_activate 收 "device-mode:<m>" /
+    // "clock-color:<c>" / "device-brightness:<n>" / "device-volume:<n>" /
+    // "device-rotate:<deg>"）
     void setDeviceStatus(bool online, const std::string& mode,
                          const std::string& clock_color = "amber",
                          int brightness = 100,
+                         int volume = 80,
                          int screen_rotation = 0) {
         device_online_ = online;
         device_mode_ = mode;
         clock_color_ = clock_color;
         device_brightness_ = brightness;
+        device_volume_ = volume;
         device_screen_rotation_ = screen_rotation;
+    }
+    // 云端账户状态（主循环每帧注入）：云端子页显示；hint 类动态文本
+    // （同步进度/更新状态）走 menu_hint("cloud:sync"/"app:update") 回调
+    void setCloudStatus(bool logged_in, const std::string& username) {
+        cloud_logged_in_ = logged_in;
+        cloud_username_ = username;
     }
     // 相框播放源（主循环每帧注入）：source = motion(动作轮播)/folder(指定
     // 文件夹照片)；folder = PC 本机照片目录（空 = 未选择）；photos = 目录内
@@ -163,15 +172,12 @@ public:
     std::function<std::string(const std::string&)> menu_hint;
     // 执行菜单项（open-models-dir / install-hooks / hook-status / quit /
     // model:<key> / motion:<g>:<i> / assign:<状态>:<g>:<i> / preview:g:i /
-    // flip / mini / autostart / lang:<代码> / vis-* / preview-alert）
+    // flip / mini / autostart / lang:<代码> / vis-*）
     std::function<void(const std::string&)> menu_activate;
     // 菜单打开时触发（main 刷新 autostart / hook 状态缓存，避免每帧 HTTP）
     std::function<void()> on_menu_open;
     // 监控面板内部操作（↺ 恢复默认 / ▾ 收起）后的持久化回调（main 注入）
     std::function<void(const std::string&)> on_monitor_action;  // "reset"/"collapse"
-
-    // 预览提醒效果（动作设定 → 预览提醒效果：头顶 ! 特效 + 状态栏闪红 3s）
-    void previewAlert();
 
     // ---- 鼠标事件转发（窗口层 -> ImGui；点击穿透到面板前先喂给 ImGui）----
     // 由窗口层在 GLFW 鼠标回调里调用；窗口销毁前置空
@@ -206,11 +212,15 @@ private:
     std::string device_mode_ = "multi";
     std::string clock_color_ = "amber";
     int device_brightness_ = 100;
+    int device_volume_ = 80;
     int device_screen_rotation_ = 0;
     // 相框播放源（setFrameSource 注入）
     std::string frame_source_ = "motion";
     std::string frame_folder_;
     int frame_photo_count_ = 0;
+    // 云端账户状态（setCloudStatus 注入）
+    bool cloud_logged_in_ = false;
+    std::string cloud_username_;
 };
 
 } // namespace dutyon

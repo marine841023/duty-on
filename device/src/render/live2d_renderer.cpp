@@ -230,15 +230,27 @@ public:
     void UpdateModel(float delta_seconds) {
         _deltaTimeSeconds = delta_seconds;
 
-        // 动作（状态循环动作优先，否则待机 Idle 随机）
+        // 动作（语音指令 N 遍续播 > 状态循环动作 > 待机 Idle 随机）
         _model->LoadParameters();
         if (_motionManager->IsFinished()) {
-            if (_loopGroup.empty()) {
-                StartRandomMotion("Idle", MotionPriorityIdle);
+            if (_timesRemaining > 0) {
+                // 语音指令动作第 2..N 遍（第 1 遍由 PlayMotionTimes 起播）
+                --_timesRemaining;
+                StartMotion(_timesGroup.c_str(), _timesIndex, MotionPriorityForce);
             } else {
-                // 状态循环动作播完自动重播（对应 1.x playStateMotion 的
-                // motionFinish 重触发）
-                StartMotion(_loopGroup.c_str(), _loopIndex, MotionPriorityIdle);
+                if (!_timesGroup.empty()) {
+                    // 第 N 遍刚播完：置一次性标志（主循环 poll 后回到状态
+                    // 循环/Idle），清组名避免循环动作重播时重复置位
+                    _timesGroup.clear();
+                    _timesFinished = true;
+                }
+                if (_loopGroup.empty()) {
+                    StartRandomMotion("Idle", MotionPriorityIdle);
+                } else {
+                    // 状态循环动作播完自动重播（对应 1.x playStateMotion 的
+                    // motionFinish 重触发）
+                    StartMotion(_loopGroup.c_str(), _loopIndex, MotionPriorityIdle);
+                }
             }
         }
         const bool motion_updated = _motionManager->UpdateMotion(_model, delta_seconds);
@@ -295,6 +307,30 @@ public:
     // 播放指定组动作
     void PlayMotionGroup(const std::string& group, int index) {
         StartMotion(group.c_str(), index, MotionPriorityForce);
+    }
+
+    // 播放动作 N 遍（设备端语音指令）。Force 起播 = 天然打断：播放中来新
+    // 指令重复调用即重启计次；剩余遍数在 UpdateModel 的 IsFinished 分支续播，
+    // 播完自然回落状态循环动作 / Idle。times<=1 按单次播放处理。
+    void PlayMotionTimes(const std::string& group, int index, int times) {
+        _timesGroup = group;
+        _timesIndex = index;
+        _timesRemaining = times > 1 ? times - 1 : 0;
+        StartMotion(group.c_str(), index, MotionPriorityForce);
+    }
+
+    // 取消剩余遍数（语音会话退出时调用；当前这遍自然播完）
+    void CancelTimesMotion() {
+        _timesRemaining = 0;
+        _timesGroup.clear();
+        _timesFinished = false;
+    }
+
+    // N 遍播完的一次性标志（主循环 poll：true 后自动清零）
+    bool TakeTimesFinished() {
+        const bool t = _timesFinished;
+        _timesFinished = false;
+        return t;
     }
 
     // 参照官方 LAppModel::StartMotion（动作已在 PreloadMotionGroup 全部加载）
@@ -614,6 +650,12 @@ private:
     // 状态循环动作（对应 1.x STATE_MOTIONS；空 = Idle 随机循环）
     std::string _loopGroup;
     int _loopIndex = 0;
+    // 语音指令 N 遍播放状态（_timesRemaining>0 时 IsFinished 续播；
+    // _timesFinished = 第 N 遍播完的一次性通知）
+    std::string _timesGroup;
+    int _timesIndex = 0;
+    int _timesRemaining = 0;
+    bool _timesFinished = false;
 
     // 内容包围盒（模型单位）与就绪标志
     bool _contentReady = false;
@@ -789,6 +831,23 @@ void Live2DRenderer::playMotion(const std::string& group, int index) {
 void Live2DRenderer::setLoopMotion(const std::string& group, int index) {
     if (!impl_->loaded) return;
     impl_->model->SetLoopMotion(group, index);
+}
+
+// 设备端语音指令：动作播 N 遍，Force 抢占天然支持打断（PC 端不调用）
+void Live2DRenderer::playMotionTimes(const std::string& group, int index, int times) {
+    if (!impl_->loaded || group.empty()) return;
+    impl_->model->PlayMotionTimes(group, index, times);
+}
+
+void Live2DRenderer::cancelTimesMotion() {
+    if (!impl_->loaded) return;
+    impl_->model->CancelTimesMotion();
+}
+
+// N 遍播完的一次性通知（语音会话用它回到监听态）
+bool Live2DRenderer::takeTimesFinished() {
+    if (!impl_->loaded) return false;
+    return impl_->model->TakeTimesFinished();
 }
 
 void Live2DRenderer::update(float delta_seconds) {

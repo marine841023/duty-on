@@ -38,7 +38,8 @@ struct PetStatus {
     std::string active_character;
     // 硬件显示端布局模式（PC 菜单设定，config.json deviceMode）：
     // single=单任务（角色全屏+大时钟）/ multi=多任务（角色+任务列表，默认）/
-    // frame=电子相框（角色全屏循环播放动作，不响应任务状态）
+    // frame=电子相框（角色全屏循环播放动作，不响应任务状态）/
+    // voice=语音交互（唤醒词"在吗扣扣"+中文动作指令，仅该模式收音）
     std::string device_mode;
     // 相框播放源（PC 菜单设定，config.json frameSource，deviceMode=frame 时
     // 才有意义）：motion=动作轮播（现行）/ folder=指定文件夹（PC 本机照片
@@ -50,6 +51,9 @@ struct PetStatus {
     // 屏幕亮度（10-100，PC 菜单"设备→亮度"设定）：设备端优先写 sysfs
     // 背光，无背光接口时以渲染层整屏压暗实现
     int device_brightness = 100;
+    // 设备端音量（0-100，PC 菜单"设备→音量"设定）：设备端软件缩放
+    //（SoundPlayer 写 PCM 前乘系数）
+    int device_volume = 80;
     // PC 时间（设备无 RTC/NTP 不可信，时钟跟随 PC）：epoch 秒 + PC 本地
     // 时区偏移分钟；设备端取到后用 steady_clock 自行推进直到下次轮询覆盖
     double server_time = 0;

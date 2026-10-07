@@ -1,5 +1,11 @@
 #pragma once
 
+// 版本号由 CMake 注入（CMakeLists project VERSION 唯一定义处）；
+// 直接编译 / IDE 未注入时为 "dev"（云端升级检查禁用）
+#ifndef DUTYON_VERSION
+#define DUTYON_VERSION "dev"
+#endif
+
 namespace dutyon {
 
 // Wi-Fi 局域网连接（配对码方案）：设备加入家庭 Wi-Fi 后与 PC 同网段，
@@ -21,11 +27,22 @@ constexpr const char* kSoundDir = "/opt/dutyon/assets/sounds/";
 // 轮询间隔（毫秒）
 constexpr int kPollIntervalMs = 500;
 
-// 提示音输出 ALSA 设备（aplay -D）：default=系统默认；接 I2S/USB 声卡后
-// 可用环境变量 DUTYON_AUDIODEV 覆盖（如 "hw:1,0" 指向 I2S DAC）
-constexpr const char* kAudioDevice = "default";
+// 提示音输出 ALSA 设备（aplay -D）。恒定按名字走 HDMI（plughw:CARD=HDMI），
+// 不用 default/card 序号——USB 声卡（如麦克风）插入会抢占 card 序号把
+// HDMI 挤后（实测 C-Media USB 麦克风占走 card1，HDMI 1→2），序号寻址会
+// 被带偏；按 CARD= 名字寻址稳定不受插拔影响。仍可用环境变量
+// DUTYON_AUDIODEV 覆盖（如指向 I2S DAC / USB 音箱）
+constexpr const char* kAudioDevice = "plughw:CARD=HDMI";
 // 提示音采样率（Hz，mono S16LE，正弦合成）
 constexpr int kAudioSampleRate = 22050;
+
+// 语音互动（设备端）：唤醒词监听资产目录（kws-spotter 可执行 +
+// zipformer2 模型三件套 + tokens.txt + keywords.txt，随部署包推送）
+constexpr const char* kKwsDir = "/opt/dutyon/assets/kws/";
+// 语音采集麦克风 ALSA 设备（arecord -D）。按 CARD= 名字寻址（C-Media
+// USB 麦注册名 "Device"），不受 HDMI 播放卡插拔影响；可用环境变量
+// DUTYON_MICDEV 覆盖。无麦时 kws-spotter 退避重启、语音模式不可用
+constexpr const char* kMicDevice = "plughw:CARD=Device";
 
 // 渲染目标帧率（Native 路径轻松 60fps，这里保守取 30 平衡功耗）
 constexpr int kTargetFps = 30;

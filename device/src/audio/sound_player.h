@@ -33,6 +33,14 @@ public:
     // 解码器缺失时忽略并告警一次（stderr）
     void playFile(const std::string& path);
 
+    // 设置软件音量（0-100）：worker 写 PCM 前乘系数；线程安全，
+    // 下一块（≤50ms）生效。PC 菜单「设备→音量」经 /api/status 下发
+    void setVolume(int percent);
+
+    // 请求强制重建输出流（pclose→popen）：唤醒应答前调用，防 H616 HDMI
+    // 间歇静音（软件正常但物理无声，重开 PCM 逼内核重初始化通道）
+    void requestRebuild();
+
 private:
     struct Impl;
     Impl* impl_;

@@ -13,6 +13,15 @@ CONF=/run/dutyon
 
 log(){ echo "[wifi-client] $*"; }
 
+# 等 wlan0 出现（最多 10s）：dutyon.service 已不等网络（提早启动抢占屏幕），
+# 本脚本可能跑在 sprdwl_ng 驱动加载完成之前；等到了再继续，避免
+# wpa_supplicant 因接口不存在直接失败、拖到 25s join 超时才重试
+for i in $(seq 1 20); do
+    ip link show "$IFACE" >/dev/null 2>&1 && break
+    [ "$i" = 1 ] && log "waiting for $IFACE (driver loading...)"
+    sleep 0.5
+done
+
 rfkill unblock wifi 2>/dev/null || true
 if command -v nmcli >/dev/null 2>&1; then nmcli dev set "$IFACE" managed no 2>/dev/null || true; fi
 
