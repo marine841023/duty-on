@@ -36,7 +36,7 @@
 **Downloads**
 | Platform | Link |
 |---|---|
-| 🖥 Windows desktop v2.0.10 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
+| 🖥 Windows desktop v2.0.12 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
 | 📟 Device source | [v2.0-dev branch](https://github.com/marine841023/duty-on/tree/v2.0-dev), `device/` dir (cross-compiled — see "Device build" below) |
 
 </div>

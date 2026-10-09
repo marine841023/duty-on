@@ -22,9 +22,9 @@ $api = 'https://gitee.com/api/v5/repos/megrezsoft/duty-on'
 $root = Split-Path $PSScriptRoot -Parent
 
 $releases = @(
-  @{ Tag = 'v2.0.10'
-     Notes = (Join-Path $root 'docs\release-notes\v2.0.10.md')
-     Zip   = (Join-Path $root 'tools\dist\DutyOn-v2.0.10.zip') }
+  @{ Tag = 'v2.0.12'
+     Notes = (Join-Path $root 'docs\release-notes\v2.0.12.md')
+     Zip   = (Join-Path $root 'tools\dist\DutyOn-v2.0.12.zip') }
 )
 
 $curl = 'C:\Windows\System32\curl.exe'

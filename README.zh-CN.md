@@ -27,7 +27,7 @@
 **最新版本下载**
 | 平台 | 下载 |
 |---|---|
-| 🖥 Windows 桌面版 v2.0.10 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
+| 🖥 Windows 桌面版 v2.0.12 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
 | 📟 设备端源码 | [v2.0-dev 分支](https://gitee.com/megrezsoft/duty-on/tree/v2.0-dev) `device/` 目录（交叉编译，见下文"设备端构建"） |
 
 </div>

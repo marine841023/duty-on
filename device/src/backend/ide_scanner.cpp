@@ -54,6 +54,33 @@ bool endsWith(const std::string& s, const std::string& suffix) {
     return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+template <typename StrT>
+StrT asciiLowerCopy(StrT s) {
+    for (auto& c : s)
+        if (c >= 'A' && c <= 'Z') c = (typename StrT::value_type)(c + ('a' - 'A'));
+    return s;
+}
+
+// 大小写不敏感比较工具（ASCII；UTF-8 多字节字节均 >=0x80 不受影响）。
+// 动机：Trae 新版把窗口标题品牌名改为全大写（"… - TRAE CN"），旧的大小写
+// 敏感后缀匹配（" - Trae CN"）随之失效、项目从任务列表消失；品牌名日后
+// 仍可能变体，统一按不区分大小写匹配。
+bool equalsNoCase(const std::string& a, const std::string& b) {
+    return a.size() == b.size() && asciiLowerCopy(a) == asciiLowerCopy(b);
+}
+
+bool endsWithNoCase(const std::string& s, const std::string& suffix) {
+    if (s.size() < suffix.size()) return false;
+    return equalsNoCase(s.substr(s.size() - suffix.size()), suffix);
+}
+
+// 大小写不敏感 rfind。ASCII lower 是长度保持的 1:1 字节映射，lower 串中
+// 的命中位置即原串位置，可直接用于原串下标。
+size_t rfindNoCase(const std::string& s, const std::string& needle) {
+    if (needle.empty() || s.size() < needle.size()) return std::string::npos;
+    return asciiLowerCopy(s).rfind(asciiLowerCopy(needle));
+}
+
 std::string trimStr(const std::string& s) {
     size_t b = 0, e = s.size();
     while (b < e && std::isspace((unsigned char)s[b])) b++;
@@ -72,7 +99,7 @@ std::string stripPrivilegeSuffix(const std::string& title) {
         bc::kCursorTitleSuffix,      bc::kCursorAgentsTitle,
     };
     for (const char* suffix : suffixes) {
-        const size_t ide_end = title.rfind(suffix);
+        const size_t ide_end = rfindNoCase(title, suffix);
         if (ide_end == std::string::npos) continue;
         const std::string rest = trimStr(title.substr(ide_end + strlen(suffix)));
         if (rest.empty()) return title.substr(0, ide_end + strlen(suffix));
@@ -94,19 +121,20 @@ std::string stripPrivilegeSuffix(const std::string& title) {
 std::optional<std::pair<std::string, IdeKind>> parseTitle(const std::string& raw_title) {
     const std::string title = stripPrivilegeSuffix(raw_title);
     // 独立 Agents 面板标题（精确匹配，两个后缀都匹配不上）
-    if (title == bc::kCursorAgentsTitle) {
+    if (equalsNoCase(title, bc::kCursorAgentsTitle)) {
         return std::make_pair(std::string(bc::kCursorAgentsTitle), IdeKind::Cursor);
     }
     IdeKind ide;
-    if (endsWith(title, bc::kTraeTitleSuffix) || endsWith(title, bc::kTraeCodeTitleSuffix)) {
+    if (endsWithNoCase(title, bc::kTraeTitleSuffix) ||
+        endsWithNoCase(title, bc::kTraeCodeTitleSuffix)) {
         ide = IdeKind::Trae;
-    } else if (endsWith(title, bc::kQoderCnIdeTitleSuffix) ||
-               endsWith(title, bc::kQoderCnTitleSuffix) ||
-               endsWith(title, bc::kQoderTitleSuffix)) {
+    } else if (endsWithNoCase(title, bc::kQoderCnIdeTitleSuffix) ||
+               endsWithNoCase(title, bc::kQoderCnTitleSuffix) ||
+               endsWithNoCase(title, bc::kQoderTitleSuffix)) {
         ide = IdeKind::Qoder;
-    } else if (endsWith(title, bc::kCursorAgentsTitleSuffix)) {
+    } else if (endsWithNoCase(title, bc::kCursorAgentsTitleSuffix)) {
         ide = IdeKind::Cursor;  // 必须在 " - Cursor" 之前判定
-    } else if (endsWith(title, bc::kCursorTitleSuffix)) {
+    } else if (endsWithNoCase(title, bc::kCursorTitleSuffix)) {
         ide = IdeKind::Cursor;
     } else {
         return std::nullopt;
@@ -138,18 +166,13 @@ std::optional<std::pair<std::string, IdeKind>> parseTitle(const std::string& raw
             break;
         }
     }
-    if (raw.empty() || raw == "Trae" || raw == "Trae CN" || raw == "TraeCode CN" ||
-        raw == "Qoder" || raw == "Qoder CN" || raw == "Qoder CN IDE" || raw == "Cursor") {
+    if (raw.empty() || equalsNoCase(raw, "Trae") || equalsNoCase(raw, "Trae CN") ||
+        equalsNoCase(raw, "TraeCode CN") || equalsNoCase(raw, "Qoder") ||
+        equalsNoCase(raw, "Qoder CN") || equalsNoCase(raw, "Qoder CN IDE") ||
+        equalsNoCase(raw, "Cursor")) {
         return std::nullopt;
     }
     return std::make_pair(raw, ide);
-}
-
-template <typename StrT>
-StrT asciiLowerCopy(StrT s) {
-    for (auto& c : s)
-        if (c >= 'A' && c <= 'Z') c = (typename StrT::value_type)(c + ('a' - 'A'));
-    return s;
 }
 
 // 从全部在屏标题中提取 IDE 项目（按项目名去重，先见者定 IDE 类型），
