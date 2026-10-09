@@ -1,4 +1,4 @@
-﻿﻿# DutyOn 2.0 安装包构建脚本
+﻿# DutyOn 2.0 安装包构建脚本
 # 用法：powershell -File tools\build-package.ps1 [-Version 2.0.10]
 # 产物：tools\dist\
 #   DutyOn_<版本>_x64-setup.exe     NSIS 安装器
