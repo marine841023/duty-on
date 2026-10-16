@@ -149,6 +149,7 @@ private:
         std::optional<IdeKind> ide;
         SessionStatus status;
         std::string last_event;
+        uint64_t last_event_time = 0;  // 平级去重裁决用（最近活跃者胜）
         std::optional<std::string> alert_message;
     };
 

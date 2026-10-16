@@ -404,13 +404,18 @@ std::vector<StateManager::SessionSnapshot> StateManager::dedupSessionsLocked() c
     sessions.reserve(sessions_.size());
     for (const auto& [id, s] : sessions_) {
         sessions.push_back(SessionSnapshot{id, s.project_name, s.project_path, s.ide,
-                                           s.status, s.last_event, s.alert_message});
+                                           s.status, s.last_event, s.last_event_time,
+                                           s.alert_message});
     }
 
     // 按 (project_name, ide) 折叠同项目多会话（如 Qoder 专家/子代理流），
     // 优先级 ConfirmationNeeded(3) > Working 系(2) > Idle(1)；同优先级时
-    // 真实 hook 会话胜过 __window: 占位会话。仅影响展示快照，内部按
-    // session_id 的跟踪 / 超时清理 / 窗口同步不受影响。
+    // 真实 hook 会话胜过 __window: 占位会话，其余平级对按最近活跃者胜。
+    // 仅影响展示快照，内部按 session_id 的跟踪 / 超时清理 / 窗口同步不受影响。
+    // 最近活跃者胜的动机（用户实测）：同项目开新对话时，旧会话往往残留
+    // Thinking/ToolUse（未正常结束无 Stop），若按"先入者胜"，新会话第一个
+    // UserPromptSubmit 的 Thinking 被旧会话平级挡住，直到旧会话超时清理
+    // （最长 15 分钟）才浮出 —— 表现为"新任务第一个思考中识别不出来"。
     std::map<std::pair<std::string, std::string>, size_t> group_index;  // key -> 下标
     std::vector<SessionSnapshot> out;
     for (auto& s : sessions) {
@@ -428,7 +433,8 @@ std::vector<StateManager::SessionSnapshot> StateManager::dedupSessionsLocked() c
             const bool replace =
                 dedupPriority(s.status) > dedupPriority(existing.status) ||
                 (dedupPriority(s.status) == dedupPriority(existing.status) &&
-                 existing_placeholder && !new_placeholder);
+                 ((existing_placeholder && !new_placeholder) ||
+                  (!new_placeholder && s.last_event_time > existing.last_event_time)));
             if (replace) existing = std::move(s);
         }
     }
