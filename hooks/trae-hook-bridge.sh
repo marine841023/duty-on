@@ -45,7 +45,6 @@ hook_event="${2:-}"
 stdin_text=$(cat)
 # Cursor may prefix its JSON with a UTF-8 BOM; strip it so jq/python3 can parse.
 stdin_text=${stdin_text#"$(printf '\357\273\277')"}
-write_log "stdin: $stdin_text"
 
 if [ -z "$stdin_text" ]; then
   write_log "empty stdin, exit"
@@ -69,7 +68,7 @@ if [ "$ide" = "cursor" ] && [ -n "$hook_event" ]; then
   if command -v jq >/dev/null 2>&1; then
     patched=$(printf '%s' "$stdin_text" | jq -c --arg ev "$hook_event" '
       .hook_event_name = $ev
-      | .session_id = ((.session_id // .conversation_id // "cursor-session"))
+      | .session_id = ((.session_id // .conversation_id // ""))
       | .cwd = ((.cwd // (.workspace_roots[0] // "")))
       | .tool_name = ((.tool_name // .toolInfo.name // .tool.name))
     ' 2>/dev/null)
@@ -78,7 +77,7 @@ if [ "$ide" = "cursor" ] && [ -n "$hook_event" ]; then
 import json, os, sys
 e = json.load(sys.stdin)
 e["hook_event_name"] = os.environ["EV"]
-e.setdefault("session_id", e.get("conversation_id") or "cursor-session")
+e.setdefault("session_id", e.get("conversation_id") or "")
 e.setdefault("cwd", (e.get("workspace_roots") or [""])[0])
 if "tool_name" not in e:
     ti = e.get("toolInfo") or e.get("tool") or {}
@@ -89,35 +88,29 @@ print(json.dumps(e, separators=(",", ":")))
   fi
   if [ -n "$patched" ]; then
     stdin_text="$patched"
-    write_log "cursor patched: $stdin_text"
   else
     write_log "cursor payload patch skipped (no jq/python3)"
   fi
 fi
 
-# Resolve project dir: env override first, else .cwd from the event JSON.
+# Resolve project dir from the event, then the matching IDE environment.
 # QODER_PROJECT_DIR is set when invoked by Qoder's hook runner; TRAE_PROJECT_DIR
 # / CLAUDE_PROJECT_DIR when invoked by Trae IDE; CURSOR_PROJECT_DIR by Cursor;
 # CODEX_PROJECT_DIR by Codex CLI.
-project_dir="$TRAE_PROJECT_DIR"
-if [ -z "$project_dir" ]; then
-  project_dir="$QODER_PROJECT_DIR"
+project_dir=""
+if command -v jq >/dev/null 2>&1; then
+  project_dir=$(printf '%s' "$stdin_text" | jq -r '[.project_path, .cwd, .workspace_roots[0]] | map(select(type == "string" and length > 0)) | .[0] // empty' 2>/dev/null)
+elif command -v python3 >/dev/null 2>&1; then
+  project_dir=$(printf '%s' "$stdin_text" | python3 -c 'import sys,json;event=json.load(sys.stdin);print(event.get("project_path") or event.get("cwd") or (event.get("workspace_roots") or [""])[0])' 2>/dev/null)
 fi
 if [ -z "$project_dir" ]; then
-  project_dir="$CLAUDE_PROJECT_DIR"
-fi
-if [ -z "$project_dir" ]; then
-  project_dir="$CURSOR_PROJECT_DIR"
-fi
-if [ -z "$project_dir" ]; then
-  project_dir="$CODEX_PROJECT_DIR"
-fi
-if [ -z "$project_dir" ]; then
-  if command -v jq >/dev/null 2>&1; then
-    project_dir=$(printf '%s' "$stdin_text" | jq -r '.cwd // empty' 2>/dev/null)
-  elif command -v python3 >/dev/null 2>&1; then
-    project_dir=$(printf '%s' "$stdin_text" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("cwd") or "")' 2>/dev/null)
-  fi
+  case "$ide" in
+    codex) project_dir="$CODEX_PROJECT_DIR" ;;
+    cursor) project_dir="$CURSOR_PROJECT_DIR" ;;
+    qoder) project_dir="$QODER_PROJECT_DIR" ;;
+    trae) project_dir="${TRAE_PROJECT_DIR:-$CLAUDE_PROJECT_DIR}" ;;
+    *) project_dir="${TRAE_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$QODER_PROJECT_DIR}}" ;;
+  esac
 fi
 
 project_name=""
@@ -140,29 +133,38 @@ fi
 timestamp=$(($(date '+%s') * 1000))
 
 # Enrich the event JSON with project_path / project_name / timestamp.
-# Prefer jq, then python3; if neither is available, send the raw stdin — the
-# server derives project info from .cwd as a fallback.
+# Prefer jq, then python3; without a JSON parser, drop the event silently.
 body=""
 if command -v jq >/dev/null 2>&1; then
   body=$(printf '%s' "$stdin_text" | jq -c \
     --arg pp "$project_dir" --arg pn "$project_name" --arg ide "$ide" --argjson ts "$timestamp" \
-    '. + {project_path:$pp, project_name:$pn, timestamp:$ts} + (if $ide == "" then {} else {ide:$ide} end)' 2>/dev/null)
+    'select(type == "object")
+     | . + {project_path:$pp, project_name:$pn, timestamp:$ts} + (if $ide == "" then {} else {ide:$ide} end)
+     | select((.session_id | type == "string" and length > 0) and (.hook_event_name | type == "string" and length > 0))
+     | with_entries(select(.key == "session_id" or .key == "hook_event_name" or
+         .key == "project_path" or .key == "project_name" or .key == "cwd" or
+         .key == "ide" or .key == "timestamp" or .key == "tool_name" or
+         .key == "tool_use_id" or .key == "notification_type" or .key == "message" or
+         .key == "source" or .key == "turn_id"))' 2>/dev/null)
 elif command -v python3 >/dev/null 2>&1; then
   body=$(printf '%s' "$stdin_text" | PYTHONIOENCODING=utf-8 python3 -c '
 import sys, json
 e = json.load(sys.stdin)
+if not isinstance(e, dict) or not isinstance(e.get("session_id"), str) or not e["session_id"] or not isinstance(e.get("hook_event_name"), str) or not e["hook_event_name"]:
+    sys.exit(0)
 e["project_path"] = sys.argv[1]
 e["project_name"] = sys.argv[2]
 e["timestamp"] = int(sys.argv[3])
 if sys.argv[4]:
     e["ide"] = sys.argv[4]
-print(json.dumps(e, separators=(",", ":")))
+keys = ("session_id", "hook_event_name", "project_path", "project_name", "cwd", "ide", "timestamp", "tool_name", "tool_use_id", "notification_type", "message", "source", "turn_id")
+print(json.dumps({key: e[key] for key in keys if key in e}, separators=(",", ":")))
 ' "$project_dir" "$project_name" "$timestamp" "$ide" 2>/dev/null)
 fi
 
 if [ -z "$body" ]; then
-  write_log "enrich skipped (no jq/python3); sending raw stdin"
-  body="$stdin_text"
+  write_log "payload rejected or no jq/python3"
+  exit 0
 fi
 
 # POST to the pet's HTTP server with a 2s timeout. Never block the AI.

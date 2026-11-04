@@ -1,5 +1,5 @@
 ﻿# DutyOn 2.0 安装包构建脚本
-# 用法：powershell -File tools\build-package.ps1 [-Version 2.0.10]
+# 用法：powershell -File tools\build-package.ps1
 # 产物：tools\dist\
 #   DutyOn_<版本>_x64-setup.exe     NSIS 安装器
 #   DutyOn-v<版本>.zip              安装器 ZIP 外包装（SmartScreen 规避）
@@ -47,6 +47,7 @@ if (-not $makensis) {
 $exe = Join-Path $root 'device\build\Release\dutyon-pet.exe'
 $glfw = Join-Path $root 'device\build\Release\glfw3.dll'
 foreach ($f in @($exe, $glfw,
+                 (Join-Path $root 'hooks\trae-hook-bridge.ps1'),
                  (Join-Path $root 'device\build\Release\FrameworkShaders'),
                  (Join-Path $root 'frontend\assets\live2d'),
                  (Join-Path $root 'frontend\assets\device\sounds'))) {
@@ -92,11 +93,12 @@ Compress-Archive -Path $setupExe -DestinationPath $zipPath
 Write-Host "[5/5] 生成升级包 zip..." -ForegroundColor Cyan
 $stage = Join-Path $dist 'update-staged'
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-@("$stage", "$stage\FrameworkShaders", "$stage\assets\live2d",
+@("$stage", "$stage\hooks", "$stage\FrameworkShaders", "$stage\assets\live2d",
   "$stage\assets\device\sounds") |
     ForEach-Object { New-Item -ItemType Directory -Force -Path $_ | Out-Null }
 Copy-Item $exe  "$stage\dutyon-pet.exe" -Force
 Copy-Item $glfw "$stage\glfw3.dll" -Force
+Copy-Item "$root\hooks\trae-hook-bridge.ps1" "$stage\hooks" -Force
 Copy-Item "$root\device\build\Release\FrameworkShaders\*" "$stage\FrameworkShaders" -Recurse -Force
 Copy-Item "$root\frontend\assets\live2d\*" "$stage\assets\live2d" -Recurse -Force
 Copy-Item "$root\frontend\assets\device\sounds\*" "$stage\assets\device\sounds" -Recurse -Force

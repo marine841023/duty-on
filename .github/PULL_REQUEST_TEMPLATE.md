@@ -8,8 +8,9 @@
 
 ## How verified / 如何验证
 
-- [ ] `cargo test` passes
-- [ ] `node --check` passes for edited JS files
+- [ ] C++ Release build passes (2.0 / v2.0-dev)
+- [ ] Backend CTest and `node hooks/tests/bridge.test.cjs` pass for Hook changes
+- [ ] `cargo test` passes (only for legacy 1.x / master code changes)
 - [ ] Manually tested on: <!-- e.g. Windows 11, mini mode on/off -->
 
 ## Screenshots (if UI) / 截图

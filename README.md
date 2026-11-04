@@ -39,6 +39,9 @@
 | 🖥 Windows desktop v2.0.12 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
 | 📟 Device source | [v2.0-dev branch](https://github.com/marine841023/duty-on/tree/v2.0-dev), `device/` dir (cross-compiled — see "Device build" below) |
 
+Current source: **v2.0.13** — [changes and validation](docs/release-notes/v2.0.13.md).
+The download links above lead to published releases; local builds go to `tools/dist/`.
+
 </div>
 
 ---
@@ -129,6 +132,8 @@ powershell .userdata/deploy-cross.ps1
 - **Hi-DPI** — 2x supersampled rendering, crisp edges
 - **8 languages** — auto-follows the OS locale
 - **Autostart** — one-toggle login launch
+- **Tray controls** — right-click the tray icon to show/hide the pet, move it
+  to the center of its screen's work area, or exit; left-click restores it
 
 ## Memory footprint, measured
 
@@ -161,12 +166,27 @@ cmake --build build --config Release --target dutyon-pet
 
 Requires the [Live2D Cubism Native SDK](https://www.live2d.com/sdk/download/native/)
 placed at `device/third_party/CubismNativeSdk/` (not redistributed in this
-repo for license reasons). All other dependencies are fetched by CMake.
+repo for license reasons), and GLEW 2.2.0 at `device/third_party/deps/glew-2.2.0/`.
+See [device build prerequisites](device/README.md) for the remaining dependencies.
+
+The executable is `device/build/Release/dutyon-pet.exe`. From the repository
+root, run `powershell -File tools/build-package.ps1` to create the installer,
+distribution ZIP and update ZIP in **`tools/dist/`**. Packages include the Hook
+scripts required by automatic installation.
 
 ### Enable IDE hooks
 
-Right-click the pet → **安装 Hook 集成**, then restart your IDE or start a
-new AI session.
+On startup the pet automatically installs or refreshes its Hook definitions
+for detected IDE configuration directories. To repair them manually,
+right-click the pet → **安装 Hook 集成**. Restart your IDE or start a new AI
+session, and enable hooks in the IDE if required.
+
+Codex reads `$CODEX_HOME/hooks.json` (defaults to `~/.codex/hooks.json`). After
+installing or upgrading, review and trust the changed definitions in Codex CLI's
+`/hooks`; enable hooks if `features.hooks = false` was set. An installed entry
+does not confirm trust or delivery. Start the pet with the same `CODEX_HOME` as
+Codex. Session activity comes from local hook events; a running process alone
+does not establish activity. See the [Hook review](docs/hook-review.md) for details.
 
 ## How it works
 
@@ -195,12 +215,18 @@ new AI session.
 | `PreToolUse` / `PostToolUse` | AI tool runs / finishes | → working |
 | `Notification` | confirmation needed | → alert |
 | `Stop` | AI task completed | → idle |
+| `PermissionRequest` / `request_user_input` tool | Codex awaits permission / input | → alert |
+| `Interrupt` | Codex turn interrupted | → idle |
+| `SessionEnd` | session ended | remove session |
+
+Codex model, subagent and compaction events keep an active session busy.
+`SessionStart` with `source=compact` preserves activity.
 
 Aggregate priority: alert > working > sleeping.
 
 ## Tech stack
 
-C++20 single-process (desktop + device share the core) · GLFW · OpenGL ·
+C++17 single-process (desktop + device share the core) · GLFW · OpenGL ·
 Dear ImGui (FreeType) · DRM/GBM + GLES3 (device) · Live2D Cubism Native SDK ·
 cpp-httplib · nlohmann/json · cpr · Trae / Qoder / Cursor / Codex / OpenCode hooks
 

@@ -12,7 +12,7 @@
 //   PreToolUse(AskUserQuestion)        -> ConfirmationNeeded；其 PostToolUse -> Thinking
 //   Notification（确认类）             -> ConfirmationNeeded
 //   Notification（完成类）/ Stop       -> Idle
-//   SessionEnd（会话结束，权威收尾）   -> Idle
+//   SessionEnd（会话结束，权威收尾）   -> 删除会话
 //   SubagentStart/SubagentStop/PreCompact -> Thinking（忙；不打断 ConfirmationNeeded）
 //   CLI 代理（Codex/OpenCode）崩溃     -> 由 syncCliLiveness 清除
 //
@@ -28,11 +28,13 @@
 
 #include <cstdint>
 #include <condition_variable>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <set>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -78,6 +80,8 @@ struct HookEvent {
     std::optional<IdeKind> ide;
     std::optional<std::string> message;
     std::optional<uint64_t> timestamp;
+    std::optional<std::string> source;   // Codex SessionStart: startup/resume/compact
+    std::optional<std::string> turn_id;
 
     // 从 POST body JSON 解析（snake_case；非法输入返回 nullopt）
     static std::optional<HookEvent> fromJson(const nlohmann::json& j);
@@ -91,13 +95,16 @@ struct DetectedProject {
 
 // CLI 代理进程存活（Codex/OpenCode 无 GUI 窗口，靠进程表判活）
 struct CliLiveness {
+    bool scan_succeeded = false; // 扫描失败不是“进程已退出”
     bool codex_alive = false;
     bool opencode_alive = false;
 };
 
+uint64_t currentMillis();
+
 class StateManager {
 public:
-    StateManager();
+    explicit StateManager(std::function<uint64_t()> clock = currentMillis);
 
     // ---- 事件驱动（HTTP /hook 线程调用）----
     void handleHookEvent(const HookEvent& ev);
@@ -138,7 +145,10 @@ private:
         // 非空 = 工具正在跑，静默是预期的（见 bc::kToolRunningTimeout）——
         // 覆盖主代理长命令与子代理长任务（子代理工具调用同 session 发
         // hook，agent_id 不同；Task 工具本身不发 hook）
-        std::string pending_tool;
+        std::multiset<std::string> pending_tools;
+        std::set<std::string> confirmation_tools;
+        std::optional<std::string> turn_id;
+        bool turn_finished = false;
     };
 
     // 快照里的单个会话（对外形态）
@@ -170,6 +180,8 @@ private:
     uint64_t version_ = 0;
     std::unordered_map<std::string, uint32_t> window_miss_counts_;
     std::unordered_map<std::string, uint32_t> cli_miss_counts_;
+    std::map<std::string, uint64_t> ended_sessions_;
+    std::function<uint64_t()> clock_;
 };
 
 // 当前毫秒时间戳（对齐 JS Date.now()）

@@ -79,8 +79,10 @@ constexpr int kCursorHookEventsCount = 5;
 // 写入 ~/.codex/hooks.json 的事件：与 Trae 同名同 schema，无需归一化。
 inline const char* const kCodexHookEvents[] = {
     "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "PermissionRequest",
+    "Interrupt", "SessionEnd", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact",
+    "PreModelRequest", "PostModelRequest",
 };
-constexpr int kCodexHookEventsCount = 6;
+constexpr int kCodexHookEventsCount = sizeof(kCodexHookEvents) / sizeof(kCodexHookEvents[0]);
 
 // OpenCode 插件目录（~/.config/opencode/plugins，无配置式 hook）
 constexpr const char* kOpencodePluginSubdir = ".config/opencode/plugins";
@@ -90,9 +92,9 @@ constexpr const char* kOpencodePluginFilename = "dutyon-bridge.js";
 // 就是它的 alert 信号：PreToolUse -> confirmation-needed，用户作答后的
 // PostToolUse -> thinking）。
 inline const char* const kAskUserTools[] = {
-    "AskUserQuestion", "AskQuestion", "ask_question", "askQuestion",
+    "AskUserQuestion", "AskQuestion", "ask_question", "askQuestion", "request_user_input",
 };
-constexpr int kAskUserToolsCount = 4;
+constexpr int kAskUserToolsCount = 5;
 
 // 必须在 IDE 里点"运行"确认后才执行的工具（computer-use 卡片等）。
 // Claude 风格 hook 在确认卡片出现时就触发 PreToolUse —— 即代理正被阻塞

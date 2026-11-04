@@ -29,7 +29,15 @@ namespace dutyon::backend {
 // 第二个返回值为"疑似 IDE 但解析失败"的原始标题（诊断用，最多 8 条）。
 std::pair<std::vector<DetectedProject>, std::vector<std::string>> scanIdeProjects();
 
-// Codex/OpenCode CLI 进程存活检测（CreateToolhelp32Snapshot，排除 codex-relay）。
+// 只认代理本体的精确文件名；sandbox、relay、computer-use 等辅助进程不算。
+inline std::optional<IdeKind> cliProcessIde(std::wstring name) {
+    for (auto& c : name) if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
+    if (name == L"codex.exe") return IdeKind::Codex;
+    if (name == L"opencode.exe") return IdeKind::OpenCode;
+    return std::nullopt;
+}
+
+// 失败时 scan_succeeded=false，禁止把枚举错误解释为所有代理退出。
 CliLiveness scanCliProcesses();
 
 // 把项目名匹配的 IDE 窗口带到前台（精确 folder 匹配优先，标题子串回退，

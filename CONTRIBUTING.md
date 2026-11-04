@@ -28,7 +28,19 @@ cmake --build build --config Release
 .\build\Release\dutyon-pet.exe
 ```
 
-No npm/node needed.
+The application build needs no npm. Hook bridge regression tests use Node.js
+and Windows PowerShell. From the repository root:
+
+```powershell
+cmake -S device/tests -B device/build/backend-tests -G "Visual Studio 17 2022" -A x64
+cmake --build device/build/backend-tests --config Release
+ctest --test-dir device/build/backend-tests -C Release --output-on-failure
+node hooks/tests/bridge.test.cjs
+```
+
+See [Hook review](docs/hook-review.md) for protocol details and limitations.
+Package a Release build with `powershell -File tools/build-package.ps1`;
+all packages are written to `tools/dist/` and stay out of Git.
 
 ## Conventions
 

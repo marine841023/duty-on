@@ -23,10 +23,15 @@ using json = nlohmann::json;
 
 namespace {
 
-std::string homeDir() {
-    const char* home = getenv("USERPROFILE");
-    if (!home) home = getenv("HOME");
-    return home ? std::string(home) : std::string();
+fs::path homeDir() {
+    const wchar_t* home = _wgetenv(L"USERPROFILE");
+    if (!home || !*home) home = _wgetenv(L"HOME");
+    return home ? fs::path(home) : fs::path();
+}
+
+fs::path codexHome() {
+    const wchar_t* override_home = _wgetenv(L"CODEX_HOME");
+    return override_home && *override_home ? fs::path(override_home) : homeDir() / ".codex";
 }
 
 // 当前平台的桥接脚本名（Windows 走 PowerShell）
@@ -43,16 +48,27 @@ enum class HookFormat { Nested, Flat };
 // String —— 实测所有 POST 422）。
 std::string hookCommand(const std::string& ide, const std::string& event) {
     std::string event_arg = event.empty() ? "" : " -HookEvent " + event;
-    return "powershell -NoProfile -ExecutionPolicy Bypass -File "
-           "\"$env:USERPROFILE\\.dutyon\\hooks\\trae-hook-bridge.ps1\" -Ide " +
-           ide + event_arg;
+    const auto bridge = homeDir() / ".dutyon" / "hooks" / bridgeFilename();
+    return "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" +
+           bridge.u8string() + "\" -Ide " + ide + event_arg;
 }
 
 // 命令是否属于本应用（同时匹配 .dutyon 与旧名 .trae-pet，改名后重装
 // 去重替换而非并排叠加）
 bool isPetCommand(const std::string& cmd) {
-    return cmd.find(".dutyon") != std::string::npos ||
-           cmd.find(".trae-pet") != std::string::npos;
+    return (cmd.find(".dutyon") != std::string::npos ||
+            cmd.find(".trae-pet") != std::string::npos) &&
+           cmd.find("trae-hook-bridge.") != std::string::npos;
+}
+
+bool isPetHook(const json& hook) {
+    if (!hook.is_object()) return false;
+    for (const char* key : {"command", "commandWindows"}) {
+        auto it = hook.find(key);
+        if (it != hook.end() && it->is_string() && isPetCommand(it->get<std::string>()))
+            return true;
+    }
+    return false;
 }
 
 // 读整个文本文件（不存在返回 nullopt）
@@ -77,11 +93,11 @@ std::optional<std::string> backupFile(const fs::path& path) {
                         std::chrono::system_clock::now().time_since_epoch())
                         .count();
     fs::path backup = path;
-    backup.replace_filename(path.filename().string() + ".dutyon-backup-" + std::to_string(ts));
+    backup.replace_filename(path.filename().u8string() + ".dutyon-backup-" + std::to_string(ts));
     std::error_code ec;
     fs::copy_file(path, backup, ec);
     if (ec) return std::nullopt;
-    return backup.string();
+    return backup.u8string();
 }
 
 // 把宠物 hook 条目合并进配置文件。返回 warning（nullopt = 无）；失败时
@@ -117,8 +133,13 @@ std::optional<std::string> mergeHooksIntoFile(
             } else {
                 // 存在但不是合法 JSON / 根不是 object —— 绝不静默清空：
                 // 备份原文件、从 {} 重建、上报
-                const std::string bak = backupFile(path).value_or("<backup failed>");
-                warning = path.string() + (parsed.is_discarded()
+                const auto backup = backupFile(path);
+                if (!backup) {
+                    err = "Cannot back up invalid configuration; left unchanged: " + path.u8string();
+                    return std::nullopt;
+                }
+                const std::string& bak = *backup;
+                warning = path.u8string() + (parsed.is_discarded()
                                                ? ": not valid JSON; backed up to "
                                                : ": root was not a JSON object; backed up to ") +
                           bak + " and rebuilt";
@@ -139,8 +160,13 @@ std::optional<std::string> mergeHooksIntoFile(
         existing["version"] = 1;
     }
     if (existing.contains("hooks") && !existing["hooks"].is_object()) {
-        const std::string bak = backupFile(path).value_or("<backup failed>");
-        const std::string note = path.string() + ": \"hooks\" was not a JSON object; backed up to " +
+        const auto backup = backupFile(path);
+        if (!backup) {
+            err = "Cannot back up invalid hooks; left unchanged: " + path.u8string();
+            return std::nullopt;
+        }
+        const std::string& bak = *backup;
+        const std::string note = path.u8string() + ": \"hooks\" was not a JSON object; backed up to " +
                                  bak + " and reset it";
         warning = warning.has_value() ? *warning + "; " + note : note;
         existing["hooks"] = json::object();
@@ -156,8 +182,11 @@ std::optional<std::string> mergeHooksIntoFile(
         // 本事件的宠物条目（IDE 原生形状）
         json group;
         if (format == HookFormat::Nested) {
-            json hook = {{"type", "command"}, {"command", cmd},
-                         {"timeout", bc::kBridgeTimeoutSec}};
+            // Codex 的 Interrupt/SessionEnd 最多允许 3 秒，其他事件用常规上限。
+            const uint64_t timeout = std::string(event) == "Interrupt" ||
+                                     std::string(event) == "SessionEnd"
+                                         ? 3 : bc::kBridgeTimeoutSec;
+            json hook = {{"type", "command"}, {"command", cmd}, {"timeout", timeout}};
             if (shell) hook["shell"] = shell;
             group = {{"hooks", json::array({std::move(hook)})}};
         } else {
@@ -175,30 +204,29 @@ std::optional<std::string> mergeHooksIntoFile(
             json old = arr;
             arr = json::array({std::move(old)});
             if (!warning.has_value()) {
-                warning = path.string() + ": event \"" + event +
+                warning = path.u8string() + ": event \"" + event +
                           "\" had a non-array value; preserved it inside the merged array";
             }
         }
 
         // 去重：移除已有宠物条目（重装不叠加；旧 .trae-pet 条目一并替换）
         json kept = json::array();
-        for (const auto& e : arr) {
-            bool is_pet = false;
-            if (format == HookFormat::Nested) {
-                if (e.contains("hooks") && e["hooks"].is_array()) {
-                    for (const auto& h : e["hooks"]) {
-                        if (h.contains("command") && h["command"].is_string() &&
-                            isPetCommand(h["command"].get<std::string>())) {
-                            is_pet = true;
-                            break;
-                        }
-                    }
+        for (auto e : arr) {
+            if (format == HookFormat::Nested && e.is_object() &&
+                e.contains("hooks") && e["hooks"].is_array()) {
+                json handlers = json::array();
+                bool removed = false;
+                for (const auto& h : e["hooks"]) {
+                    if (isPetHook(h)) removed = true;
+                    else handlers.push_back(h);
                 }
-            } else {
-                is_pet = e.contains("command") && e["command"].is_string() &&
-                         isPetCommand(e["command"].get<std::string>());
+                // 只移除自己的 handler；共享 matcher 内的其他 handler 和元数据保留。
+                if (removed && handlers.empty()) continue;
+                e["hooks"] = std::move(handlers);
+            } else if (format == HookFormat::Flat && isPetHook(e)) {
+                continue;
             }
-            if (!is_pet) kept.push_back(e);
+            kept.push_back(std::move(e));
         }
         kept.push_back(std::move(group));
         arr = std::move(kept);
@@ -208,7 +236,7 @@ std::optional<std::string> mergeHooksIntoFile(
     if (existing == baseline) return warning;
 
     if (!writeFile(path, existing.dump(2) + "\n")) {
-        err = "Failed to write " + path.string();
+        err = "Failed to write " + path.u8string();
         return std::nullopt;
     }
     return warning;
@@ -426,16 +454,17 @@ std::string resolveHooksSourceDir() {
         }
     }
     for (const auto& c : candidates) {
-        if (fs::exists(c / bridgeFilename())) return c.string();
+        if (fs::exists(c / bridgeFilename())) return c.u8string();
     }
-    return candidates.empty() ? std::string() : candidates.front().string();
+    return candidates.empty() ? std::string() : candidates.front().u8string();
 }
 
 InstallResult installHooks(const std::string& hooks_source_dir) {
-    const std::string home = homeDir();
-    const fs::path bridge_src = fs::path(hooks_source_dir) / bridgeFilename();
+    const fs::path home = homeDir();
+    if (home.empty()) return fail("Cannot resolve user home directory");
+    const fs::path bridge_src = fs::u8path(hooks_source_dir) / bridgeFilename();
     if (!fs::exists(bridge_src)) {
-        return fail("Bridge script not found: " + bridge_src.string());
+        return fail("Bridge script not found: " + bridge_src.u8string());
     }
 
     const fs::path target_hook_dir = fs::path(home) / ".dutyon" / "hooks";
@@ -449,15 +478,15 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
         const auto cur = readFileIfExists(bridge_dst);
         if (!cur.has_value() || *cur != *content) {
             if (!writeFile(bridge_dst, *content)) {
-                return fail("Failed to copy bridge: " + bridge_dst.string());
+                return fail("Failed to copy bridge: " + bridge_dst.u8string());
             }
         }
     } else {
-        return fail("Failed to read bridge: " + bridge_src.string());
+        return fail("Failed to read bridge: " + bridge_src.u8string());
     }
 
     // 单独的安装脚本（存在则一并复制，内容一致跳过，不存在跳过）
-    const fs::path installer_src = fs::path(hooks_source_dir) / "install-hooks.ps1";
+    const fs::path installer_src = fs::u8path(hooks_source_dir) / "install-hooks.ps1";
     if (auto content = readFileIfExists(installer_src)) {
         const fs::path installer_dst = target_hook_dir / "install-hooks.ps1";
         const auto cur = readFileIfExists(installer_dst);
@@ -496,7 +525,7 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
             /*add_version=*/false, /*strip_version=*/false, HookFormat::Nested, err);
         if (err.empty()) {
             if (w.has_value()) warnings.push_back(std::string(qdir) + ": " + *w);
-            if (!qoder_path_str.has_value()) qoder_path_str = qoder_hooks_path.string();
+            if (!qoder_path_str.has_value()) qoder_path_str = qoder_hooks_path.u8string();
         } else {
             warnings.push_back(std::string(qdir) + " settings.json merge failed: " + err);
         }
@@ -514,7 +543,7 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
             /*add_version=*/true, /*strip_version=*/false, HookFormat::Flat, err);
         if (err.empty()) {
             if (w.has_value()) warnings.push_back("Cursor: " + *w);
-            cursor_path_str = cursor_hooks_path.string();
+            cursor_path_str = cursor_hooks_path.u8string();
         } else {
             warnings.push_back("Cursor hooks.json merge failed: " + err);
         }
@@ -522,7 +551,7 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
 
     // ---- Codex: ~/.codex/hooks.json（Nested，剥 version —— CLI 拒绝该字段）----
     std::optional<std::string> codex_path_str;
-    const fs::path codex_dir = fs::path(home) / ".codex";
+    const fs::path codex_dir = codexHome();
     if (fs::exists(codex_dir)) {
         const fs::path codex_hooks_path = codex_dir / "hooks.json";
         const std::string codex_cmd = hookCommand("codex", "");
@@ -533,7 +562,7 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
             /*add_version=*/false, /*strip_version=*/true, HookFormat::Nested, err);
         if (err.empty()) {
             if (w.has_value()) warnings.push_back("Codex: " + *w);
-            codex_path_str = codex_hooks_path.string();
+            codex_path_str = codex_hooks_path.u8string();
         } else {
             warnings.push_back("Codex hooks.json merge failed: " + err);
         }
@@ -550,9 +579,9 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
         } else {
             const fs::path plugin_path = plugins_dir / bc::kOpencodePluginFilename;
             if (writeFile(plugin_path, kOpencodePluginSource)) {
-                opencode_path_str = plugin_path.string();
+                opencode_path_str = plugin_path.u8string();
             } else {
-                warnings.push_back("OpenCode plugin write failed: " + plugin_path.string());
+                warnings.push_back("OpenCode plugin write failed: " + plugin_path.u8string());
             }
         }
     }
@@ -567,8 +596,8 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
         }
         r.warning = all;
     }
-    r.hook_dir = target_hook_dir.string();
-    r.hooks_path = trae_hooks_path.string();
+    r.hook_dir = target_hook_dir.u8string();
+    r.hooks_path = trae_hooks_path.u8string();
     r.qoder_hooks_path = qoder_path_str;
     r.cursor_hooks_path = cursor_path_str;
     r.codex_hooks_path = codex_path_str;
@@ -578,11 +607,11 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
 }
 
 InstalledStatus isHooksInstalled() {
-    const std::string home = homeDir();
+    const fs::path home = homeDir();
     const fs::path trae_hooks_path = fs::path(home) / ".trae-cn" / "hooks.json";
     // Qoder 双配置目录：国际版 ~/.qoder、CN 版 ~/.qoder-cn，任一接线即算已装
     const fs::path cursor_hooks_path = fs::path(home) / ".cursor" / "hooks.json";
-    const fs::path codex_hooks_path = fs::path(home) / ".codex" / "hooks.json";
+    const fs::path codex_hooks_path = codexHome() / "hooks.json";
     const fs::path opencode_plugin_path =
         fs::path(home) / bc::kOpencodePluginSubdir / bc::kOpencodePluginFilename;
     const fs::path bridge_path = fs::path(home) / ".dutyon" / "hooks" / bridgeFilename();
@@ -592,7 +621,20 @@ InstalledStatus isHooksInstalled() {
 
     auto contains_pet = [](const fs::path& p) {
         auto content = readFileIfExists(p);
-        return content.has_value() && isPetCommand(*content);
+        if (!content) return false;
+        const auto config = json::parse(*content, nullptr, false);
+        if (!config.is_object() || !config.contains("hooks") || !config["hooks"].is_object())
+            return false;
+        for (const auto& arr : config["hooks"]) {
+            if (!arr.is_array()) continue;
+            for (const auto& group : arr) {
+                if (isPetHook(group)) return true;
+                if (!group.is_object() || !group.contains("hooks") || !group["hooks"].is_array())
+                    continue;
+                for (const auto& handler : group["hooks"]) if (isPetHook(handler)) return true;
+            }
+        }
+        return false;
     };
     st.hooks_exist = contains_pet(trae_hooks_path);
     st.qoder_hooks_exist = contains_pet(fs::path(home) / ".qoder" / "settings.json") ||

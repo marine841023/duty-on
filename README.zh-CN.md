@@ -30,6 +30,9 @@
 | 🖥 Windows 桌面版 v2.0.12 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
 | 📟 设备端源码 | [v2.0-dev 分支](https://gitee.com/megrezsoft/duty-on/tree/v2.0-dev) `device/` 目录（交叉编译，见下文"设备端构建"） |
 
+当前源码版本：**v2.0.13**，见[变更与验证说明](docs/release-notes/v2.0.13.md)。
+上表指向已发布版本；本地构建的安装包输出到 `tools/dist/`。
+
 </div>
 
 ---
@@ -104,6 +107,7 @@ powershell .userdata/deploy-cross.ps1
 - **高清渲染**：2x 超采样，高 DPI 屏幕边缘锐利
 - **多语言**：简中/繁中/英/日/韩/法/德/西（自动跟随系统语言）
 - **开机自启**：菜单一键开关
+- **托盘菜单**：右键托盘图标可显示/隐藏精灵、移至所在屏幕工作区正中、退出；左键恢复显示
 
 ## 内存占用：实测数字
 
@@ -135,11 +139,25 @@ cmake --build build --config Release --target dutyon-pet
 
 需要 [Live2D Cubism Native SDK](https://www.live2d.com/sdk/download/native/)
 （放到 `device/third_party/CubismNativeSdk/`，因许可协议不在仓库内分发）。
-其余依赖由 CMake 自动拉取。
+另需 GLEW 2.2.0，放到 `device/third_party/deps/glew-2.2.0/`；完整依赖见
+[构建说明](device/README.md)。
+
+可执行文件位于 `device/build/Release/dutyon-pet.exe`。在仓库根目录执行
+`powershell -File tools/build-package.ps1`，安装器、分发 ZIP 和升级 ZIP 均输出到
+**`tools/dist/`**，包内包含自动安装所需的 Hook 脚本。
 
 ### 安装 Hook 集成
 
-右键精灵菜单 → **安装 Hook 集成**，然后**重启 IDE 或开启新的 AI 会话**即可生效。
+精灵启动时会自动安装或更新已检测到的 IDE 配置目录中的 Hook 定义。
+需要手动修复时，右键精灵菜单 → **安装 Hook 集成**，然后**重启 IDE 或开启新的 AI 会话**，
+并按 IDE 要求启用 Hook（Trae：设置 → Hooks → 启用）。
+
+Codex 使用 `$CODEX_HOME/hooks.json`（未设置时为 `~/.codex/hooks.json`）。
+安装或升级后，在 Codex CLI 的 `/hooks` 中检查并信任新增或修改的 Hook 定义；
+如果设置了 `features.hooks = false`，需先开启。菜单显示“已安装”仅表示配置存在，
+不代表 Codex 已信任或实际发送事件。自定义 `CODEX_HOME` 时，启动精灵也要使用相同环境。
+检测以本机 Hook 事件为准，进程存在只用于辅助判断退出，无法证明某个会话仍在工作。
+实现与限制见 [Hook Review](docs/hook-review.md)。
 
 ## 工作原理
 
@@ -170,6 +188,11 @@ cmake --build build --config Release --target dutyon-pet
 | `PreToolUse` / `PostToolUse` | AI 工具执行前/后 | → 忙碌 (working) |
 | `Notification` | 需要用户确认 | → 提醒 (alert) |
 | `Stop` | AI 完成任务 | → 空闲 (idle) |
+| `PermissionRequest` / `request_user_input` 工具调用 | Codex 等待授权或回答 | → 提醒 (alert) |
+| `Interrupt` | Codex 当前回合中断 | → 空闲 (idle) |
+| `SessionEnd` | 会话结束 | 移除会话 |
+
+Codex 的模型请求、子代理和压缩事件保持忙碌；`SessionStart` 的 `source=compact` 不会置为空闲。
 
 整体状态优先级：alert > working > sleeping。
 
@@ -187,7 +210,7 @@ A: 在。两版本共用 `~/.dutyon/config.json` 与形象/模型目录。
 
 ## 技术栈
 
-- **C++20 单进程架构** — 桌面端 + 设备端共用核心，无 WebView
+- **C++17 单进程架构** — 桌面端 + 设备端共用核心，无 WebView
 - **GLFW + OpenGL + Dear ImGui (FreeType)** — 桌面端窗口与渲染
 - **DRM/GBM + GLES3** — 设备端无 X11 直渲
 - **Live2D Cubism Native SDK** — Live2D 模型渲染（两端共用）

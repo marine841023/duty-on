@@ -2021,7 +2021,7 @@ int main() {
     };
 
     // ---- 窗口层事件接线 ----
-    // 右键（角色区 / 托盘）：开/关菜单；菜单矩形内的右键不动作（同 1.x）
+    // 右键角色区：开/关菜单；菜单矩形内的右键不动作（同 1.x）
     window->on_context_menu = [&](int x, int y) {
         printf("[Menu] context menu requested at (%d, %d), open=%d\n",
                x, y, (int)ui.isMenuOpen());

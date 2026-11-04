@@ -10,14 +10,14 @@ body:
     id: version
     attributes:
       label: App version / 应用版本
-      placeholder: e.g. 1.0.0
+      placeholder: e.g. 2.0.13 / source commit SHA
     validations:
       required: true
   - type: input
     id: os
     attributes:
       label: OS / 操作系统
-      placeholder: e.g. Windows 11 25H2 / macOS 15 / Ubuntu 24.04 (X11)
+      placeholder: e.g. Windows 11 / ARM Linux (board + distribution); include IDE and version for Hook issues
     validations:
       required: true
   - type: textarea
@@ -31,7 +31,7 @@ body:
     id: logs
     attributes:
       label: Logs / 日志
-      description: Paste relevant lines from ~/.dutyon/frontend.log (UI issues) — it exists even in release builds.
+      description: Relevant lines from ~/.dutyon/frontend.log; for Hook issues also hooks/bridge.log and hook-received.log. Remove private paths, prompts and credentials before sharing.
       render: text
   - type: checkboxes
     id: checklist

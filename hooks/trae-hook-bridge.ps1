@@ -54,24 +54,25 @@ $stdinText = ''
 try {
   $stdIn = [Console]::OpenStandardInput()
   $ms = New-Object System.IO.MemoryStream
-  # Use async copy with a 3s timeout — if the parent process (IDE hook
+  # Bound stdin + HTTP time to fit Codex Interrupt/SessionEnd's 3s maximum.
+  # Use async copy with a 500ms timeout — if the parent process (IDE hook
   # runner) doesn't close stdin (e.g. Trae IDE bug or orphaned process),
   # CopyTo would block forever, leaking a powershell process and locking
-  # bridge.log. The timeout ensures we proceed with whatever data arrived.
+  # bridge.log. Drop incomplete input when this deadline expires.
   $copyTask = $stdIn.CopyToAsync($ms)
-  if (-not $copyTask.Wait(3000)) {
-    Write-BridgeLog "stdin read timeout (3s), continuing with partial data"
+  if (-not $copyTask.Wait(500)) {
+    Write-BridgeLog 'stdin read timeout; dropping incomplete event'
     try { $stdIn.Close() } catch { }
+    exit 0
   }
   $stdinText = [System.Text.Encoding]::UTF8.GetString($ms.ToArray())
 } catch {
-  Write-BridgeLog "binary stdin read failed: $($_.Exception.Message); falling back to text read"
-  $stdinText = [Console]::In.ReadToEnd()
+  Write-BridgeLog 'stdin read failed'
+  exit 0
 }
 # Cursor writes its JSON with a UTF-8 BOM, which ConvertFrom-Json rejects
 # ("invalid JSON primitive"); strip it before parsing.
 $stdinText = $stdinText.TrimStart([char]0xFEFF)
-Write-BridgeLog "stdin: $stdinText"
 
 if ([string]::IsNullOrWhiteSpace($stdinText)) {
   Write-BridgeLog "empty stdin, exit"
@@ -79,9 +80,12 @@ if ([string]::IsNullOrWhiteSpace($stdinText)) {
 }
 
 try {
-  $event = $stdinText | ConvertFrom-Json
+  $event = $stdinText | ConvertFrom-Json -ErrorAction Stop
+  if ($null -eq $event -or $event -isnot [System.Management.Automation.PSCustomObject]) {
+    exit 0
+  }
 } catch {
-  Write-BridgeLog "JSON parse failed: $($_.Exception.Message)"
+  Write-BridgeLog 'JSON parse failed'
   exit 0
 }
 
@@ -106,7 +110,6 @@ if (-not [string]::IsNullOrWhiteSpace($HookEvent)) {
 # session_id, so backfill to keep a session's events correlatable.
 if ($Ide -eq 'cursor' -and [string]::IsNullOrWhiteSpace($event.session_id)) {
   $sid = $event.conversation_id
-  if ([string]::IsNullOrWhiteSpace($sid)) { $sid = 'cursor-session' }
   $event | Add-Member -NotePropertyName 'session_id' -NotePropertyValue $sid -Force
 }
 # Cursor tool payloads may nest the tool name (toolInfo.name / tool.name);
@@ -120,35 +123,31 @@ if ($Ide -eq 'cursor' -and [string]::IsNullOrWhiteSpace($event.tool_name)) {
   }
 }
 
-# Get project information from environment
-# QODER_PROJECT_DIR is set when invoked by Qoder's hook runner; TRAE_PROJECT_DIR
-# / CLAUDE_PROJECT_DIR when invoked by Trae IDE; CURSOR_PROJECT_DIR by Cursor;
-# CODEX_PROJECT_DIR by Codex CLI. Fall back to the event's cwd.
-$projectDir = $env:TRAE_PROJECT_DIR
-if ([string]::IsNullOrEmpty($projectDir)) {
-  $projectDir = $env:QODER_PROJECT_DIR
-}
-if ([string]::IsNullOrEmpty($projectDir)) {
-  $projectDir = $env:CLAUDE_PROJECT_DIR
-}
-if ([string]::IsNullOrEmpty($projectDir)) {
-  $projectDir = $env:CURSOR_PROJECT_DIR
-}
-if ([string]::IsNullOrEmpty($projectDir)) {
-  $projectDir = $env:CODEX_PROJECT_DIR
-}
-if ([string]::IsNullOrEmpty($projectDir)) {
-  $projectDir = $event.cwd
-}
+# Payload is authoritative. Other IDEs' inherited environment must not steal
+# a Codex session's project. Only consult this IDE's environment as a fallback.
+$projectDir = $event.project_path
+if ([string]::IsNullOrWhiteSpace($projectDir)) { $projectDir = $event.cwd }
 if ([string]::IsNullOrEmpty($projectDir)) {
   # Cursor payloads may expose the workspace as workspace_roots instead of cwd.
   $roots = $event.workspace_roots
   if ($roots -and @($roots).Count -gt 0) { $projectDir = @($roots)[0] }
 }
+if ([string]::IsNullOrWhiteSpace($projectDir)) {
+  $projectDir = switch ($Ide) {
+    'codex' { $env:CODEX_PROJECT_DIR }
+    'cursor' { $env:CURSOR_PROJECT_DIR }
+    'qoder' { $env:QODER_PROJECT_DIR }
+    default {
+      if ($env:TRAE_PROJECT_DIR) { $env:TRAE_PROJECT_DIR }
+      elseif ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR }
+      elseif (-not $Ide) { $env:QODER_PROJECT_DIR }
+    }
+  }
+}
 
 $projectName = ''
 if (-not [string]::IsNullOrEmpty($projectDir)) {
-  $projectName = Split-Path $projectDir -Leaf
+  $projectName = ($projectDir.TrimEnd('\', '/') -split '[\\/]')[-1]
 }
 if ($Ide -eq 'cursor') {
   Write-BridgeLog "cursor normalized event=$($event.hook_event_name) tool=$($event.tool_name) session=$($event.session_id) project=$projectName"
@@ -174,20 +173,32 @@ if (-not [string]::IsNullOrEmpty($Ide)) {
 # Add timestamp
 $event | Add-Member -NotePropertyName "timestamp" -NotePropertyValue ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -Force
 
-# Convert back to JSON for sending
-$bodyJson = $event | ConvertTo-Json -Depth 10 -Compress
+# Reject uncorrelatable payloads rather than merging them into a fake session.
+if ([string]::IsNullOrWhiteSpace($event.session_id) -or
+    [string]::IsNullOrWhiteSpace($event.hook_event_name)) { exit 0 }
+
+# Forward status metadata only. Prompts, tool inputs and tool output are not
+# needed by the pet and must not end up in its diagnostic log.
+$payload = @{}
+foreach ($key in @('session_id', 'hook_event_name', 'project_path', 'project_name',
+                  'cwd', 'ide', 'timestamp', 'tool_name', 'tool_use_id',
+                  'notification_type', 'message', 'source', 'turn_id')) {
+  if ($null -ne $event.$key) { $payload[$key] = $event.$key }
+}
+$bodyJson = $payload | ConvertTo-Json -Depth 4 -Compress
+$bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
 
 # Send to DutyOn's HTTP server (with short timeout to avoid blocking AI)
 try {
   $response = Invoke-RestMethod -Uri 'http://127.0.0.1:17521/hook' `
     -Method Post `
-    -Body $bodyJson `
-    -ContentType 'application/json' `
-    -TimeoutSec 2 `
+    -Body $bodyBytes `
+    -ContentType 'application/json; charset=utf-8' `
+    -TimeoutSec 1 `
     -ErrorAction Stop
   Write-BridgeLog "POST ok"
 } catch {
-  Write-BridgeLog "POST failed: $($_.Exception.Message)"
+  Write-BridgeLog 'POST failed (pet unavailable or hook rejected)'
   # Pet not running or error - exit silently, don't affect AI workflow
   exit 0
 }

@@ -18,11 +18,9 @@
 !define APP_NAME "DutyOn"
 !define APP_NAME_CN "开工啦"
 !define APP_EXE "dutyon-pet.exe"
-; 版本可由命令行覆盖：makensis /DAPP_VERSION=x.y.z
-; （build-package.ps1 已自动从 device\CMakeLists.txt project VERSION 解析传入；
-;  下面的默认值仅为直接调用 makensis 时的兜底，勿手改——以 CMake 为准）
+; build-package.ps1 从 CMake project VERSION 传入，避免直接调用时打出旧版本。
 !ifndef APP_VERSION
-  !define APP_VERSION "2.0.11"
+  !error "APP_VERSION is required; run tools\build-package.ps1"
 !endif
 !define APP_PUBLISHER "DutyOn"
 !define APP_REGKEY "Software\DutyOn"
@@ -209,6 +207,9 @@ Section "install"
 
   File "..\..\device\build\Release\${APP_EXE}"
   File "..\..\device\build\Release\glfw3.dll"
+  SetOutPath "$INSTDIR\hooks"
+  File "..\..\hooks\trae-hook-bridge.ps1"
+  SetOutPath "$INSTDIR"
   File /nonfatal "..\..\LICENSE"
 
   ; Cubism SDK 5 运行时从 <exe>/FrameworkShaders 加载 GL shader，
@@ -272,6 +273,8 @@ Section "Uninstall"
 
   Delete "$INSTDIR\${APP_EXE}"
   Delete "$INSTDIR\glfw3.dll"
+  Delete "$INSTDIR\hooks\trae-hook-bridge.ps1"
+  RMDir "$INSTDIR\hooks"
   Delete "$INSTDIR\uninstall.exe"
   Delete "$INSTDIR\LICENSE"
   RMDir /r "$INSTDIR\FrameworkShaders"

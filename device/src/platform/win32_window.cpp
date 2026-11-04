@@ -4,9 +4,8 @@
 // 透明原理：GLFW_TRANSPARENT_FRAMEBUFFER + DWM 合成，alpha=0 的像素
 // 直接透出桌面。点击穿透用 WS_EX_TRANSPARENT | WS_EX_LAYERED 切换。
 //
-// 右键菜单不在此层实现（1.x 的菜单是独立窗口 + HTML/CSS 样式），
-// 窗口层只在右键/托盘右键时触发 on_context_menu 回调，菜单本体由
-// UIRenderer 用 ImGui 自绘。
+// 角色右键触发 on_context_menu，由 UIRenderer 用 ImGui 自绘菜单；
+// 托盘右键使用原生菜单，在角色窗口隐藏时仍可操作。
 
 #ifdef _WIN32
 
@@ -25,6 +24,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cwchar>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -115,6 +115,20 @@ public:
     }
 
     void swapBuffers() override {
+        if (center_requested_) {
+            center_requested_ = false;
+            RECT bounds;
+            if (GetWindowRect(hwnd_, &bounds)) {
+                const int left = center_work_area_.left +
+                    (center_work_area_.right - center_work_area_.left -
+                     (bounds.right - bounds.left)) / 2;
+                const int top = center_work_area_.top +
+                    (center_work_area_.bottom - center_work_area_.top -
+                     (bounds.bottom - bounds.top)) / 2;
+                SetWindowPos(hwnd_, HWND_TOPMOST, left, top, 0, 0,
+                             SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
         glfwSwapBuffers(window_);
     }
 
@@ -356,7 +370,7 @@ private:
 
     // ---- 系统托盘 ----
     void setupTrayIcon() {
-        NOTIFYICONDATAA nid = {};
+        NOTIFYICONDATAW nid = {};
         nid.cbSize = sizeof(nid);
         nid.hWnd = hwnd_;
         nid.uID = TRAY_ID;
@@ -364,8 +378,51 @@ private:
         nid.uCallbackMessage = WM_TRAYICON;
         // 应用图标（exe 资源 ID 1，resources/app.rc —— 1.x 同款）
         nid.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1));
-        strcpy_s(nid.szTip, "Duty On 桌宠");
-        tray_added_ = Shell_NotifyIconA(NIM_ADD, &nid) != FALSE;
+        wcscpy_s(nid.szTip, L"Duty On 桌宠");
+        tray_added_ = Shell_NotifyIconW(NIM_ADD, &nid) != FALSE;
+    }
+
+    void showTrayMenu() {
+        POINT cursor;
+        if (!GetCursorPos(&cursor)) return;
+        HMENU menu = CreatePopupMenu();
+        if (!menu) return;
+        constexpr UINT toggle_visibility = 1;
+        constexpr UINT center_window = 2;
+        constexpr UINT exit_app = 3;
+        AppendMenuW(menu, MF_STRING, toggle_visibility,
+                    hidden_ ? L"显示" : L"隐藏");
+        AppendMenuW(menu, MF_STRING, center_window, L"移至屏幕正中");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, exit_app, L"退出");
+
+        dragging_ = false;
+        hideGhostPreview();
+        if (on_outside_click) on_outside_click();
+        SetForegroundWindow(hwnd_);
+        const UINT command = TrackPopupMenu(menu,
+            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+            cursor.x, cursor.y, 0, hwnd_, nullptr);
+        PostMessage(hwnd_, WM_NULL, 0, 0);
+        DestroyMenu(menu);
+
+        switch (command) {
+        case toggle_visibility:
+            setVisible(hidden_);
+            break;
+        case center_window: {
+            int left, top, right, bottom;
+            workArea(left, top, right, bottom);
+            center_work_area_ = {left, top, right, bottom};
+            exitDockInternal();
+            setVisible(true);
+            center_requested_ = true;
+            break;
+        }
+        case exit_app:
+            quit_requested_ = true;
+            break;
+        }
     }
 
     // ---- GLFW 回调 ----
@@ -443,15 +500,13 @@ private:
         auto* self = reinterpret_cast<Win32Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
         if (msg == WM_TRAYICON && self) {
             const UINT evt = LOWORD(lp);
-            // 窗口隐藏时：左键单击/双击托盘图标直接恢复显示（菜单画在窗口内，
-            // 隐藏后不可见，故此处不开菜单而是先唤回窗口）
-            if (self->hidden_ &&
-                (evt == WM_LBUTTONUP || evt == WM_LBUTTONDBLCLK)) {
+            // 左键单击/双击托盘图标恢复显示。
+            if (evt == WM_LBUTTONUP || evt == WM_LBUTTONDBLCLK) {
                 self->setVisible(true);
                 return 0;
             }
-            if (evt == WM_RBUTTONUP || evt == WM_LBUTTONDBLCLK) {
-                if (self->on_context_menu) self->on_context_menu(-1, -1);
+            if (evt == WM_RBUTTONUP || evt == WM_CONTEXTMENU) {
+                self->showTrayMenu();
                 return 0;
             }
         }
@@ -750,6 +805,8 @@ private:
     std::atomic<bool> click_through_{false};
     bool quit_requested_ = false;
     bool tray_added_ = false;
+    bool center_requested_ = false;
+    RECT center_work_area_{};
     bool hidden_ = false;                 // 窗口是否被隐藏（setVisible）
     std::atomic<bool> dragging_{false};
     int drag_offset_x_ = 0, drag_offset_y_ = 0;

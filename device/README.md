@@ -61,7 +61,7 @@ device/
 │       └── ui_renderer.cpp     # PC: ImGui 监控面板 + 状态栏
 └── third_party/
     ├── CubismNativeSdk/        # Live2D Cubism Native SDK（需自行下载）
-    └── deps/                   # httplib.h（随仓库）、glew-2.2.0（需自行下载）
+    └── deps/                   # httplib、GLEW（需自行下载），sha256（随仓库）
 ```
 
 ## 依赖
@@ -70,7 +70,7 @@ device/
 |---|---|---|---|
 | Cubism Native SDK | 需手动下载 | 需手动下载 | Live2D 官方 SDK，放入 `third_party/CubismNativeSdk/` |
 | GLEW 2.2.0 | 需手动下载 | — | Cubism Framework 依赖，放入 `third_party/deps/glew-2.2.0/` |
-| cpp-httplib | 随仓库分发 | — | 内嵌 HTTP 服务器（单头文件） |
+| cpp-httplib | 需手动下载 | 需手动下载 | 单头文件放入 `third_party/deps/httplib/httplib.h`，设备配网页也使用 |
 | GLFW | FetchContent | — | 窗口 + OpenGL 上下文 |
 | ImGui + FreeType | FetchContent | — | UI 叠加层（FreeType 保证小字号 CJK 清晰） |
 | nlohmann/json | FetchContent | FetchContent | JSON 解析 |
@@ -96,9 +96,19 @@ cmake --build build --config Release
 
 ```bash
 cd device
-cmake -B build -DCMAKE_TOOLCHAIN_FILE=../cmake/aarch64-toolchain.cmake
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-toolchain.cmake
 cmake --build build -j$(nproc)
 ```
+
+### Windows 使用与打包
+
+右键系统托盘图标可显示/隐藏精灵、移至所在屏幕工作区正中、退出；左键图标恢复显示。
+角色右键仍打开完整设置菜单。启动会自动刷新 Hook 配置；Codex 信任、事件投递和已安装
+是不同状态，排查见 [Hook Review](../docs/hook-review.md)。
+
+在仓库根目录执行 `powershell -File tools/build-package.ps1`，产物位于 `tools/dist/`。
+安装包及升级包包含 `hooks/`，运行时无需依赖源码目录。
+独立后端与桥接测试命令见 [贡献说明](../CONTRIBUTING.md)。
 
 ## 实现状态
 
@@ -112,8 +122,8 @@ cmake --build build -j$(nproc)
 - [x] 自定义 GIF 精灵（WIC 多帧解码 + 透明索引）
 - [x] 窗口位置持久化（记忆上次启动位置）
 - [x] 开机自启（注册表）
-- [ ] ARM 真机交叉编译验证
-- [ ] DRM/KMS 直接显示（部分 Mali 驱动需 GBM surface）
+- [x] ARM64 交叉编译与设备部署流程（本次 Windows 修改未重新验证真机）
+- [x] DRM/GBM + EGL/GLES 直接显示
 
 ## 与 1.x 的关系
 

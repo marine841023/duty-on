@@ -322,18 +322,12 @@ CliLiveness scanCliProcesses() {
     pe.dwSize = sizeof(pe);
     if (Process32FirstW(snap, &pe)) {
         do {
-            const std::wstring name_low = asciiLowerCopy(std::wstring(pe.szExeFile));
-            // codex-relay 是协议转换代理（Responses API -> Chat Completions），
-            // 不是 codex CLI 本体。排除它：TUI 退出后运行中的 relay 不能
-            // 假装会话还活着。
-            if (name_low.find(L"codex") != std::wstring::npos &&
-                name_low.find(L"relay") != std::wstring::npos) {
-                continue;
-            }
-            if (name_low.find(L"codex") != std::wstring::npos) lv.codex_alive = true;
-            if (name_low.find(L"opencode") != std::wstring::npos) lv.opencode_alive = true;
+            const auto ide = cliProcessIde(pe.szExeFile);
+            if (ide == IdeKind::Codex) lv.codex_alive = true;
+            if (ide == IdeKind::OpenCode) lv.opencode_alive = true;
         } while (Process32NextW(snap, &pe));
     }
+    lv.scan_succeeded = GetLastError() == ERROR_NO_MORE_FILES;
     CloseHandle(snap);
     return lv;
 }

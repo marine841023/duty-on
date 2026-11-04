@@ -454,7 +454,7 @@ void HttpServer::registerRoutes() {
         auto ev = HookEvent::fromJson(body);
         if (!ev.has_value()) {
             res.status = 422;
-            res.set_content("missing session_id or hook_event_name", "text/plain");
+            res.set_content("missing session_id or unsupported hook_event_name", "text/plain");
             return;
         }
         // [DIAG] 事件落盘（~/.dutyon/hook-received.log）：排查"子代理期间
@@ -470,7 +470,12 @@ void HttpServer::registerRoutes() {
             if (home) {
                 FILE* df = fopen((std::string(home) + "\\.dutyon\\hook-received.log").c_str(), "a");
                 if (df) {
-                    fprintf(df, "[%s] %s\n", tstamp, req.body.c_str());
+                    // 只记录状态元数据，不持久化 prompt/tool_input/tool_response。
+                    const json metadata = {{"session_id", ev->session_id},
+                                           {"hook_event_name", ev->hook_event_name},
+                                           {"ide", ev->ide ? ideKindStr(*ev->ide) : ""},
+                                           {"tool_name", ev->tool_name.value_or("")}};
+                    fprintf(df, "[%s] %s\n", tstamp, metadata.dump().c_str());
                     fclose(df);
                 }
             }
