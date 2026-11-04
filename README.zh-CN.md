@@ -1,3 +1,14 @@
+> **Duty On 2.0 原生 C++ 版正在 `v2.0-dev` 分支持续开发。** 当前源码 v2.0.13
+> 包含 Codex Hook 探测修复和托盘菜单（显示/隐藏、居中、退出）。
+> 最新主页与源码：[GitHub](https://github.com/marine841023/duty-on/tree/v2.0-dev)
+> · [Gitee](https://gitee.com/megrezsoft/duty-on/tree/v2.0-dev)；
+> [构建与打包说明](https://gitee.com/megrezsoft/duty-on/blob/v2.0-dev/README.zh-CN.md)
+> · [变更与验证范围](https://gitee.com/megrezsoft/duty-on/blob/v2.0-dev/docs/release-notes/v2.0.13.md)。
+> 本地安装包位于 `tools/dist/`，v2.0.13 尚未发布线上 Release。已发布下载请查看
+> [GitHub Releases](https://github.com/marine841023/duty-on/releases)
+> · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases)。
+> 当前 `master` 分支及下文保留 1.3.3 旧版实现与说明。
+
 <div align="center">
 
 <img src="docs/assets/hero.png" alt="Duty On" width="720"/>
@@ -29,7 +40,7 @@
 > v1.3.0 起支持用任意 **GIF / PNG / MP4** 创建专属桌宠，无需 Live2D 模型——
 > 为每个状态（💤 睡觉 / ⚡ 忙碌 / 🔔 提醒）分别上传动画，随时可重新上传替换。
 >
-> 下载 v1.3.3 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v1.3.3/DutyOn-v1.3.3.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v1.3.3/DutyOn-v1.3.3.zip)
+> 下载 v1.3.3 (.zip)：[GitHub →](https://github.com/marine841023/duty-on/releases/download/v1.3.3/DutyOn-v1.3.3.zip) · [Gitee →](https://gitee.com/megrezsoft/duty-on/releases/tag/v1.3.3)
 
 </div>
 
@@ -47,7 +58,7 @@
 
 > **内存勘误：** 旧文案宣传"内存约 80MB"——该数字只统计了主进程（实测 ~70MB），
 > 没有算上系统 WebView2 运行时拉起的浏览器进程群。1.x 全进程实测合计
-> 约 465MB 工作集 / 195MB 私有内存。想要真正轻量？**[v2.0 原生 C++ 单进程版](../tree/v2.0-dev)**
+> 约 465MB 工作集 / 195MB 私有内存。想要真正轻量？**[v2.0 原生 C++ 单进程版](https://gitee.com/megrezsoft/duty-on/tree/v2.0-dev)**
 > 实测仅 ~116MB，无 WebView、无隐藏进程。
 
 ## 功能
@@ -72,7 +83,7 @@
 
 ### 方式一：下载安装包（推荐）
 
-从 GitHub [Releases](https://github.com/marine841023/duty-on/releases) 或 Gitee [Releases](https://gitee.com/megrezsoft/dutyo/releases) 下载 **`.zip`** 压缩包，
+从 GitHub [Releases](https://github.com/marine841023/duty-on/releases) 或 Gitee [Releases](https://gitee.com/megrezsoft/duty-on/releases) 下载 **`.zip`** 压缩包，
 解压后运行里面的 `DutyOn_<版本>_x64-setup.exe` 安装（当前用户安装，含简/繁中/英/日/韩语言选择）。
 采用 ZIP 分发以避免 Windows SmartScreen 拦截未签名 exe。macOS / Linux 请从源码构建。
 

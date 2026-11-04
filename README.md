@@ -1,3 +1,14 @@
+> **Duty On 2.0 is the current native C++ project.** Source v2.0.13 adds Codex
+> Hook detection fixes and tray controls (show/hide, center, exit).
+> Read the current documentation on [GitHub](https://github.com/marine841023/duty-on/tree/v2.0-dev)
+> or [Gitee](https://gitee.com/megrezsoft/duty-on/tree/v2.0-dev), including
+> [build/package instructions](https://github.com/marine841023/duty-on/blob/v2.0-dev/README.md#build-from-source)
+> and [changes/validation](https://github.com/marine841023/duty-on/blob/v2.0-dev/docs/release-notes/v2.0.13.md).
+> Local installers are written to `tools/dist/`; v2.0.13 has not been published
+> as a Release. Published downloads: [GitHub](https://github.com/marine841023/duty-on/releases)
+> · [Gitee](https://gitee.com/megrezsoft/duty-on/releases).
+> This `master` branch and the documentation below retain the legacy 1.3.3 implementation.
+
 <div align="center">
 
 <img src="docs/assets/hero.png" alt="Duty On" width="720"/>
@@ -35,7 +46,7 @@
 > Since v1.3.0 you can also create your own desktop pet from any
 > **GIF / PNG / MP4** — no Live2D model required.
 >
-> Download v1.3.3 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v1.3.3/DutyOn-v1.3.3.zip) · [Gitee →](https://gitee.com/megrezsoft/dutyo/releases/download/v1.3.3/DutyOn-v1.3.3.zip)
+> Download v1.3.3 (.zip): [GitHub →](https://github.com/marine841023/duty-on/releases/download/v1.3.3/DutyOn-v1.3.3.zip) · [Gitee →](https://gitee.com/megrezsoft/duty-on/releases/tag/v1.3.3)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -62,7 +73,7 @@ Built with **Tauri 2 + Rust** (system WebView, no bundled Chromium):
 > **Memory correction:** earlier copy claimed "~80 MB RAM" — that only
 > counted the main process and missed the WebView2 runtime's browser-process
 > group. Measured totals for 1.x: ~465 MB working set / ~195 MB private
-> memory. Want truly lightweight? The **[v2.0 native C++ rewrite](../tree/v2.0-dev)**
+> memory. Want truly lightweight? The **[v2.0 native C++ rewrite](https://github.com/marine841023/duty-on/tree/v2.0-dev)**
 > runs as a **single process with ~116 MB measured**, no WebView at all.
 
 ## Screenshots
@@ -100,7 +111,7 @@ Built with **Tauri 2 + Rust** (system WebView, no bundled Chromium):
 ### Download (recommended)
 
 Grab the **`.zip`** from
-GitHub [**Releases**](https://github.com/marine841023/duty-on/releases) or Gitee [**Releases**](https://gitee.com/megrezsoft/dutyo/releases),
+GitHub [**Releases**](https://github.com/marine841023/duty-on/releases) or Gitee [**Releases**](https://gitee.com/megrezsoft/duty-on/releases),
 extract it, and run the NSIS installer inside (`DutyOn_<ver>_x64-setup.exe`).
 Distributed as ZIP to bypass Windows SmartScreen on unsigned exe.
 (macOS DMG and Linux AppImage/DEB buildable from source.)

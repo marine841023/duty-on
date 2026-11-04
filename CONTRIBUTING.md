@@ -1,5 +1,10 @@
 # Contributing to Duty On · 开工啦
 
+Current native C++ development targets `v2.0-dev`; see the current contributing
+guide on [GitHub](https://github.com/marine841023/duty-on/blob/v2.0-dev/CONTRIBUTING.md)
+or [Gitee](https://gitee.com/megrezsoft/duty-on/blob/v2.0-dev/CONTRIBUTING.md).
+The instructions below apply to the legacy 1.x code on `master`.
+
 Thanks for your interest! Issues and pull requests are welcome.
 感谢关注！欢迎提 Issue 和 PR（中英文都可以）。
 
