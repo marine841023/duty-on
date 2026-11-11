@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(dutyon-2.0 VERSION 2.0.15 LANGUAGES C CXX)
+project(dutyon-2.0 VERSION 2.0.16 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -344,5 +344,5 @@ else()
     )
 endif()
 
-set(DUTYON_CLOUD_URL "" CACHE STRING "Default cloud/OTA origin, e.g. https://cloud.example.com")
+set(DUTYON_CLOUD_URL "https://dutyon.megrezsoft.com" CACHE STRING "Default cloud/OTA origin")
 target_compile_definitions(dutyon-pet PRIVATE DUTYON_CLOUD_URL="${DUTYON_CLOUD_URL}")

@@ -27,11 +27,11 @@
 **最新版本下载**
 | 平台 | 下载 |
 |---|---|
-| 🖥 Windows 桌面版 v2.0.12 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
+| 🖥 Windows 桌面版 v2.0.16 | [安装器](https://dutyon.megrezsoft.com/api/app/artifact?kind=installer&sha256=acd0a4489a69387de4c5955d054a8f0ba35aba4af48fb2ffa3a3cb0cb995dcb8) · [安装器 ZIP](https://dutyon.megrezsoft.com/api/app/artifact?kind=bundle&sha256=5f187586040b1e43d69ca272cefab102b1ef76c2f175867db72199dbc1c02fd8) |
 | 📟 设备端源码 | [v2.0-dev 分支](https://gitee.com/megrezsoft/duty-on/tree/v2.0-dev) `device/` 目录（交叉编译，见下文"设备端构建"） |
 
-当前源码版本：**v2.0.15**，见[变更与验证说明](docs/release-notes/v2.0.15.md)。
-上表指向已发布版本；本地构建的安装包输出到 `tools/dist/`。
+当前源码及云端发布版本：**v2.0.16**，见[变更与验证说明](docs/release-notes/v2.0.16.md)。
+[官方下载与个人云空间](https://dutyon.megrezsoft.com)；本地安装包输出到 `tools/dist/`。
 
 </div>
 
@@ -123,8 +123,8 @@ powershell .userdata/deploy-cross.ps1
 
 ### 方式一：下载安装包（推荐）
 
-从 GitHub [Releases](https://github.com/marine841023/duty-on/releases) 或 Gitee [Releases](https://gitee.com/megrezsoft/duty-on/releases) 下载 **`.zip`** 压缩包，
-解压后运行 `DutyOn_<版本>_x64-setup.exe` 安装（含语言选择与开机自启选项）。
+从[官方下载页](https://dutyon.megrezsoft.com)下载安装器并运行；也可下载 **`.zip`** 压缩包，
+解压后运行其中的 `DutyOn_<版本>_x64-setup.exe`（含语言选择与开机自启选项）。
 从 1.x 升级？共用 `~/.dutyon` 配置、GIF 形象和模型。
 
 ### 方式二：从源码构建
@@ -224,4 +224,4 @@ A: 在。两版本共用 `~/.dutyon/config.json` 与形象/模型目录。
 
 ## 云服务
 
-Linux + Docker 云服务已提供安装包下载、OTA、账号和用户私有内容管理，详见[部署与 API 文档](server/README.md)。图片生成角色和声音克隆后续接入；正式域名确定后再预置 OTA 主地址。
+Linux + Docker 云服务已上线 [dutyon.megrezsoft.com](https://dutyon.megrezsoft.com)，提供安装包下载、OTA、账号和用户私有内容管理。官方分发包已预置此 HTTPS 主地址，详见[部署与 API 文档](server/README.md)。图片生成角色和声音克隆后续接入。

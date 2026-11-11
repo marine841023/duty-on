@@ -40,11 +40,24 @@ type App struct {
 func main() {
 	addr := flag.String("addr", ":8787", "HTTP 监听地址")
 	data := flag.String("data", "./data", "数据目录（JSON 存储）")
+	healthcheck := flag.String("healthcheck", "", "探测指定健康检查 URL 后退出")
 	publish := flag.String("publish", "", "发布升级包（zip 路径）后退出")
 	kind := flag.String("kind", "update", "发布类型：update / installer / bundle")
 	proxy := flag.String("trusted-proxy", "", "可信反向代理 CIDR（仅该网段可传 X-Real-IP）")
 	notes := flag.String("notes", "", "升级说明（配合 --publish）")
 	flag.Parse()
+	if *healthcheck != "" {
+		client := &http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Get(*healthcheck)
+		if err != nil {
+			log.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			log.Fatalf("healthcheck: HTTP %d", resp.StatusCode)
+		}
+		return
+	}
 
 	store, err := OpenStore(*data)
 	if err != nil {

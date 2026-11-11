@@ -72,6 +72,7 @@ frontend/assets/device/kws/asr-offline
 frontend/assets/device/kws/sense-voice/model.int8.onnx
 
 server/dutyon-cloud.exe
+server/dutyon-cloud-linux
 server/.env
 server/packages/
 server/*backup*.tar.gz

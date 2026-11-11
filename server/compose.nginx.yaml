@@ -1,0 +1,8 @@
+# Use with: docker compose -f compose.yaml -f compose.nginx.yaml up -d --build cloud
+# Only start cloud; host Nginx owns 80/443. The host reaches it through this gateway.
+services:
+  cloud:
+    build:
+      context: .
+      dockerfile: Dockerfile.prebuilt
+    command: ["--addr", ":8787", "--data", "/data", "--trusted-proxy", "172.30.84.1/32"]

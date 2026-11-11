@@ -36,11 +36,11 @@
 **Downloads**
 | Platform | Link |
 |---|---|
-| 🖥 Windows desktop v2.0.12 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
+| 🖥 Windows desktop v2.0.16 | [Installer](https://dutyon.megrezsoft.com/api/app/artifact?kind=installer&sha256=acd0a4489a69387de4c5955d054a8f0ba35aba4af48fb2ffa3a3cb0cb995dcb8) · [Installer ZIP](https://dutyon.megrezsoft.com/api/app/artifact?kind=bundle&sha256=5f187586040b1e43d69ca272cefab102b1ef76c2f175867db72199dbc1c02fd8) |
 | 📟 Device source | [v2.0-dev branch](https://github.com/marine841023/duty-on/tree/v2.0-dev), `device/` dir (cross-compiled — see "Device build" below) |
 
-Current source: **v2.0.15** — [changes and validation](docs/release-notes/v2.0.15.md).
-The download links above lead to published releases; local builds go to `tools/dist/`.
+Current source and cloud release: **v2.0.16** — [changes and validation](docs/release-notes/v2.0.16.md).
+[Official downloads and private cloud space](https://dutyon.megrezsoft.com); local builds go to `tools/dist/`.
 
 </div>
 
@@ -157,9 +157,8 @@ and hardware verification limits.
 
 ### Download (recommended)
 
-Grab the **`.zip`** from
-GitHub [**Releases**](https://github.com/marine841023/duty-on/releases) or Gitee [**Releases**](https://gitee.com/megrezsoft/duty-on/releases),
-extract it, and run the NSIS installer inside. Upgrading from 1.x? The
+Grab the installer from the [official download page](https://dutyon.megrezsoft.com) and run it.
+If you download the **`.zip`**, extract it first and run the NSIS installer inside. Upgrading from 1.x? The
 installer reuses your `~/.dutyon` config, GIF characters and models.
 
 ### Build from source
@@ -256,4 +255,4 @@ Inc. and used under their respective licenses — see [NOTICE](NOTICE).
 
 ## Cloud service
 
-The Linux + Docker cloud service provides installer downloads, OTA, accounts and private content management. See [deployment and API guide](server/README.md). Image-to-character generation and voice cloning are planned for a later release.
+The Linux + Docker cloud service is live at [dutyon.megrezsoft.com](https://dutyon.megrezsoft.com), providing installer downloads, OTA, accounts and private content management. Official builds use this HTTPS address by default. See [deployment and API guide](server/README.md). Image-to-character generation and voice cloning are planned for a later release.
