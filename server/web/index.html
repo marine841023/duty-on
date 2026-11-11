@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DutyOn · 云空间</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<header><a class="brand" href="/">DutyOn<span>云空间</span></a><span class="tag">让陪伴随你而行</span></header>
+<main>
+<section class="intro"><p class="eyebrow">YOUR DESKTOP COMPANION</p><h1>桌面上的陪伴，<br>云端的一份安心。</h1><p>下载 DutyOn，保存自己的角色动画、声音和 Live2D 模型。换一台电脑，也能找回熟悉的伙伴。</p></section>
+<section class="panel"><div class="section-head"><div><p class="eyebrow">DOWNLOAD</p><h2>获取 DutyOn</h2></div><span class="tag">Windows · x64</span></div><div id="releases" class="downloads"><p class="muted">正在获取最新版本…</p></div><p id="release-note" class="muted note"></p></section>
+<section class="panel" id="auth-panel"><p class="eyebrow">MY SPACE</p><h2>登录你的云空间</h2><p class="muted">与桌宠内的账号通用。使用桌宠登录时，服务器地址填写本网站地址。</p><form id="auth-form"><label>用户名<input id="username" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}" placeholder="3–32 位字母、数字、下划线或连字符"></label><label>密码<input id="password" type="password" autocomplete="current-password" required minlength="6" maxlength="1024" placeholder="至少 6 位"></label><div class="actions"><button type="submit" name="action" value="login">登录</button><button type="submit" name="action" value="register" class="secondary">创建账号</button></div></form></section>
+<section class="panel" id="space-panel" hidden><div class="section-head"><div><p class="eyebrow">MY SPACE</p><h2 id="greeting">我的内容</h2></div><button id="logout" class="secondary">退出登录</button></div><p id="usage" class="muted"></p><progress id="quota" value="0" max="1"></progress>
+<div class="upload-area"><h3>上传内容</h3><p class="muted">动画和音频支持多文件上传；Live2D 请选择完整模型文件夹。单文件不超过 50 MiB，每个账号 500 MiB。</p><div class="actions"><label class="file-button">选择动画 / 音频<input type="file" id="files" multiple accept=".gif,.png,.jpg,.jpeg,.webp,.wav,.mp3,.ogg,.m4a,.flac"></label><label class="file-button secondary">选择 Live2D 文件夹<input type="file" id="folder" webkitdirectory multiple></label><button id="refresh" class="secondary">刷新列表</button></div><p class="muted note">上传后，在桌宠菜单选择“从云端恢复”，再在角色或动作设定中使用这些文件。网页删除只影响云端；本机仍存在的文件可能再次备份，同步前请一并删除本机副本。</p></div>
+<div class="section-head"><h3>我的文件</h3><label class="search"><input type="search" id="search" placeholder="查找文件"></label></div><div id="file-list" class="file-list"></div></section>
+<p id="status" role="status" aria-live="polite" hidden></p>
+<footer>DutyOn · 你的内容仅对自己的账号开放。</footer>
+</main></body></html>

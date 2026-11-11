@@ -1,34 +1,36 @@
 package main
 
-// 应用内升级：发布子命令 + 版本查询 + 升级包下载。
-//
-// 发布：dutyon-cloud --publish <DutyOn-update-vX.Y.Z.zip> [--notes "..."]
-//   解析文件名版本号 → 计算 sha256/size → 拷入 data/releases/ → 写 app.json
-// 查询：GET /api/app/version
-//   无发布 → 404（客户端据此显示「已是最新」）
-//   有发布 → 200 {version, notes, sha256, size}（新旧比较由客户端做）
-// 下载：GET /api/app/download → zip 字节流（客户端本地 sha256 校验）
-
+// Release metadata is swapped only after the immutable, content-addressed artifact is durable.
 import (
+	"archive/zip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
-var releaseNameRe = regexp.MustCompile(`DutyOn-update-v(\d+(?:\.\d+){1,3})\.zip$`)
+var releaseNames = map[string]*regexp.Regexp{
+	"update":    regexp.MustCompile(`^DutyOn-update-v(\d+(?:\.\d+){1,3})\.zip$`),
+	"bundle":    regexp.MustCompile(`^DutyOn-v(\d+(?:\.\d+){1,3})\.zip$`),
+	"installer": regexp.MustCompile(`^DutyOn_(\d+(?:\.\d+){1,3})_x64-setup\.exe$`),
+}
+var digestRE = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type releaseInfo struct {
-	Version string `json:"version"`
-	Notes   string `json:"notes"`
-	SHA256  string `json:"sha256"`
-	Size    int64  `json:"size"`
-	File    string `json:"file"`
+	Version     string `json:"version"`
+	Notes       string `json:"notes"`
+	SHA256      string `json:"sha256"`
+	Size        int64  `json:"size"`
+	File        string `json:"file"`
+	Kind        string `json:"kind,omitempty"`
+	DownloadURL string `json:"downloadUrl,omitempty"`
 }
 
 func sha256File(path string) (string, error) {
@@ -38,102 +40,186 @@ func sha256File(path string) (string, error) {
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err = io.Copy(h, f); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
-
-func (a *App) releaseMetaPath() string {
-	return filepath.Join(a.store.dir, "releases", "app.json")
-}
-
-// publish 发布升级包：校验文件名 → 算哈希 → 拷入 releases/ → 写 app.json。
-func (a *App) publish(zipPath, notes string) error {
-	m := releaseNameRe.FindStringSubmatch(filepath.Base(zipPath))
-	if m == nil {
-		return fmt.Errorf("文件名需形如 DutyOn-update-vX.Y.Z.zip，实际: %s",
-			filepath.Base(zipPath))
+func (a *App) releaseMetaPath() string { return a.releaseMetaKind("update") }
+func (a *App) releaseMetaKind(kind string) string {
+	name := kind + ".json"
+	if kind == "update" {
+		name = "app.json"
 	}
-	src, err := os.Open(zipPath)
+	return filepath.Join(a.store.releasesDir(), name)
+}
+func (a *App) publish(path, notes string) error { return a.publishArtifact(path, notes, "update") }
+func (a *App) publishArtifact(path, notes, kind string) error {
+	re, ok := releaseNames[kind]
+	if !ok {
+		return fmt.Errorf("unknown release kind %q", kind)
+	}
+	name := filepath.Base(path)
+	m := re.FindStringSubmatch(name)
+	if m == nil {
+		return fmt.Errorf("invalid %s filename: %s", kind, name)
+	}
+	// Reject a mislabeled or truncated archive before making it the current release.
+	if kind != "installer" {
+		z, err := zip.OpenReader(path)
+		if err != nil {
+			return err
+		}
+		defer z.Close()
+		hasExe := false
+		for _, f := range z.File {
+			p := strings.ReplaceAll(f.Name, "\\", "/")
+			if strings.HasPrefix(p, "/") || strings.Contains(p, ":") {
+				return fmt.Errorf("unsafe zip path")
+			}
+			for _, part := range strings.Split(p, "/") {
+				if part == ".." {
+					return fmt.Errorf("unsafe zip path")
+				}
+			}
+			if (kind == "update" && p == "dutyon-pet.exe") || (kind == "bundle" && p == "DutyOn_"+m[1]+"_x64-setup.exe") {
+				hasExe = true
+			}
+		}
+		if !hasExe {
+			return fmt.Errorf("zip does not contain the expected executable at its root")
+		}
+	}
+	src, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
-
-	rel := releaseInfo{Version: m[1], Notes: notes}
-	st, err := src.Stat()
+	if kind == "installer" {
+		var magic [2]byte
+		if _, err = io.ReadFull(src, magic[:]); err != nil || string(magic[:]) != "MZ" {
+			return fmt.Errorf("not a Windows executable")
+		}
+		if _, err = src.Seek(0, 0); err != nil {
+			return err
+		}
+	}
+	tmp, err := os.CreateTemp(a.store.releasesDir(), ".publish-*")
 	if err != nil {
 		return err
 	}
-	rel.Size = st.Size()
-
+	defer os.Remove(tmp.Name())
 	h := sha256.New()
-	if _, err := io.Copy(h, src); err != nil {
+	size, err := io.Copy(io.MultiWriter(tmp, h), src)
+	if err != nil {
+		tmp.Close()
 		return err
 	}
-	rel.SHA256 = hex.EncodeToString(h.Sum(nil))
-	if _, err := src.Seek(0, io.SeekStart); err != nil {
+	if err = tmp.Sync(); err != nil {
+		tmp.Close()
 		return err
 	}
-
-	dest := filepath.Join(a.store.releasesDir(), filepath.Base(zipPath))
-	out, err := os.Create(dest + ".tmp")
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+	artifact := sum + filepath.Ext(name)
+	dest := filepath.Join(a.store.releasesDir(), artifact)
+	if _, err = os.Stat(dest); os.IsNotExist(err) {
+		if err = os.Rename(tmp.Name(), dest); err != nil {
+			return err
+		}
+	}
+	rel := releaseInfo{Version: m[1], Notes: notes, SHA256: sum, Size: size, File: artifact, Kind: kind, DownloadURL: "/api/app/artifact?kind=" + kind + "&sha256=" + sum}
+	b, err := json.MarshalIndent(rel, "", "  ")
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, src); err != nil {
-		out.Close()
+	if err = atomicWrite(filepath.Join(a.store.releasesDir(), sum+"-"+kind+".json"), b); err != nil {
 		return err
 	}
-	if err := out.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(dest+".tmp", dest); err != nil {
-		return err
-	}
-	rel.File = filepath.Base(dest)
-
-	meta, err := json.MarshalIndent(rel, "", "  ")
-	if err != nil {
-		return err
-	}
-	return atomicWrite(a.releaseMetaPath(), meta)
+	return atomicWrite(a.releaseMetaKind(kind), b)
 }
-
-func (a *App) loadRelease() (releaseInfo, bool) {
-	b, err := os.ReadFile(a.releaseMetaPath())
+func (a *App) loadRelease() (releaseInfo, bool) { return a.loadReleaseKind("update") }
+func (a *App) loadReleaseKind(kind string) (releaseInfo, bool) {
+	if _, ok := releaseNames[kind]; !ok {
+		return releaseInfo{}, false
+	}
+	return a.readRelease(a.releaseMetaKind(kind))
+}
+func (a *App) readRelease(path string) (releaseInfo, bool) {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return releaseInfo{}, false
 	}
 	var rel releaseInfo
-	if err := json.Unmarshal(b, &rel); err != nil || rel.Version == "" {
+	if json.Unmarshal(b, &rel) != nil || rel.Version == "" || !digestRE.MatchString(rel.SHA256) || filepath.Base(rel.File) != rel.File {
 		return releaseInfo{}, false
 	}
 	return rel, true
 }
-
-func (a *App) handleVersion(w http.ResponseWriter, _ *http.Request) {
+func (a *App) handleVersion(w http.ResponseWriter, r *http.Request) {
 	rel, ok := a.loadRelease()
 	if !ok {
-		// 客户端契约：404 = 从未发布 → 「已是最新」
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no release"})
+		writeJSON(w, 404, map[string]string{"error": "no release"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"version": rel.Version,
-		"notes":   rel.Notes,
-		"sha256":  rel.SHA256,
-		"size":    rel.Size,
-	})
+	writeJSON(w, 200, rel)
 }
-
-func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
-	rel, ok := a.loadRelease()
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no release"})
+func (a *App) handleReleases(w http.ResponseWriter, r *http.Request) {
+	out := map[string]releaseInfo{}
+	for kind := range releaseNames {
+		if rel, ok := a.loadReleaseKind(kind); ok {
+			out[kind] = rel
+		}
+	}
+	writeJSON(w, 200, out)
+}
+func (a *App) serveRelease(w http.ResponseWriter, r *http.Request, rel releaseInfo) {
+	ext := filepath.Ext(rel.File)
+	name := "DutyOn-v" + rel.Version + ext
+	if rel.Kind == "update" {
+		name = "DutyOn-update-v" + rel.Version + ext
+	}
+	if rel.Kind == "installer" {
+		name = "DutyOn_" + rel.Version + "_x64-setup.exe"
+	}
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
+	w.Header().Set("ETag", `"`+rel.SHA256+`"`)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeFile(w, r, filepath.Join(a.store.releasesDir(), rel.File))
+}
+func (a *App) handleArtifact(w http.ResponseWriter, r *http.Request) {
+	sum := r.URL.Query().Get("sha256")
+	if !digestRE.MatchString(sum) {
+		writeJSON(w, 400, map[string]string{"error": "invalid digest"})
 		return
 	}
-	w.Header().Set("Content-Type", "application/zip")
-	http.ServeFile(w, r, filepath.Join(a.store.releasesDir(), rel.File))
+	kind := r.URL.Query().Get("kind")
+	if kind == "" {
+		kind = "update"
+	}
+	if _, ok := releaseNames[kind]; !ok {
+		http.NotFound(w, r)
+		return
+	}
+	rel, ok := a.readRelease(filepath.Join(a.store.releasesDir(), sum+"-"+kind+".json"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	a.serveRelease(w, r, rel)
+}
+func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
+	// Optional digest pins downloads to the version the client actually checked.
+	if r.URL.Query().Get("sha256") != "" {
+		a.handleArtifact(w, r)
+		return
+	}
+	rel, ok := a.loadReleaseKind("update")
+	if !ok {
+		writeJSON(w, 404, map[string]string{"error": "no release"})
+		return
+	}
+	a.serveRelease(w, r, rel)
 }

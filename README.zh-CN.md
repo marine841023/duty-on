@@ -30,7 +30,7 @@
 | 🖥 Windows 桌面版 v2.0.12 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
 | 📟 设备端源码 | [v2.0-dev 分支](https://gitee.com/megrezsoft/duty-on/tree/v2.0-dev) `device/` 目录（交叉编译，见下文"设备端构建"） |
 
-当前源码版本：**v2.0.14**，见[变更与验证说明](docs/release-notes/v2.0.14.md)。
+当前源码版本：**v2.0.15**，见[变更与验证说明](docs/release-notes/v2.0.15.md)。
 上表指向已发布版本；本地构建的安装包输出到 `tools/dist/`。
 
 </div>
@@ -221,3 +221,7 @@ A: 在。两版本共用 `~/.dutyon/config.json` 与形象/模型目录。
 ## 许可证
 
 代码：[MIT](LICENSE)。内置 Live2D 运行时与示例模型 © Live2D Inc.，按其各自许可证使用——见 [NOTICE](NOTICE)。
+
+## 云服务
+
+Linux + Docker 云服务已提供安装包下载、OTA、账号和用户私有内容管理，详见[部署与 API 文档](server/README.md)。图片生成角色和声音克隆后续接入；正式域名确定后再预置 OTA 主地址。

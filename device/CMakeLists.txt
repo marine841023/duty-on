@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(dutyon-2.0 VERSION 2.0.14 LANGUAGES C CXX)
+project(dutyon-2.0 VERSION 2.0.15 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -292,6 +292,7 @@ if(WIN32)
         imgui_lib
         opengl32
         nlohmann_json::nlohmann_json
+        winhttp       # 系统证书校验的 HTTPS 云端请求
         ws2_32        # cpp-httplib 内嵌 HTTP 服务器（Winsock）
         shell32       # Shell_NotifyIcon
         user32
@@ -342,3 +343,6 @@ else()
         dl
     )
 endif()
+
+set(DUTYON_CLOUD_URL "" CACHE STRING "Default cloud/OTA origin, e.g. https://cloud.example.com")
+target_compile_definitions(dutyon-pet PRIVATE DUTYON_CLOUD_URL="${DUTYON_CLOUD_URL}")

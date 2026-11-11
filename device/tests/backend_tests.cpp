@@ -80,6 +80,32 @@ void stateTests() {
     check(sm.sessionCount() == 0, "late compaction must not recreate ended session");
 
     sm.handleHookEvent(event("UserPromptSubmit"));
+    const auto before_question = sm.snapshotJson()["alertSeq"].get<uint64_t>();
+    sm.handleHookEvent(event("PreToolUse", "s1", "functions.request_user_input_async", "async-a"));
+    check(status(sm) == "confirmation-needed", "namespaced async question must alert");
+    check(sm.snapshotJson()["alertSeq"].get<uint64_t>() == before_question + 1,
+          "async question must emit an alert event");
+    sm.handleHookEvent(event("PostToolUse", "s1", "functions.request_user_input_async", "async-a"));
+    sm.handleHookEvent(event("PreToolUse", "s1", "exec_command", "background"));
+    sm.handleHookEvent(event("PostToolUse", "s1", "exec_command", "background"));
+    check(status(sm) == "confirmation-needed", "async return and continued work must retain question");
+    sm.handleHookEvent(event("Stop"));
+    check(status(sm) == "confirmation-needed", "assistant ending turn does not answer async question");
+    sm.handleHookEvent(event("PreToolUse", "s1", "exec_command", "late-before-answer"));
+    check(status(sm) == "confirmation-needed", "late tools cannot replace a stopped turn's question");
+    sm.handleHookEvent(event("PermissionResolved", "s1", "functions.request_user_input_async", "async-a"));
+    sm.handleHookEvent(event("PreToolUse", "s1", "exec_command", "late-tool"));
+    check(status(sm) == "idle", "resolved stopped turn must ignore late tools");
+    sm.handleHookEvent(event("UserPromptSubmit"));
+    sm.handleHookEvent(event("PreToolUse", "s1", "request_user_input_async", "async-b"));
+    sm.handleHookEvent(event("PostToolUseFailure", "s1", "request_user_input_async", "async-b"));
+    check(status(sm) == "thinking", "failed async request must not leave a phantom question");
+    sm.handleHookEvent(event("PreToolUse", "s1", "request_user_input_async", "async-c"));
+    sm.handleHookEvent(event("UserPromptSubmit"));
+    check(status(sm) == "thinking", "user reply starts a new turn and clears its async questions");
+    sm.handleHookEvent(event("SessionEnd"));
+
+    sm.handleHookEvent(event("UserPromptSubmit"));
     const auto last_event = sm.snapshotJson()["lastEventAt"];
     CliLiveness alive; alive.scan_succeeded = true; alive.codex_alive = true;
     now += bc::kThinkingTimeout + 1;

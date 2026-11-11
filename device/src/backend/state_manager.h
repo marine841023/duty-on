@@ -139,6 +139,7 @@ private:
     struct Confirmation {
         std::optional<std::string> tool_key;
         std::string message;
+        bool asynchronous = false; // Tool returning means the question was shown, not answered.
     };
     struct Actor {
         SessionStatus status = SessionStatus::Idle;

@@ -59,3 +59,7 @@ constexpr const char* kModelDir = "/opt/dutyon/assets/live2d/";
 constexpr const char* kDefaultModel = "nico";
 
 } // namespace dutyon
+
+#ifndef DUTYON_CLOUD_URL
+#define DUTYON_CLOUD_URL ""
+#endif

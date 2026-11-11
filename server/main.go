@@ -14,22 +14,35 @@ package main
 //   GET /api/app/version|download          （无鉴权）
 
 import (
+	"context"
 	"flag"
-	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
 )
 
 type App struct {
-	store   *Store
-	limiter *loginLimiter
+	store        *Store
+	limiter      *loginLimiter
+	authMu       sync.Mutex
+	authRates    map[string]authRate
+	trustedProxy *net.IPNet
+	authSlots    chan struct{}
+	fileSlots    chan struct{}
 }
 
 func main() {
 	addr := flag.String("addr", ":8787", "HTTP 监听地址")
 	data := flag.String("data", "./data", "数据目录（JSON 存储）")
 	publish := flag.String("publish", "", "发布升级包（zip 路径）后退出")
+	kind := flag.String("kind", "update", "发布类型：update / installer / bundle")
+	proxy := flag.String("trusted-proxy", "", "可信反向代理 CIDR（仅该网段可传 X-Real-IP）")
 	notes := flag.String("notes", "", "升级说明（配合 --publish）")
 	flag.Parse()
 
@@ -38,23 +51,49 @@ func main() {
 		log.Fatalf("打开数据目录失败: %v", err)
 	}
 	app := &App{store: store, limiter: newLoginLimiter()}
+	if *proxy != "" {
+		_, subnet, err := net.ParseCIDR(*proxy)
+		if err != nil {
+			log.Fatal(err)
+		}
+		app.trustedProxy = subnet
+	}
 
 	if *publish != "" {
-		if err := app.publish(*publish, *notes); err != nil {
+		if err := app.publishArtifact(*publish, *notes, *kind); err != nil {
 			log.Fatalf("发布失败: %v", err)
 		}
-		rel, _ := app.loadRelease()
-		fmt.Printf("已发布 v%s（%.1f MB）\n  sha256: %s\n",
+		rel, _ := app.loadReleaseKind(*kind)
+		log.Printf("已发布 v%s（%.1f MB）\n  sha256: %s\n",
 			rel.Version, float64(rel.Size)/1048576.0, rel.SHA256)
 		return
 	}
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	srv := &http.Server{Addr: *addr, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout: 2 * time.Minute, WriteTimeout: 3 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	go func() {
+		<-ctx.Done()
+		shutdown, done := context.WithTimeout(context.Background(), 10*time.Second)
+		defer done()
+		_ = srv.Shutdown(shutdown)
+	}()
+	log.Printf("dutyon-cloud listening on %s", *addr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
+}
+
+func (app *App) Handler() http.Handler {
+	app.authSlots = make(chan struct{}, 4)
+	app.fileSlots = make(chan struct{}, 4)
 	mux := http.NewServeMux()
 	// 账户
-	mux.HandleFunc("/api/auth/register", app.handleRegister)
-	mux.HandleFunc("/api/auth/login", app.handleLogin)
-	mux.HandleFunc("/api/auth/logout", app.handleLogout)
-	mux.HandleFunc("/api/profile", app.requireAuth(app.handleProfile))
+	mux.HandleFunc("/api/auth/register", method("POST", app.handleRegister))
+	mux.HandleFunc("/api/auth/login", method("POST", app.handleLogin))
+	mux.HandleFunc("/api/auth/logout", method("POST", app.handleLogout))
+	mux.HandleFunc("/api/profile", app.requireAuth(method("GET", app.handleProfile)))
 	// 同步
 	mux.HandleFunc("/api/sync/config", app.requireAuth(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -114,9 +153,55 @@ func main() {
 		app.handleDownload(w, r)
 	})
 
-	log.Printf("dutyon-cloud 监听 %s（数据目录 %s）", *addr, *data)
-	if err := http.ListenAndServe(*addr, mux); err != nil {
-		fmt.Fprintln(os.Stderr, "服务退出:", err)
-		os.Exit(1)
+	mux.HandleFunc("/healthz", method("GET", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]bool{"ok": true}) }))
+	mux.HandleFunc("/api/app/releases", method("GET", app.handleReleases))
+	mux.HandleFunc("/api/app/artifact", method("GET", app.handleArtifact))
+	mux.HandleFunc("/", app.handleWeb)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Cache-Control", "no-store")
+		if strings.HasPrefix(r.URL.Path, "/api/auth/") {
+			remote := r.RemoteAddr
+			host, _, _ := net.SplitHostPort(remote)
+			if app.trustedProxy != nil && app.trustedProxy.Contains(net.ParseIP(host)) {
+				if ip := net.ParseIP(r.Header.Get("X-Real-IP")); ip != nil {
+					remote = ip.String()
+				}
+			}
+			if !app.allowAuth(remote) {
+				writeJSON(w, 429, map[string]string{"error": "请求过于频繁，请稍后重试"})
+				return
+			}
+			select {
+			case app.authSlots <- struct{}{}:
+				defer func() { <-app.authSlots }()
+			default:
+				writeJSON(w, 503, map[string]string{"error": "服务繁忙，请稍后重试"})
+				return
+			}
+		}
+		if r.URL.Path == "/api/sync/file" {
+			select {
+			case app.fileSlots <- struct{}{}:
+				defer func() { <-app.fileSlots }()
+			default:
+				writeJSON(w, 503, map[string]string{"error": "服务繁忙，请稍后重试"})
+				return
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+func method(allowed string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != allowed {
+			w.Header().Set("Allow", allowed)
+			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
+			return
+		}
+		next(w, r)
 	}
 }

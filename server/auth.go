@@ -10,9 +10,14 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"sync"
 	"time"
@@ -98,6 +103,14 @@ func (l *loginLimiter) locked(name string) bool {
 func (l *loginLimiter) fail(name string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	for key, v := range l.states {
+		if time.Since(v.lastFail) > 2*time.Minute {
+			delete(l.states, key)
+		}
+	}
+	if len(l.states) >= 4096 {
+		return
+	}
 	st := l.states[name]
 	if st == nil {
 		st = &loginState{}
@@ -131,9 +144,9 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 			"error": "用户名需 3-32 位字母/数字/下划线/连字符"})
 		return
 	}
-	if len(req.Password) < 6 {
+	if len(req.Password) < 6 || len(req.Password) > 1024 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "密码至少 6 位"})
+			"error": "密码需 6-1024 字节"})
 		return
 	}
 	salt, err := randHex(saltBytes)
@@ -143,8 +156,11 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := a.store.CreateUser(req.Username, salt, hashPassword(req.Password, salt))
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "用户名已被占用"})
+		if errors.Is(err, os.ErrExist) {
+			writeJSON(w, 409, map[string]string{"error": "用户名已被占用"})
+		} else {
+			writeJSON(w, 500, map[string]string{"error": "注册失败"})
+		}
 		return
 	}
 	tok, err := a.store.IssueToken(u.ID)
@@ -166,13 +182,22 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err := readJSON(w, r, &req, 1<<20); err != nil {
 		return
 	}
+	if !usernameRe.MatchString(req.Username) || len(req.Password) > 1024 {
+		writeJSON(w, 400, map[string]string{"error": "用户名或密码格式错误"})
+		return
+	}
 	if a.limiter.locked(req.Username) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{
 			"error": "尝试过于频繁，请 10 秒后再试"})
 		return
 	}
 	u, ok := a.store.FindUser(req.Username)
-	if !ok || hashPassword(req.Password, u.Salt) != u.Hash {
+	salt := u.Salt
+	if !ok {
+		salt = "00000000000000000000000000000000"
+	}
+	candidate := hashPassword(req.Password, salt)
+	if !ok || subtle.ConstantTimeCompare([]byte(candidate), []byte(u.Hash)) != 1 {
 		a.limiter.fail(req.Username)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{
 			"error": "用户名或密码错误"})
@@ -192,7 +217,10 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if tok, ok := bearerToken(r); ok {
-		a.store.RevokeToken(tok)
+		if err := a.store.RevokeToken(tok); err != nil {
+			writeJSON(w, 500, map[string]string{"error": "注销失败，请重试"})
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
@@ -204,7 +232,7 @@ func (a *App) handleProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "账户不存在"})
 		return
 	}
-	used, err := a.store.userUsage(uid)
+	used, err := a.store.Usage(uid)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "统计失败"})
 		return
@@ -253,7 +281,15 @@ func bearerToken(r *http.Request) (string, bool) {
 // readJSON 统一解析请求体（限制大小；错误时已写好响应）。
 func readJSON(w http.ResponseWriter, r *http.Request, v interface{}, maxBytes int64) error {
 	body := http.MaxBytesReader(w, r.Body, maxBytes)
-	if err := json.NewDecoder(body).Decode(v); err != nil {
+	dec := json.NewDecoder(body)
+	err := dec.Decode(v)
+	if err == nil {
+		var extra interface{}
+		if dec.Decode(&extra) != io.EOF {
+			err = errors.New("multiple JSON values")
+		}
+	}
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "请求格式错误"})
 		return err
@@ -265,4 +301,38 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// Bound password hashing work per source IP; proxy is configured without trusting arbitrary forwarded headers.
+type authRate struct {
+	start time.Time
+	count int
+}
+
+func (a *App) allowAuth(remote string) bool {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		host = remote
+	}
+	a.authMu.Lock()
+	defer a.authMu.Unlock()
+	if a.authRates == nil {
+		a.authRates = map[string]authRate{}
+	}
+	now := time.Now()
+	for key, v := range a.authRates {
+		if now.Sub(v.start) > time.Minute {
+			delete(a.authRates, key)
+		}
+	}
+	v := a.authRates[host]
+	if v.start.IsZero() {
+		if len(a.authRates) >= 4096 {
+			return false
+		}
+		v.start = now
+	}
+	v.count++
+	a.authRates[host] = v
+	return v.count <= 120
 }

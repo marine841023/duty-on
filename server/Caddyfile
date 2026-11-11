@@ -1,0 +1,7 @@
+{$DUTYON_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy cloud:8787 {
+        header_up X-Real-IP {remote_host}
+    }
+    header Strict-Transport-Security "max-age=31536000"
+}

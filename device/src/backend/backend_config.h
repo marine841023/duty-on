@@ -94,6 +94,7 @@ constexpr const char* kOpencodePluginFilename = "dutyon-bridge.js";
 // PostToolUse -> thinking）。
 inline const char* const kAskUserTools[] = {
     "AskUserQuestion", "AskQuestion", "ask_question", "askQuestion", "request_user_input",
+    "request_user_input_async",
 };
 constexpr int kAskUserToolsCount = sizeof(kAskUserTools) / sizeof(kAskUserTools[0]);
 

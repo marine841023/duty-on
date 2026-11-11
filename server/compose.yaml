@@ -1,0 +1,48 @@
+services:
+  cloud:
+    build: .
+    image: dutyon-cloud:local
+    restart: unless-stopped
+    command: ["--addr", ":8787", "--data", "/data", "--trusted-proxy", "172.30.84.3/32"]
+    ports: ["127.0.0.1:8787:8787"]
+    volumes:
+      - cloud-data:/data
+      - ./packages:/packages:ro
+    read_only: true
+    tmpfs: ["/tmp:size=16m,noexec,nosuid"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    mem_limit: 768m
+    cpus: 2
+    networks:
+      cloud-net:
+        ipv4_address: 172.30.84.2
+    logging:
+      options: {max-size: "10m", max-file: "3"}
+  caddy:
+    image: caddy:2-alpine
+    profiles: [production]
+    restart: unless-stopped
+    environment:
+      DUTYON_DOMAIN: ${DUTYON_DOMAIN:-localhost}
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      cloud:
+        condition: service_healthy
+    networks:
+      cloud-net:
+        ipv4_address: 172.30.84.3
+    logging:
+      options: {max-size: "10m", max-file: "3"}
+networks:
+  cloud-net:
+    ipam:
+      config: [{subnet: 172.30.84.0/24}]
+volumes:
+  cloud-data:
+  caddy-data:
+  caddy-config:

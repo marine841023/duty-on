@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <filesystem>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -138,7 +139,7 @@ inline std::string toHex(const std::vector<uint8_t>& b) {
 }
 
 // 文件摘要 → 小写 hex（64KB 分块，任意大小文件；失败返回空串）
-inline std::string fileHex(const std::string& path) {
+inline std::string fileHex(const std::filesystem::path& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return std::string();
     detail::Ctx c;
@@ -148,6 +149,7 @@ inline std::string fileHex(const std::string& path) {
         detail::update(c, (const uint8_t*)buf.data(), (size_t)f.gcount());
         if (!f) break;  // 短读（EOF）
     }
+    if (f.bad()) return std::string();
     uint8_t out[32];
     detail::final(c, out);
     return toHex(std::vector<uint8_t>(out, out + 32));

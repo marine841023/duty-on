@@ -172,7 +172,9 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
     const bool codex = ev.ide.value_or(session.ide.value_or(IdeKind::Trae)) == IdeKind::Codex;
     if (codex && !restart && !child_lifecycle && ev.turn_id && actor.turn_id &&
         ev.turn_id != actor.turn_id) return;
-    if (actor.finished && !restart) return;
+    if (actor.finished && !restart &&
+        (actor.confirmations.empty() || (name != "PermissionResolved" && name != "PostToolUseFailure" &&
+                                        name != "Interrupt" && name != "SessionEnd"))) return;
     if (ev.turn_id && !child_lifecycle) actor.turn_id = ev.turn_id;
 
     if (!ev.project_name.empty()) session.project_name = ev.project_name;
@@ -192,8 +194,14 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
     const bool identified_tool = ev.tool_use_id.has_value();
     const std::string tool_key = identified_tool ? "id:" + *ev.tool_use_id
                                                : "name:" + ev.tool_name.value_or("unknown");
-    const bool ask_user_tool = ev.tool_name &&
-        containsStr(bc::kAskUserTools, bc::kAskUserToolsCount, *ev.tool_name);
+    // Hosts may report either the short name or a namespace-qualified name.
+    std::string short_tool = ev.tool_name.value_or("");
+    auto separator = short_tool.find_last_of('.');
+    if (separator != std::string::npos) short_tool.erase(0, separator + 1);
+    separator = short_tool.rfind("__");
+    if (separator != std::string::npos) short_tool.erase(0, separator + 2);
+    const bool ask_user_tool = containsStr(bc::kAskUserTools, bc::kAskUserToolsCount, short_tool);
+    const bool async_question = short_tool == "request_user_input_async";
     // A browser/computer tool is not itself evidence of a permission prompt.
     // Retain this legacy fallback only for Trae/Qoder, which expose such cards.
     const auto ide = session.ide.value_or(IdeKind::Trae);
@@ -209,7 +217,7 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
             bound_tool.value_or("notification:" + ev.notification_type.value_or("unknown"));
         const std::string message = ev.tool_name ? "需要确认: " + *ev.tool_name :
             ev.message.value_or("需要你的确认");
-        if (actor.confirmations.emplace(key, Confirmation{bound_tool, message}).second) {
+        if (actor.confirmations.emplace(key, Confirmation{bound_tool, message, async_question}).second) {
             ++alert_seq_;
             last_alert_time_ = now;
         }
@@ -223,7 +231,8 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
             actor.completed_tools.insert(tool_key);
         }
         for (auto c = actor.confirmations.begin(); c != actor.confirmations.end();) {
-            if (c->second.tool_key == tool_key) c = actor.confirmations.erase(c);
+            if (c->second.tool_key == tool_key &&
+                (!c->second.asynchronous || name == "PostToolUseFailure")) c = actor.confirmations.erase(c);
             else ++c;
         }
     };
@@ -283,7 +292,15 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
         actor.status = SessionStatus::Thinking;
     } else if (name == "Stop" || name == "Interrupt" || name == "SessionEnd" ||
                (name == "SubagentStop" && !actor_id.empty())) {
+        // Ending an assistant turn does not answer an asynchronous question.
+        // Explicit cancellation/session end still clears the entire actor.
+        auto questions = std::move(actor.confirmations);
         actor = Actor{};
+        if (name == "Stop") {
+            for (auto& [key, confirmation] : questions)
+                if (confirmation.asynchronous) actor.confirmations.emplace(key, std::move(confirmation));
+            actor.turn_id = ev.turn_id;
+        }
         actor.finished = true;
         // Interrupt of the main conversation cancels its whole actor tree.
         if (name == "Interrupt" && actor_id.empty()) {
@@ -297,6 +314,8 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
         actor.status = SessionStatus::Thinking;
         actor.finished = false;
     }
+
+    if (actor.finished) actor.status = SessionStatus::Idle;
 
     // Derive the conversation from all actors. A sibling event cannot clear
     // another actor's pending tool or confirmation, including a parent Stop.

@@ -70,3 +70,8 @@ server/data/
 # 分发到设备与 frontend/assets 正式副本以外的渠道）；小文件（pinyin/tokens/vad）入库
 frontend/assets/device/kws/asr-offline
 frontend/assets/device/kws/sense-voice/model.int8.onnx
+
+server/dutyon-cloud.exe
+server/.env
+server/packages/
+server/*backup*.tar.gz

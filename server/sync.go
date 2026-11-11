@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 )
 
 func (a *App) handleConfigGet(w http.ResponseWriter, r *http.Request) {
@@ -89,10 +90,17 @@ func (a *App) handleFilePut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "读取请求体失败"})
 		return
 	}
-	err = a.store.WriteFile(uid, rel, data)
+	match := strings.Trim(r.Header.Get("If-Match"), `"`)
+	if match != "" && !digestRE.MatchString(match) {
+		writeJSON(w, 400, map[string]string{"error": "invalid If-Match"})
+		return
+	}
+	err = a.store.WriteFileConditional(uid, rel, data, match, r.Header.Get("If-None-Match") == "*")
 	switch {
 	case err == nil:
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	case errors.Is(err, errConflict):
+		writeJSON(w, 412, map[string]string{"error": "文件已变化，请刷新后重试"})
 	case errors.Is(err, errTooLarge):
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
 			"error": "单文件超过 50MB 限制"})

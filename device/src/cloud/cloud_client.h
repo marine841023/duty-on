@@ -2,13 +2,13 @@
 // ---------------------------------------------------------------------------
 // 云端账户客户端（仅 Windows PC 端）—— 账号登录 / 云同步 / 一键升级
 //
-// 服务端：dutyon-cloud（Go，仓库 server/ 目录，明文 HTTP，Bearer token 鉴权）
+// 服务端：dutyon-cloud（Go，仓库 server/ 目录，生产环境 HTTPS，Bearer token 鉴权）
 //   POST /api/auth/{register,login}   登录/注册 → token
 //   GET/PUT /api/sync/config          配置白名单快照
 //   GET /api/sync/manifest + /api/sync/file?path=   文件清单与传输
 //   GET /api/app/{version,download}   升级包分发
 //
-// 传输：cpp-httplib Client（http:// 明文；不链 OpenSSL，https 后续需要再加）
+// 传输：WinHTTP（使用 Windows 系统证书校验 HTTPS；本地测试可用 HTTP）
 //
 // 线程模型：
 //   · 登录/注册在 UI 线程同步调用（登录弹窗内，5s 超时）
@@ -66,7 +66,7 @@ public:
     void setAccount(const std::string& server, const std::string& token,
                     const std::string& username);
 
-    bool loggedIn() const { return !account_.token.empty(); }
+    bool loggedIn() const;
     std::string username() const;
     std::string serverUrl() const;
 
@@ -94,7 +94,7 @@ public:
 
 private:
     struct Account {
-        std::string server;   // 形如 http://192.168.1.100:8787
+        std::string server;   // 形如 https://cloud.example.com
         std::string token;
         std::string username;
     };

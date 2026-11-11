@@ -1977,7 +1977,7 @@ int main() {
                 return err;
             };
             CloudLoginDialog dlg;
-            dlg.run(pet_hwnd, host, cfg.cloud_server);
+            dlg.run(pet_hwnd, host, cloud.serverUrl());
         } else if (id == "cloud:sync") {
             cloud.syncNow();
         } else if (id == "cloud:restore") {

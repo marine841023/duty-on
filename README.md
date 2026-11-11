@@ -39,7 +39,7 @@
 | 🖥 Windows desktop v2.0.12 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
 | 📟 Device source | [v2.0-dev branch](https://github.com/marine841023/duty-on/tree/v2.0-dev), `device/` dir (cross-compiled — see "Device build" below) |
 
-Current source: **v2.0.14** — [changes and validation](docs/release-notes/v2.0.14.md).
+Current source: **v2.0.15** — [changes and validation](docs/release-notes/v2.0.15.md).
 The download links above lead to published releases; local builds go to `tools/dist/`.
 
 </div>
@@ -253,3 +253,7 @@ Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Code: [MIT](LICENSE). Bundled Live2D runtime and sample models are © Live2D
 Inc. and used under their respective licenses — see [NOTICE](NOTICE).
+
+## Cloud service
+
+The Linux + Docker cloud service provides installer downloads, OTA, accounts and private content management. See [deployment and API guide](server/README.md). Image-to-character generation and voice cloning are planned for a later release.

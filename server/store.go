@@ -124,7 +124,11 @@ func (s *Store) loadTokens() error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(b, &s.tokens)
+	err = json.Unmarshal(b, &s.tokens)
+	if s.tokens == nil {
+		s.tokens = map[string]tokenInfo{}
+	}
+	return err
 }
 
 func (s *Store) saveTokensLocked() error {
@@ -158,7 +162,11 @@ func (s *Store) CreateUser(name, saltHex, hashHex string) (User, error) {
 		QuotaBytes: quotaPerUser,
 	}
 	s.users = append(s.users, u)
-	return u, s.saveUsersLocked()
+	if err := s.saveUsersLocked(); err != nil {
+		s.users = s.users[:len(s.users)-1]
+		return User{}, err
+	}
+	return u, nil
 }
 
 func (s *Store) FindUser(name string) (User, bool) {
@@ -192,12 +200,13 @@ func (s *Store) IssueToken(uid string) (string, error) {
 	defer s.mu.Unlock()
 	s.tokens[tok] = tokenInfo{UID: uid, Expires: time.Now().Add(tokenTTL)}
 	if err := s.saveTokensLocked(); err != nil {
+		delete(s.tokens, tok)
 		return "", err
 	}
 	return tok, nil
 }
 
-// CheckToken 校验并滑动续期（每次使用重置 90 天；写盘按分钟节流）。
+// CheckToken 校验并滑动续期（有效期 90 天；续期写盘按小时节流）。
 func (s *Store) CheckToken(token string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -209,19 +218,26 @@ func (s *Store) CheckToken(token string) (string, bool) {
 		}
 		return "", false
 	}
-	info.Expires = time.Now().Add(tokenTTL)
-	s.tokens[token] = info
-	_ = s.saveTokensLocked() // 个人规模：直接落盘，失败不影响本次请求
+	if time.Until(info.Expires) < tokenTTL-time.Hour {
+		info.Expires = time.Now().Add(tokenTTL)
+		s.tokens[token] = info
+		_ = s.saveTokensLocked()
+	}
 	return info.UID, true
 }
 
-func (s *Store) RevokeToken(token string) {
+func (s *Store) RevokeToken(token string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.tokens[token]; ok {
+		old := s.tokens[token]
 		delete(s.tokens, token)
-		_ = s.saveTokensLocked()
+		if err := s.saveTokensLocked(); err != nil {
+			s.tokens[token] = old
+			return err
+		}
 	}
+	return nil
 }
 
 // ---- 同步文件树 ----
@@ -229,16 +245,29 @@ func (s *Store) RevokeToken(token string) {
 // validSyncPath 白名单校验：仅 animations/ 与 live2d/ 前缀、无 `..`、
 // 无反斜杠/绝对路径、必须指向具体文件（非目录本身）。
 func validSyncPath(rel string) (string, bool) {
-	rel = strings.Trim(rel, "/")
 	if rel == "" || len(rel) > 512 {
 		return "", false
 	}
-	if strings.ContainsAny(rel, "\\\x00") || strings.Contains(rel, "..") {
+	if strings.ContainsAny(rel, "\\\x00:") || strings.Contains(rel, "..") {
 		return "", false
 	}
 	if !strings.HasPrefix(rel, "animations/") &&
 		!strings.HasPrefix(rel, "live2d/") {
 		return "", false
+	}
+	for _, part := range strings.Split(rel, "/") {
+		if part == "" || strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") || strings.ContainsAny(part, "<>\"|?*") {
+			return "", false
+		}
+		for _, r := range part {
+			if r < 32 || r == 127 {
+				return "", false
+			}
+		}
+		base := strings.ToUpper(strings.SplitN(part, ".", 2)[0])
+		if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" || (len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '0' && base[3] <= '9') {
+			return "", false
+		}
 	}
 	cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
 	if cleaned != rel {
@@ -251,6 +280,12 @@ func validSyncPath(rel string) (string, bool) {
 }
 
 // userUsage 遍历该用户 animations/ + live2d/ 统计已用字节数（配额依据）。
+func (s *Store) Usage(uid string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.userUsage(uid)
+}
+
 func (s *Store) userUsage(uid string) (int64, error) {
 	var total int64
 	for _, top := range []string{"animations", "live2d"} {
@@ -278,6 +313,8 @@ func (s *Store) userUsage(uid string) (int64, error) {
 
 // Manifest 实时计算清单：[{path, size, sha256}]，按 path 排序。
 func (s *Store) Manifest(uid string) ([]manifestEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var out []manifestEntry
 	for _, top := range []string{"animations", "live2d"} {
 		root := filepath.Join(s.userDir(uid), top)
@@ -320,12 +357,32 @@ func (s *Store) Manifest(uid string) ([]manifestEntry, error) {
 
 // WriteFile 配额校验 + 落盘（替换已有文件时先扣除旧占用）。
 func (s *Store) WriteFile(uid, rel string, data []byte) error {
+	return s.WriteFileConditional(uid, rel, data, "", false)
+}
+
+func (s *Store) WriteFileConditional(uid, rel string, data []byte, match string, absent bool) error {
+	if _, ok := validSyncPath(rel); !ok {
+		return errors.New("invalid path")
+	}
 	if int64(len(data)) > maxFileSize {
 		return errTooLarge
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	target := filepath.Join(s.userDir(uid), filepath.FromSlash(rel))
+	if absent {
+		if _, err := os.Stat(target); err == nil {
+			return errConflict
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if match != "" {
+		sum, err := sha256File(target)
+		if err != nil || sum != match {
+			return errConflict
+		}
+	}
 	var oldSize int64
 	if st, err := os.Stat(target); err == nil {
 		oldSize = st.Size()
@@ -344,10 +401,18 @@ func (s *Store) WriteFile(uid, rel string, data []byte) error {
 }
 
 func (s *Store) ReadFile(uid, rel string) ([]byte, error) {
+	if _, ok := validSyncPath(rel); !ok {
+		return nil, errors.New("invalid path")
+	}
 	return os.ReadFile(filepath.Join(s.userDir(uid), filepath.FromSlash(rel)))
 }
 
 func (s *Store) DeleteFile(uid, rel string) error {
+	if _, ok := validSyncPath(rel); !ok {
+		return errors.New("invalid path")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	err := os.Remove(filepath.Join(s.userDir(uid), filepath.FromSlash(rel)))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil // 幂等：云端已无此文件也算删除成功
@@ -355,10 +420,18 @@ func (s *Store) DeleteFile(uid, rel string) error {
 	return err
 }
 
+var syncFields = []string{"flipHorizontal", "miniMode", "language", "activeCharacterId", "stateMotions", "customCharacters", "deviceMode", "frameSource", "clockColor", "characterColors", "deviceBrightness", "deviceVolume", "stateAudio", "soundMute", "stateAudioMuted", "screenRotation"}
+
 // ---- 配置快照 ----
 
 func (s *Store) SaveConfig(uid string, cfg map[string]interface{}) error {
-	b, err := json.MarshalIndent(cfg, "", "  ")
+	filtered := map[string]interface{}{}
+	for _, key := range syncFields {
+		if v, ok := cfg[key]; ok {
+			filtered[key] = v
+		}
+	}
+	b, err := json.MarshalIndent(filtered, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -390,6 +463,7 @@ func (s *Store) LoadConfig(uid string) (map[string]interface{}, error) {
 var (
 	errTooLarge = errors.New("file too large")
 	errQuota    = errors.New("quota exceeded")
+	errConflict = errors.New("file changed")
 )
 
 func randHex(n int) (string, error) {
@@ -402,9 +476,22 @@ func randHex(n int) (string, error) {
 
 // atomicWrite 临时文件 + 原子改名（避免写一半被读到）。
 func atomicWrite(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".dutyon-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err = tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
