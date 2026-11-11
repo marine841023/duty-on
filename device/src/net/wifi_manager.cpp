@@ -26,6 +26,7 @@
 
 #include "net/device_identity.h"
 #include "net/wifi_credentials.h"
+#include "net/wifi_scan.h"
 #include "platform/atomic_file.h"
 
 namespace dutyon {
@@ -146,17 +147,8 @@ std::string htmlEsc(const std::string& s) {
 // 空 = 未扫到（portal 仅显示手动输入框）。浏览器无法读取手机当前 Wi-Fi，
 // 故改由设备扫描邻近网络供点选，免手输 SSID。
 std::vector<std::string> readScanList() {
-    std::vector<std::string> out;
     std::ifstream in(runDir() + "/scan.txt");
-    std::string line;
-    while (std::getline(in, line)) {
-        const char* ws = " \t\r\n";
-        size_t b = line.find_first_not_of(ws);
-        size_t e = line.find_last_not_of(ws);
-        if (b == std::string::npos) continue;
-        out.push_back(line.substr(b, e - b + 1));
-    }
-    return out;
+    return parseWifiScanList(in);
 }
 
 // captive portal 探测路径识别：手机/系统连网检测请求（Android generate_204、
@@ -194,21 +186,22 @@ label{display:block;font-size:13px;color:#bdc1c6;margin:14px 0 6px}
 input{width:100%;padding:12px 14px;font-size:16px;border-radius:10px;border:1px solid #33383f;background:#12151a;color:#fff}
 input:focus{outline:none;border-color:#4c8dff}
 .nets{display:flex;flex-direction:column;gap:8px;margin-top:8px}
-.net{display:flex;align-items:center;justify-content:space-between;width:100%;padding:13px 14px;font-size:15px;border-radius:10px;border:1px solid #33383f;background:#12151a;color:#e8eaed;text-align:left}
+.net{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-width:0;padding:13px 14px;font-size:15px;border-radius:10px;border:1px solid #33383f;background:#12151a;color:#e8eaed;text-align:left}
+.net .name,#sel-name{min-width:0;overflow-wrap:anywhere;word-break:break-word;white-space:pre-wrap}
 .net.on{border-color:#4c8dff;color:#8ab4ff;background:#16203a}
-.net .arr{color:#5f6368;font-size:15px}
+.net .arr{flex-shrink:0;color:#5f6368;font-size:15px}
 .net.on .arr{color:#8ab4ff}
 .btn{width:100%;margin-top:20px;padding:14px;font-size:16px;font-weight:600;border:none;border-radius:10px;background:#4c8dff;color:#fff}
 .btn:active{background:#3a76e0}
 .btn.subtle{background:#2a2f37;color:#8ab4ff;border:1px solid #3a4150}
-.selssid{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-radius:10px;border:1px solid #4c8dff;background:#16203a;color:#8ab4ff;font-size:15px}
-.selssid .re{font-size:13px;color:#9aa0a6;text-decoration:underline;padding:4px 6px}
+.selssid{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-radius:10px;border:1px solid #4c8dff;background:#16203a;color:#8ab4ff;font-size:15px}
+.selssid .re{flex-shrink:0;font-size:13px;color:#9aa0a6;text-decoration:underline;padding:4px 6px}
 .hidden{display:none}
 .ok{text-align:center;padding:14px 0}
 .ok .big{font-size:46px;line-height:1;margin-bottom:16px}
 .dl{margin-top:26px;padding-top:20px;border-top:1px solid #2a2f37}
 .dl h2{font-size:16px;margin-bottom:8px;color:#e8eaed}
-.steps{margin:10px 0 16px 20px;font-size:13px;color:#9aa0a6;line-height:1.9}
+.steps{margin:10px 0 16px 20px;font-size:13px;color:#9aa0a6;line-height:1.9;overflow-wrap:anywhere}
 .steps b{color:#8ab4ff}
 .dlbtn{display:block;width:100%;margin-top:10px;padding:13px;font-size:15px;font-weight:600;text-align:center;text-decoration:none;border-radius:10px;background:#4c8dff;color:#fff}
 .dlbtn.alt{background:#2a2f37;color:#8ab4ff;border:1px solid #3a4150}
@@ -231,7 +224,7 @@ input:focus{outline:none;border-color:#4c8dff}
         h << "<label>选择 Wi-Fi 网络</label><div class=\"nets\">";
         for (const auto& s : nets)
             h << "<button type=\"button\" class=\"net\" data-s=\""
-              << htmlEsc(s) << "\"><span>" << htmlEsc(s)
+              << htmlEsc(s) << "\"><span class=\"name\">" << htmlEsc(s)
               << "</span><span class=\"arr\">›</span></button>";
         h << "</div>";
     }
@@ -300,7 +293,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .big{font-size:52px;line-height:1;margin-bottom:16px}
 h1{font-size:19px;margin-bottom:10px}
 p{font-size:14px;color:#9aa0a6;line-height:1.7}
-b{color:#e8eaed}
+b{color:#e8eaed;overflow-wrap:anywhere;word-break:break-word;white-space:pre-wrap}
 )CSS"
       << "</style></head><body><div class=\"card\">"
       << "<div class=\"big\">&#10003;</div>"

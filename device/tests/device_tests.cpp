@@ -1,6 +1,7 @@
 #include "audio/sound_player.h"
 #include "config/user_config.h"
 #include "net/wifi_credentials.h"
+#include "net/wifi_scan.h"
 #include "platform/atomic_file.h"
 #include "platform/child_process.h"
 #include "render/media_limits.h"
@@ -12,6 +13,7 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <sstream>
 #include <vector>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -41,6 +43,26 @@ static void wifiTests() {
     check(!validWifiCredentials("network", std::string(64, 'g')), "nonhex raw PSK");
     check(wifiSsidHex(std::string("\xc3\xa9", 2)) == "c3a9", "UTF8 SSID hex encoding");
     check(validWifiCredentials(" trailing ", "pass word"), "spaces are significant");
+    const std::string chinese = "\xe5\x8d\x8e\xe5\x8f\x91\xe6\x96\x87\xe5\x8c\x96";
+    const std::string escaped = R"(\xe5\x8d\x8e\xe5\x8f\x91\xe6\x96\x87\xe5\x8c\x96)";
+    check(decodeIwSsid(escaped) == chinese, "iw Chinese UTF8 bytes decoded");
+    check(decodeIwSsid(escaped + "_5G") == chinese + "_5G", "iw Chinese suffix preserved");
+    check(decodeIwSsid(R"(\x5cxe5)") == R"(\xe5)", "literal backslash decoded only once");
+    check(decodeIwSsid(R"(\x20 network\x20)") == "  network ", "SSID edge spaces preserved");
+    check(decodeIwSsid(R"(\xQ1\x1\t)") == R"(\xQ1\x1\t)", "unknown escapes not interpreted");
+    check(decodeIwSsid(R"(\x3c\x22\x26)") == "<\"&", "HTML metacharacters decoded as data");
+    check(displayableWifiSsid(chinese) && displayableWifiSsid(std::string(32, 'a')),
+          "UTF8 and 32-byte names supported");
+    for (const auto& invalid : {std::string(33, 'a'), std::string("\0", 1), std::string("a\nb"),
+             std::string("a\tb"), std::string("\x7f"), std::string("\xc0\xaf"),
+             std::string("\xed\xa0\x80"), std::string("\xf4\x90\x80\x80"),
+             std::string("\xe5\x8d"), std::string("\xe5\x41\x41")})
+        check(!displayableWifiSsid(invalid), "unrepresentable/control SSID excluded");
+    std::istringstream scan(escaped + "\n" + chinese + "\n" + R"(\x20edge\x20)" +
+                           "\n" + R"(bad\x00name)" + "\n" + R"(\xff)" + "\n" +
+                           std::string(33, 'a') + "\n" + "plain\r\n");
+    check(parseWifiScanList(scan) == std::vector<std::string>{chinese, " edge ", "plain"},
+          "scan list decodes before validation/deduplication without trimming");
 }
 static std::vector<unsigned char> gif(unsigned w, unsigned h, unsigned frames) {
     std::vector<unsigned char> b{'G','I','F','8','9','a',
@@ -183,7 +205,7 @@ int main(int, char** argv) {
     try {
         wifiTests(); mediaTests(); storageTests(dir); childTests(); audioTests(dir);
         fs::remove_all(dir);
-        std::cout << "PASS: WiFi credentials, media budgets, atomic storage, config, child/audio shutdown\n";
+        std::cout << "PASS: WiFi credentials/scan decoding, media budgets, atomic storage, config, child/audio shutdown\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << " (fixtures: " << dir << ")\n";
