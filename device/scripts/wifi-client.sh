@@ -55,7 +55,11 @@ fi
 
 # DHCP 取址：按可用性依次尝试 dhcpcd / udhcpc / dhclient（setup-wifi.sh 装 dhcpcd5）
 if command -v dhcpcd >/dev/null 2>&1; then
-    timeout -k 2 28 dhcpcd -4 -L -t 25 "$IFACE" 9>&- && log "dhcpcd ok" || log "dhcpcd FAILED (关联上了但没拿到地址?)"
+    # dhcpcd may exit 0 while its background daemon still waits for carrier.
+    # The exit status alone does not prove authentication or a DHCP lease.
+    # -b backgrounds immediately: waiting for carrier/lease must not hold the
+    # transition lock and delay AP recovery after an authentication failure.
+    timeout -k 2 28 dhcpcd -b -4 -L -t 25 "$IFACE" 9>&- && log "dhcpcd launched (lease checked below)" || log "dhcpcd command FAILED"
 elif command -v udhcpc >/dev/null 2>&1; then
     timeout -k 2 28 udhcpc -i "$IFACE" -q -t 25 -T 1 9>&- && log "udhcpc ok" || log "udhcpc FAILED"
 elif command -v dhclient >/dev/null 2>&1; then

@@ -102,12 +102,8 @@ private:
             RegisterClassExW(&wc);
             cls_ready = true;
         }
-        UINT dpi = 96;
-        HDC dc = GetDC(nullptr);
-        if (dc) {
-            dpi = (UINT)GetDeviceCaps(dc, LOGPIXELSY);
-            ReleaseDC(nullptr, dc);
-        }
+        UINT dpi = owner ? GetDpiForWindow(owner) : GetDpiForSystem();
+        if (!dpi) dpi = 96;
         s_ = dpi / 96.0f;
         const int W = (int)(392 * s_);
         const int x = (GetSystemMetrics(SM_CXSCREEN) - W) / 2;
@@ -178,7 +174,9 @@ private:
         wifi_btns_.clear();
         HINSTANCE hi = GetModuleHandleW(nullptr);
         const float s = s_;
-        const int W = (int)(392 * s);
+        RECT client{};
+        GetClientRect(hwnd_, &client);
+        const int W = client.right;
 
         if (mode_ == Mode::kInput) {
             // 垂直居中布局：内容块 = 提示24 + 隙14 + 格58 + 隙18 + 钮34 = 148，
@@ -220,45 +218,53 @@ private:
                    bhei);
             SetFocus(edits_[0]);
         } else {
-            // 已配对态：成功标示 + 每台设备一行（名称 + 两个操作按钮）
+            // 设备名称独占一行；操作另起一行，所有坐标统一按 DPI 缩放。
             const int n = (int)devices_.size();
-            const int H = 84 + n * 46 + 60;
+            const int H = 76 + n * 94 + 64;
             setHeight(H);
             label(hi, L"\x2713  已配对成功", font_title_, kGreen,
-                  (int)(16 * s), (int)(50 * s), W - (int)(32 * s),
+                  (int)(24 * s), (int)(24 * s), W - (int)(48 * s),
                   (int)(30 * s));
-            const int bwid = (int)(92 * s), bhei = (int)(30 * s),
+            const int bwid = (int)(132 * s), bhei = (int)(34 * s),
                       bgap = (int)(10 * s);
+            const int bx = (W - bwid * 2 - bgap) / 2;
             for (int i = 0; i < n; ++i) {
-                const int ry = 92 + (int)(46 * s) * i;
-                // 设备名（label）左对齐
-                label(hi, utf8(devices_[i].label).c_str(), font_text_, kText,
-                      (int)(24 * s), ry + (int)(4 * s),
-                      W - (int)(48 * s) - (bwid * 2 + bgap * 2 + (int)(24 * s)),
-                      (int)(24 * s));
-                const int bx = W - (int)(24 * s) - bwid * 2 - bgap;
+                const int ry = (int)((76 + 94 * i) * s);
+                const auto name = utf8(devices_[i].label.empty()
+                                           ? devices_[i].id : devices_[i].label);
+                HWND name_label = label(hi, name.c_str(), font_text_, kText,
+                      (int)(24 * s), ry, W - (int)(48 * s), (int)(26 * s));
+                SetWindowLongPtrW(name_label, GWL_STYLE,
+                    GetWindowLongPtrW(name_label, GWL_STYLE) | SS_ENDELLIPSIS);
+                const int button_y = ry + (int)(34 * s);
                 HWND b1 = button(hi, L"解除配对", kBtnUnpairBase + 2 * i,
-                                 false, bx, ry, bwid, bhei);
+                                 false, bx, button_y, bwid, bhei);
                 HWND b2 = button(hi, L"清除 Wi-Fi", kBtnUnpairBase + 2 * i + 1,
-                                 false, bx + bwid + bgap, ry, bwid, bhei);
+                                 false, bx + bwid + bgap, button_y, bwid, bhei);
                 unpair_btns_.push_back(b1);
                 wifi_btns_.push_back(b2);
             }
             const int cx = (W - bwid) / 2;
-            button(hi, L"关闭", IDCANCEL, false, cx, H - 52, bwid, bhei);
+            HWND close = button(hi, L"关闭", IDCANCEL, true, cx,
+                                (int)((H - 58) * s), bwid, bhei);
+            SetFocus(close);
         }
         InvalidateRect(hwnd_, nullptr, TRUE);
     }
 
-    // 窗口客户区高度调整（位置不动；总高 = 客户区 + 非客户区）
+    // 调整客户区高度后，在当前显示器工作区居中。
     void setHeight(int h) {
         RECT rc, crc;
         GetWindowRect(hwnd_, &rc);
         GetClientRect(hwnd_, &crc);
         const int nc = (rc.bottom - rc.top) - (crc.bottom - crc.top);
-        SetWindowPos(hwnd_, nullptr, 0, 0, rc.right - rc.left,
-                     (int)(h * s_) + nc,
-                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        const int width = rc.right - rc.left, height = (int)(h * s_) + nc;
+        MONITORINFO mi{sizeof(mi)};
+        GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &mi);
+        SetWindowPos(hwnd_, nullptr,
+                     mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - width) / 2,
+                     mi.rcWork.top + ((mi.rcWork.bottom - mi.rcWork.top) - height) / 2,
+                     width, height, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
     HWND label(HINSTANCE hi, const wchar_t* text, HFONT f, COLORREF col,
@@ -330,8 +336,8 @@ private:
 
     void finish() { done_ = true; }
 
-    static HFONT makeFont(int h, int weight) {
-        return CreateFontW(-h, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+    HFONT makeFont(int h, int weight) const {
+        return CreateFontW(-(int)(h * s_), 0, 0, 0, weight, FALSE, FALSE, FALSE,
                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
@@ -340,10 +346,10 @@ private:
     // UTF-8 → UTF-16（设备 label）
     static std::wstring utf8(const std::string& u8) {
         if (u8.empty()) return std::wstring();
-        const int n = MultiByteToWideChar(CP_UTF8, 0, u8.c_str(), -1, nullptr,
+        const int n = MultiByteToWideChar(CP_UTF8, 0, u8.data(), (int)u8.size(), nullptr,
                                           0);
-        std::wstring w((size_t)(n > 1 ? n - 1 : 0), L'\0');
-        if (n > 1) MultiByteToWideChar(CP_UTF8, 0, u8.c_str(), -1, w.data(), n);
+        std::wstring w((size_t)n, L'\0');
+        if (n) MultiByteToWideChar(CP_UTF8, 0, u8.data(), (int)u8.size(), w.data(), n);
         return w;
     }
 
@@ -435,6 +441,9 @@ private:
         const bool down = (d->itemState & ODS_SELECTED) != 0;
         RECT r = d->rcItem;
         HDC dc = d->hDC;
+        // Owner-draw still receives the system button background at the corners.
+        // Paint the full rectangle before drawing the rounded button.
+        FillRect(dc, &r, bg_brush_);
         // 底色
         HBRUSH bg = CreateSolidBrush(down ? (primary ? kPrimaryDown : kBtnDown)
                                           : (primary ? kPrimary : kBtnBg));

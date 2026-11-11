@@ -10,6 +10,8 @@ $bin = Join-Path $Repo 'device\build-cross\dutyon-pet'
 if (-not (Test-Path $bin)) { Write-Host "RESULT=FAIL:missing $bin (先本地交叉构建)"; exit 1 }
 
 Write-Host "[1/3] push binary + wifi scripts + deploy.sh..."
+ssh @sshOpts $Device 'mkdir -p /opt/dutyon-src/device/build /opt/dutyon-src/device/scripts /opt/dutyon-src/.userdata'
+if ($LASTEXITCODE -ne 0) { throw 'create staging directories failed' }
 scp @sshOpts $bin "${Device}:/opt/dutyon-src/device/build/dutyon-pet"
 if ($LASTEXITCODE -ne 0) { Write-Host "RESULT=FAIL:scp push failed"; exit 1 }
 # Wi-Fi 脚本（共享锁、热点兼容性等）与 deploy.sh 需随二进制同步
@@ -20,7 +22,7 @@ scp @sshOpts "${Repo}\.userdata\deploy.sh" "${Device}:/opt/dutyon-src/.userdata/
 if ($LASTEXITCODE -ne 0) { Write-Host "RESULT=FAIL:scp deploy.sh failed"; exit 1 }
 
 Write-Host "[2/3] remote deploy + restart..."
-ssh @sshOpts $Device "bash /opt/dutyon-src/.userdata/deploy.sh >/tmp/deploy.log 2>&1 && systemctl restart dutyon && sleep 2 && systemctl is-active dutyon"
+ssh @sshOpts $Device "sed -i 's/\r$//' /opt/dutyon-src/.userdata/deploy.sh && bash /opt/dutyon-src/.userdata/deploy.sh >/tmp/deploy.log 2>&1 && systemctl restart dutyon && sleep 2 && systemctl is-active dutyon"
 if ($LASTEXITCODE -ne 0) {
     ssh @sshOpts $Device "tail -15 /tmp/deploy.log"
     Write-Host "RESULT=FAIL:deploy/restart failed"

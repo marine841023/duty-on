@@ -20,6 +20,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Version -and $Version -notmatch '^[0-9a-f]{16}$') { throw 'Invalid source version' }
 
 function Log([string]$msg) {
     if ($LogFile) { Add-Content -Path $LogFile -Value $msg -Encoding ASCII }
@@ -60,7 +61,7 @@ if (-not (Test-Path $ninja)) {
 Log 'PROGRESS=30 build'
 # 构建输出进临时文件防污染进度日志（解析器只认 PROGRESS= 行）
 $buildLog = Join-Path $env:TEMP 'dutyon-cross-build.log'
-& $cmake --build $buildDir -j *> $buildLog
+& $cmake --build $buildDir -j 4 *> $buildLog
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $bin)) {
     Get-Content $buildLog -Tail 15 | ForEach-Object { Log "  $_" }
     Fail 'cross build failed'
@@ -68,6 +69,8 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path $bin)) {
 
 # ---- 3. 推送二进制 + wifi 脚本 + deploy.sh ----
 Log 'PROGRESS=70 deploy'
+ssh @sshOpts $Device 'mkdir -p /opt/dutyon-src/device/build /opt/dutyon-src/device/scripts /opt/dutyon-src/.userdata' *> $null
+if ($LASTEXITCODE -ne 0) { Fail 'create staging directories failed' }
 scp @sshOpts $bin "${Device}:/opt/dutyon-src/device/build/dutyon-pet" *> $null
 if ($LASTEXITCODE -ne 0) { Fail 'scp binary failed' }
 scp @sshOpts `
@@ -84,7 +87,9 @@ if ($LASTEXITCODE -ne 0) { Fail 'scp deploy.sh failed' }
 
 # ---- 4. 远端部署 + 写版本哈希 + 重启 ----
 if (-not $Version) { $Version = 'unknown' }
-$remote = "bash /opt/dutyon-src/.userdata/deploy.sh >/tmp/deploy.log 2>&1 && printf '%s' '$Version' > /opt/dutyon/VERSION && systemctl restart dutyon && sleep 2 && systemctl is-active dutyon"
+# 已有 Windows 工作副本不一定符合 .gitattributes；入口本身必须先去 CRLF，
+# deploy.sh 内的脚本规范化只有入口成功运行后才会生效。
+$remote = "sed -i 's/\r$//' /opt/dutyon-src/.userdata/deploy.sh && bash /opt/dutyon-src/.userdata/deploy.sh >/tmp/deploy.log 2>&1 && printf '%s' '$Version' > /opt/dutyon/VERSION && systemctl restart dutyon && sleep 2 && systemctl is-active dutyon"
 Log 'PROGRESS=90 restart'
 ssh @sshOpts $Device $remote *> $null
 if ($LASTEXITCODE -ne 0) {

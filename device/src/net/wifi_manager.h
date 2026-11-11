@@ -23,6 +23,7 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include "net/wifi_events.h"
 
 namespace dutyon {
 
@@ -57,6 +58,8 @@ public:
 
     // client 模式拿到 IP 后非空（Online 状态）
     std::string clientIp() const;
+    std::string joinProgress() const;
+    std::string joinFailure() const;
 
     // captive portal 提交的家庭 Wi-Fi 凭据 -> 持久化并请求切 client（portal
     // 线程调用；仅置标志，实际切换在 poll() 里做，避免跨线程动射频）
@@ -108,6 +111,9 @@ private:
     // ARP 广播保活上次执行时刻（配网态每 5s 一次，见 poll()）
     long long last_arp_keepalive_ms_ = 0;
     std::string cached_ip_;          // client IP 缓存（poll 刷新）
+    WifiEvents wifi_events_;
+    // Read by the portal thread as well as the main/render thread.
+    std::atomic<int> join_failure_{0}; // 0=none, 1=authentication, 2=timeout
 };
 
 } // namespace dutyon

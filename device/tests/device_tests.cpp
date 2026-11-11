@@ -2,6 +2,7 @@
 #include "config/user_config.h"
 #include "net/wifi_credentials.h"
 #include "net/wifi_scan.h"
+#include "net/wifi_events.h"
 #include "platform/atomic_file.h"
 #include "platform/child_process.h"
 #include "render/media_limits.h"
@@ -63,6 +64,47 @@ static void wifiTests() {
                            std::string(33, 'a') + "\n" + "plain\r\n");
     check(parseWifiScanList(scan) == std::vector<std::string>{chinese, " edge ", "plain"},
           "scan list decodes before validation/deduplication without trimming");
+}
+static void wifiEventTests(const fs::path& dir) {
+    const std::string wrong = "<3>CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid=\"network\" auth_failures=1 duration=10 reason=WRONG_KEY";
+    check(wifiWrongKeyEvent(wrong), "supplicant wrong key event recognized");
+    check(!wifiWrongKeyEvent("<3>CTRL-EVENT-DISCONNECTED reason=15"), "disconnect is not necessarily wrong key");
+    check(!wifiWrongKeyEvent("<3>CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid=\" reason=WRONG_KEY\" reason=CONN_FAILED"),
+          "SSID content cannot impersonate authentication reason");
+    check(!wifiWrongKeyEvent("<3>CTRL-EVENT-SSID-TEMP-DISABLED reason=AUTH_FAILED"), "other authentication failures not mislabeled");
+    WifiEvents monitor;
+    check(!monitor.pollWrongKey((dir / "missing").string()), "missing supplicant is nonblocking");
+    const auto path = (dir / "wpa-control").string();
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
+    const int server = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    check(server >= 0 && bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0,
+          "fake supplicant control socket created");
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        const auto start = Clock::now();
+        check(!monitor.pollWrongKey(path), "silent supplicant does not signal failure");
+        check(Clock::now() - start < std::chrono::milliseconds(100), "silent supplicant cannot freeze UI");
+        sockaddr_un peer{};
+        socklen_t len = sizeof(peer);
+        char request[64]{};
+        const auto n = recvfrom(server, request, sizeof(request), 0, reinterpret_cast<sockaddr*>(&peer), &len);
+        check(n == 6 && std::string(request, n) == "ATTACH", "monitor subscribes after open/reset");
+        check(recv(server, request, sizeof(request), 0) == 4, "monitor checks supplicant liveness");
+        check(sendto(server, wrong.data(), wrong.size(), 0, reinterpret_cast<sockaddr*>(&peer), len) == (ssize_t)wrong.size(),
+              "fake authentication failure delivered to abstract client socket");
+        check(monitor.pollWrongKey(path), "control event reaches main thread");
+        check(recv(server, request, sizeof(request), 0) == 4, "drain health check");
+        const std::string connected = "<3>CTRL-EVENT-CONNECTED - Connection to 00:11:22:33:44:55 completed [id=0]";
+        check(sendto(server, wrong.data(), wrong.size(), 0, reinterpret_cast<sockaddr*>(&peer), len) > 0 &&
+              sendto(server, connected.data(), connected.size(), 0, reinterpret_cast<sockaddr*>(&peer), len) > 0,
+              "fake reconnection queued after earlier failure");
+        check(!monitor.pollWrongKey(path), "successful reconnection supersedes queued authentication error");
+        check(recv(server, request, sizeof(request), 0) == 4, "drain reconnection health check");
+        monitor.reset();
+    }
+    close(server);
+    check(!monitor.pollWrongKey(path), "terminated supplicant does not block reconnect");
 }
 static std::vector<unsigned char> gif(unsigned w, unsigned h, unsigned frames) {
     std::vector<unsigned char> b{'G','I','F','8','9','a',
@@ -203,9 +245,9 @@ int main(int, char** argv) {
     if (!made) return 1;
     const fs::path dir = made;
     try {
-        wifiTests(); mediaTests(); storageTests(dir); childTests(); audioTests(dir);
+        wifiTests(); wifiEventTests(dir); mediaTests(); storageTests(dir); childTests(); audioTests(dir);
         fs::remove_all(dir);
-        std::cout << "PASS: WiFi credentials/scan decoding, media budgets, atomic storage, config, child/audio shutdown\n";
+        std::cout << "PASS: WiFi credentials/scan/events, media budgets, atomic storage, config, child/audio shutdown\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << " (fixtures: " << dir << ")\n";

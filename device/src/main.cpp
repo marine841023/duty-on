@@ -150,7 +150,7 @@ static std::string computeSourceVersion(const std::string& repo) {
     namespace fs = std::filesystem;
     const char* kRoots[] = {"device/CMakeLists.txt", "device/src",
                             "device/scripts", "frontend/assets/device",
-                            ".userdata/deploy.sh"};
+                            ".userdata/deploy.sh", ".userdata/sync-device.ps1"};
     const fs::path base(repo);
     std::vector<fs::path> files;
     for (const char* rel : kRoots) {
@@ -234,7 +234,7 @@ static const wchar_t* syncStageLabel(const std::string& k) {
     if (k == "remote") return L"连接设备…";
     if (k == "unpack") return L"解包源码…";
     if (k == "configure") return L"配置构建…";
-    if (k == "build") return L"编译中（约 1-5 分钟）…";
+    if (k == "build") return L"正在电脑上编译设备程序…";
     if (k == "deploy") return L"部署到设备…";
     if (k == "restart") return L"重启服务…";
     if (k == "done") return L"完成";
@@ -258,7 +258,7 @@ static void launchDeviceSync(const std::string& repo,
         const std::wstring log = std::wstring(tmp) + L"dutyon-device-sync.log";
         { std::ofstream clr(log, std::ios::binary | std::ios::trunc); }  // 清旧日志
 
-        const std::wstring repoW(repo.begin(), repo.end());
+        const std::wstring repoW = fs::u8path(repo).wstring();
         const std::wstring verW(version.begin(), version.end());
         const std::wstring scriptW = repoW + L"\\.userdata\\sync-device.ps1";
         std::wstring cmd =
@@ -3159,7 +3159,8 @@ int main() {
                     info_y[4] = 544.f;
                 }
                 // ---- ① 热点信息（SSID/密码大字）----
-                task_panel.renderDate("设备配网", info_y[0], em, WIN_W, WIN_H,
+                const auto failure = wifi.joinFailure();
+                task_panel.renderDate(failure.empty() ? "设备配网" : failure, info_y[0], em, WIN_W, WIN_H,
                                       hx, hw);
                 task_panel.renderDate("① 手机连接设备热点", info_y[1], nm,
                                       WIN_W, WIN_H, hx, hw);
@@ -3198,6 +3199,10 @@ int main() {
             } else if (dev_screen == DevScreen::JoiningWifi) {
                 task_panel.renderDate("正在连接 Wi-Fi…", (float)WIN_H * 0.60f,
                                       44.f, WIN_W, WIN_H);
+                task_panel.renderDate(wifi.joinProgress(), (float)WIN_H * 0.44f,
+                                      28.f, WIN_W, WIN_H);
+                task_panel.renderDate("连接失败后会恢复设备热点", (float)WIN_H * 0.32f,
+                                      26.f, WIN_W, WIN_H);
             } else if (dev_screen == DevScreen::PairCode ||
                        dev_screen == DevScreen::FindingPc) {
                 // 已入 Wi-Fi 但尚未连上 PC：顶部恒显 6 位配对码，底部状态区分

@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <algorithm>
 #include <limits>
 #include <cstdio>
 #include <cstdlib>
@@ -171,7 +172,8 @@ bool isProbePath(const std::string& path) {
 // ---- captive portal 页面 ----
 // 移动优先的极简内联样式；深色卡片。表单 POST /configure 提交 ssid/pass。
 std::string portalPage(const std::string& ap_ssid,
-                       const std::vector<std::string>& nets) {
+                       const std::vector<std::string>& nets,
+                       const std::string& failure) {
     std::ostringstream h;
     h << R"HTML(<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">)HTML"
       << R"HTML(<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">)HTML"
@@ -181,6 +183,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .card{max-width:420px;margin:7vh auto;background:#1a1d24;border-radius:16px;padding:28px 24px;box-shadow:0 8px 32px rgba(0,0,0,.45)}
 h1{font-size:20px;margin-bottom:6px}
 .sub{font-size:13px;color:#9aa0a6;margin-bottom:20px;line-height:1.6}
+.error{color:#ffb4ab;font-size:14px;line-height:1.6;margin-bottom:16px}
 .tag{display:inline-block;font-size:12px;color:#8ab4ff;background:#1c2740;border-radius:6px;padding:2px 8px;margin-bottom:14px}
 label{display:block;font-size:13px;color:#bdc1c6;margin:14px 0 6px}
 input{width:100%;padding:12px 14px;font-size:16px;border-radius:10px;border:1px solid #33383f;background:#12151a;color:#fff}
@@ -212,6 +215,9 @@ input:focus{outline:none;border-color:#4c8dff}
     // 两步式表单：① 选网络（扫描列表点选 / 手动输入）→ ② 密码 + 连接。
     // 旧的"SSID 输入框 + 密码框同屏"信息过载，且移动端软键盘易误触。
     // 隐藏网络/未扫到时走"手动输入其他网络"分支（仍免打 SSID 之外的任何字）。
+    if (!failure.empty())
+        h << "<p class=\"error\" role=\"alert\">" << htmlEsc(failure)
+          << "。请重新选择网络并输入密码。</p>";
     h << "<h1>DutyOn 设备配网</h1>"
       << "<div class=\"tag\">热点 " << htmlEsc(ap_ssid) << "</div>"
       << "<p class=\"sub\">选择 Wi-Fi 并输入密码，提交后设备自动联网，"
@@ -299,7 +305,9 @@ b{color:#e8eaed;overflow-wrap:anywhere;word-break:break-word;white-space:pre-wra
       << "<div class=\"big\">&#10003;</div>"
       << "<h1>已收到 Wi-Fi 信息</h1>"
       << "<p>设备正在连接 <b>" << htmlEsc(ssid)
-      << "</b>……<br>此页面可以关闭，请回到设备屏幕查看配对码。</p>"
+      << "</b>……<br>请查看设备屏幕的连接进度，联网后会显示配对码。"
+         "<br>认证失败或约两分钟仍未连上时，会恢复设备热点。"
+         "请重新连接热点，打开 192.168.4.1 核对网络和密码。</p>"
       << "</div></body></html>";
     return h.str();
 }
@@ -340,7 +348,7 @@ struct WifiManager::PortalImpl {
                 res.set_header("Location", owner->portalUrl() + "/");
                 return;
             }
-            res.set_content(portalPage(owner->apSsid(), readScanList()), "text/html; charset=utf-8");
+            res.set_content(portalPage(owner->apSsid(), readScanList(), owner->joinFailure()), "text/html; charset=utf-8");
         });
         svr.Post("/configure", [this](const httplib::Request& req, httplib::Response& res) {
             std::string ssid = req.has_param("ssid") ? req.get_param_value("ssid") : "";
@@ -421,12 +429,27 @@ void WifiManager::stop() {
         return;
     }
     stopPortal();
+    wifi_events_.reset();
     if (writeFile(runDir() + "/desired-mode", "off\n"))
         spawnDetached("wifi-off.sh " + wlan_);
     setState(WifiState::Off);
 }
 
 std::string WifiManager::clientIp() const { return cached_ip_; }
+
+std::string WifiManager::joinProgress() const {
+    const auto remaining = std::max(0LL, (kJoinTimeoutMs - (nowMs() - state_since_ms_) + 999) / 1000);
+    return "第 " + std::to_string(join_attempts_ + 1) + "/" + std::to_string(kMaxJoinAttempts) +
+           " 次尝试 · 剩余 " + std::to_string(remaining) + " 秒";
+}
+
+std::string WifiManager::joinFailure() const {
+    switch (join_failure_.load()) {
+    case 1: return "Wi-Fi 认证失败，请核对密码";
+    case 2: return "Wi-Fi 连接超时，请检查网络和密码";
+    default: return "";
+    }
+}
 
 bool WifiManager::saveAndJoin(const std::string& ssid, const std::string& pass) {
     if (!validWifiCredentials(ssid, pass)) return false;
@@ -452,16 +475,28 @@ void WifiManager::poll() {
     // portal 提交了凭据 -> 切 client
     if (pending_join_.exchange(false)) {
         join_attempts_ = 0;
+        join_failure_ = 0;
         enterClient();
         return;
     }
 
     switch (state_.load()) {
     case WifiState::Joining:
+    {
+        const bool wrong_key = wifi_events_.pollWrongKey("/run/wpa_supplicant/" + wlan_);
         if (clientConnected()) {
+            join_failure_ = 0;
             setState(WifiState::Online);
+        } else if (wrong_key) {
+            // An explicit authentication failure needs corrected credentials,
+            // rather than two full rounds of waiting without feedback.
+            join_failure_ = 1;
+            printf("[Wifi] authentication failed (WRONG_KEY), fall back to AP\n");
+            join_attempts_ = 0;
+            enterAp();
         } else if (now - state_since_ms_ > kJoinTimeoutMs) {
             if (++join_attempts_ >= kMaxJoinAttempts) {
+                join_failure_ = 2;
                 printf("[Wifi] join failed x%d, fall back to AP\n", join_attempts_);
                 join_attempts_ = 0;
                 enterAp();
@@ -472,14 +507,24 @@ void WifiManager::poll() {
             }
         }
         break;
+    }
 
-    case WifiState::Online:
+    case WifiState::Online: {
+        // Drain the subscription during normal use too; keep the control socket
+        // queue bounded and reconnect if wpa_supplicant has been replaced.
+        const bool wrong_key = wifi_events_.pollWrongKey("/run/wpa_supplicant/" + wlan_);
         // wpa_supplicant 会自动重连；IP 短暂丢失回 Joining 等待，超时再回退 AP
         if (!clientConnected()) {
             printf("[Wifi] link lost, re-joining\n");
-            setState(WifiState::Joining);
+            if (wrong_key) {
+                join_failure_ = 1;
+                enterAp();
+            } else {
+                setState(WifiState::Joining);
+            }
         }
         break;
+    }
 
     case WifiState::ApProvisioning:
         // 脚本最多等接口 10s + 扫描 8s，宽限后再检查。进程失败只修复
@@ -588,6 +633,7 @@ void WifiManager::loadCreds() {
 }
 
 void WifiManager::enterAp() {
+    wifi_events_.reset();
     stopPortal();  // 若从 client 回退，先停旧 portal（下面重起）
     // 先停 client 侧守护进程（脚本内部会 kill wpa_supplicant/dhcpcd）
     // hostapd.conf：WPA2-PSK，SSID/口令由 device_id 派生。country_code：
@@ -632,6 +678,7 @@ void WifiManager::enterAp() {
 }
 
 void WifiManager::enterClient() {
+    wifi_events_.reset();
     stopPortal();  // 释放 80 端口 + 停 portal 线程
     std::string ssid, pass;
     {
@@ -703,6 +750,7 @@ void WifiManager::resetToAp() {
     fs::remove(wifiJsonPath(), ec);
     pending_join_ = false;
     join_attempts_ = 0;
+    join_failure_ = 0;
     printf("[Wifi] reset to AP provisioning (wifi.json removed)\n");
     enterAp();
 }
