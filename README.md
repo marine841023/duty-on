@@ -39,7 +39,7 @@
 | 🖥 Windows desktop v2.0.12 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
 | 📟 Device source | [v2.0-dev branch](https://github.com/marine841023/duty-on/tree/v2.0-dev), `device/` dir (cross-compiled — see "Device build" below) |
 
-Current source: **v2.0.13** — [changes and validation](docs/release-notes/v2.0.13.md).
+Current source: **v2.0.14** — [changes and validation](docs/release-notes/v2.0.14.md).
 The download links above lead to published releases; local builds go to `tools/dist/`.
 
 </div>
@@ -222,7 +222,8 @@ does not establish activity. See the [Hook review](docs/hook-review.md) for deta
 | `UserPromptSubmit` | user sends a message | → working |
 | `PreToolUse` / `PostToolUse` | AI tool runs / finishes | → working |
 | `Notification` | confirmation needed | → alert |
-| `Stop` | AI task completed | → idle |
+| `Stop` | Current agent completed; active children remain tracked | → idle when all agents finish |
+| `PermissionResolved` | OpenCode permission/question answered | Clears only the matching request |
 | `PermissionRequest` / `request_user_input` tool | Codex awaits permission / input | → alert |
 | `Interrupt` | Codex turn interrupted | → idle |
 | `SessionEnd` | session ended | remove session |

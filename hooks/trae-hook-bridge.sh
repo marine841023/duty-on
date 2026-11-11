@@ -40,6 +40,12 @@ write_log "INVOKED pid=$$"
 # commands bake it into $2 (normalized below).
 ide="${1:-}"
 hook_event="${2:-}"
+if [ "$ide" = "cursor" ]; then
+  case "$hook_event" in
+    preToolUse|subagentStart) printf '%s\n' '{"permission":"allow"}' ;;
+    beforeSubmitPrompt) printf '%s\n' '{"continue":true}' ;;
+  esac
+fi
 
 # Read JSON from stdin.
 stdin_text=$(cat)
@@ -62,13 +68,21 @@ if [ "$ide" = "cursor" ] && [ -n "$hook_event" ]; then
     beforeSubmitPrompt) hook_event="UserPromptSubmit" ;;
     preToolUse) hook_event="PreToolUse" ;;
     postToolUse) hook_event="PostToolUse" ;;
+    postToolUseFailure) hook_event="PostToolUseFailure" ;;
+    sessionEnd) hook_event="SessionEnd" ;;
+    subagentStart) hook_event="SubagentStart" ;;
+    subagentStop) hook_event="SubagentStop" ;;
+    preCompact) hook_event="PreCompact" ;;
     stop) hook_event="Stop" ;;
   esac
   patched=""
   if command -v jq >/dev/null 2>&1; then
     patched=$(printf '%s' "$stdin_text" | jq -c --arg ev "$hook_event" '
       .hook_event_name = $ev
-      | .session_id = ((.session_id // .conversation_id // ""))
+      | .session_id = ((.conversation_id // .session_id // ""))
+      | .turn_id = (.generation_id // .turn_id)
+      | .agent_id = (.subagent_id // .agent_id)
+      | .parent_session_id = (.parent_conversation_id // .parent_session_id)
       | .cwd = ((.cwd // (.workspace_roots[0] // "")))
       | .tool_name = ((.tool_name // .toolInfo.name // .tool.name))
     ' 2>/dev/null)
@@ -77,7 +91,9 @@ if [ "$ide" = "cursor" ] && [ -n "$hook_event" ]; then
 import json, os, sys
 e = json.load(sys.stdin)
 e["hook_event_name"] = os.environ["EV"]
-e.setdefault("session_id", e.get("conversation_id") or "")
+e["session_id"] = e.get("conversation_id") or e.get("session_id") or ""
+for src, dst in (("generation_id", "turn_id"), ("subagent_id", "agent_id"), ("parent_conversation_id", "parent_session_id")):
+    if e.get(src): e[dst] = e[src]
 e.setdefault("cwd", (e.get("workspace_roots") or [""])[0])
 if "tool_name" not in e:
     ti = e.get("toolInfo") or e.get("tool") or {}
@@ -145,7 +161,8 @@ if command -v jq >/dev/null 2>&1; then
          .key == "project_path" or .key == "project_name" or .key == "cwd" or
          .key == "ide" or .key == "timestamp" or .key == "tool_name" or
          .key == "tool_use_id" or .key == "notification_type" or .key == "message" or
-         .key == "source" or .key == "turn_id"))' 2>/dev/null)
+         .key == "source" or .key == "turn_id" or .key == "agent_id" or
+         .key == "parent_session_id" or .key == "request_id"))' 2>/dev/null)
 elif command -v python3 >/dev/null 2>&1; then
   body=$(printf '%s' "$stdin_text" | PYTHONIOENCODING=utf-8 python3 -c '
 import sys, json
@@ -157,7 +174,7 @@ e["project_name"] = sys.argv[2]
 e["timestamp"] = int(sys.argv[3])
 if sys.argv[4]:
     e["ide"] = sys.argv[4]
-keys = ("session_id", "hook_event_name", "project_path", "project_name", "cwd", "ide", "timestamp", "tool_name", "tool_use_id", "notification_type", "message", "source", "turn_id")
+keys = ("session_id", "hook_event_name", "project_path", "project_name", "cwd", "ide", "timestamp", "tool_name", "tool_use_id", "notification_type", "message", "source", "turn_id", "agent_id", "parent_session_id", "request_id")
 print(json.dumps({key: e[key] for key in keys if key in e}, separators=(",", ":")))
 ' "$project_dir" "$project_name" "$timestamp" "$ide" 2>/dev/null)
 fi

@@ -22,6 +22,13 @@ installed hook command so the pet can badge each session with its source
 
 param([string]$Ide = '', [string]$HookEvent = '')
 
+# Cursor requires a valid response from observer hooks even when DutyOn is
+# unavailable. This hook adds no restriction; Cursor's own permissions apply.
+if ($Ide -eq 'cursor') {
+  if ($HookEvent -in @('preToolUse', 'subagentStart')) { [Console]::Out.WriteLine('{"permission":"allow"}') }
+  elseif ($HookEvent -eq 'beforeSubmitPrompt') { [Console]::Out.WriteLine('{"continue":true}') }
+}
+
 $ErrorActionPreference = 'SilentlyContinue'
 
 # --- Diagnostic logging (never breaks the hook on failure) ---
@@ -101,6 +108,11 @@ if (-not [string]::IsNullOrWhiteSpace($HookEvent)) {
     'beforeSubmitPrompt' { 'UserPromptSubmit' }
     'preToolUse'         { 'PreToolUse' }
     'postToolUse'        { 'PostToolUse' }
+    'postToolUseFailure' { 'PostToolUseFailure' }
+    'sessionEnd'        { 'SessionEnd' }
+    'subagentStart'     { 'SubagentStart' }
+    'subagentStop'      { 'SubagentStop' }
+    'preCompact'        { 'PreCompact' }
     'stop'               { 'Stop' }
     default              { $HookEvent }
   }
@@ -108,9 +120,17 @@ if (-not [string]::IsNullOrWhiteSpace($HookEvent)) {
 }
 # Cursor keys sessions by conversation_id; the state machine keys by
 # session_id, so backfill to keep a session's events correlatable.
-if ($Ide -eq 'cursor' -and [string]::IsNullOrWhiteSpace($event.session_id)) {
+if ($Ide -eq 'cursor' -and -not [string]::IsNullOrWhiteSpace($event.conversation_id)) {
   $sid = $event.conversation_id
   $event | Add-Member -NotePropertyName 'session_id' -NotePropertyValue $sid -Force
+}
+if ($Ide -eq 'cursor') {
+  foreach ($pair in @(@('generation_id', 'turn_id'), @('subagent_id', 'agent_id'),
+                      @('parent_conversation_id', 'parent_session_id'))) {
+    if (-not [string]::IsNullOrWhiteSpace($event.($pair[0]))) {
+      $event | Add-Member -NotePropertyName $pair[1] -NotePropertyValue $event.($pair[0]) -Force
+    }
+  }
 }
 # Cursor tool payloads may nest the tool name (toolInfo.name / tool.name);
 # the state machine reads tool_name for the AskUserQuestion alert signal, so
@@ -182,7 +202,8 @@ if ([string]::IsNullOrWhiteSpace($event.session_id) -or
 $payload = @{}
 foreach ($key in @('session_id', 'hook_event_name', 'project_path', 'project_name',
                   'cwd', 'ide', 'timestamp', 'tool_name', 'tool_use_id',
-                  'notification_type', 'message', 'source', 'turn_id')) {
+                  'notification_type', 'message', 'source', 'turn_id',
+                  'agent_id', 'parent_session_id', 'request_id')) {
   if ($null -ne $event.$key) { $payload[$key] = $event.$key }
 }
 $bodyJson = $payload | ConvertTo-Json -Depth 4 -Compress

@@ -49,7 +49,7 @@ constexpr uint64_t kBridgeTimeoutSec = 5;
 inline const char* const kHookEvents[] = {
     "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "Notification",
 };
-constexpr int kHookEventsCount = 6;
+constexpr int kHookEventsCount = sizeof(kHookEvents) / sizeof(kHookEvents[0]);
 
 // 写入 ~/.qoder 与 ~/.qoder-cn 的 settings.json 的事件。经对撞实测（Qoder IDE
 // 与 Qoder CN IDE 同为 1.32.0、同一 agent 二进制），两版 IDE 实际派发的 hook
@@ -65,7 +65,7 @@ inline const char* const kQoderHookEvents[] = {
     "PermissionRequest", "Notification", "SubagentStart", "SubagentStop", "PreCompact",
     "Stop", "SessionEnd",
 };
-constexpr int kQoderHookEventsCount = 12;
+constexpr int kQoderHookEventsCount = sizeof(kQoderHookEvents) / sizeof(kQoderHookEvents[0]);
 
 // 写入 ~/.cursor/hooks.json 的事件：Cursor 用自己的 camelCase 事件名和更
 // 扁平的 schema；桥接脚本把它们归一化为状态机认识的规范名：
@@ -73,8 +73,9 @@ constexpr int kQoderHookEventsCount = 12;
 //   preToolUse -> PreToolUse / postToolUse -> PostToolUse / stop -> Stop
 inline const char* const kCursorHookEvents[] = {
     "sessionStart", "beforeSubmitPrompt", "preToolUse", "postToolUse", "stop",
+    "sessionEnd", "postToolUseFailure", "subagentStart", "subagentStop", "preCompact",
 };
-constexpr int kCursorHookEventsCount = 5;
+constexpr int kCursorHookEventsCount = sizeof(kCursorHookEvents) / sizeof(kCursorHookEvents[0]);
 
 // 写入 ~/.codex/hooks.json 的事件：与 Trae 同名同 schema，无需归一化。
 inline const char* const kCodexHookEvents[] = {
@@ -88,13 +89,13 @@ constexpr int kCodexHookEventsCount = sizeof(kCodexHookEvents) / sizeof(kCodexHo
 constexpr const char* kOpencodePluginSubdir = ".config/opencode/plugins";
 constexpr const char* kOpencodePluginFilename = "dutyon-bridge.js";
 
-// 调用即代表"等待用户输入"的工具（Qoder 无 Notification 事件，AskUserQuestion
+// 调用即代表"等待用户输入"的同步工具（AskUserQuestion
 // 就是它的 alert 信号：PreToolUse -> confirmation-needed，用户作答后的
 // PostToolUse -> thinking）。
 inline const char* const kAskUserTools[] = {
     "AskUserQuestion", "AskQuestion", "ask_question", "askQuestion", "request_user_input",
 };
-constexpr int kAskUserToolsCount = 5;
+constexpr int kAskUserToolsCount = sizeof(kAskUserTools) / sizeof(kAskUserTools[0]);
 
 // 必须在 IDE 里点"运行"确认后才执行的工具（computer-use 卡片等）。
 // Claude 风格 hook 在确认卡片出现时就触发 PreToolUse —— 即代理正被阻塞
@@ -107,13 +108,13 @@ inline const char* const kConfirmTools[] = {
     // browser/desktop 自动化家族
     "browser_use", "browser-use", "browserUse", "BrowserUse", "browser", "Browser",
 };
-constexpr int kConfirmToolsCount = 16;
+constexpr int kConfirmToolsCount = sizeof(kConfirmTools) / sizeof(kConfirmTools[0]);
 
-// ===== Notification 分类（StateManager::checkConfirmationNeeded 用）=====
+// ===== Notification 分类（StateManager 事件聚合用）=====
 // 官方完成类仅 idle_prompt（智能体完成当前任务）；其余为其他 IDE/旧版
 // 兼容名。见 https://docs.trae.cn/ide/reference-for-hooks-configuration
 inline const char* const kNotificationCompleteTypes[] = {"task_complete", "idle", "done", "idle_prompt"};
-constexpr int kNotificationCompleteTypesCount = 4;
+constexpr int kNotificationCompleteTypesCount = sizeof(kNotificationCompleteTypes) / sizeof(kNotificationCompleteTypes[0]);
 // 官方等待用户类（TraeCode 文档全部 4 个）：permission_prompt（工具待确认）、
 // document_review（Plan/Spec 文档审阅）、ask_user_question（提问等补充
 // 信息）、browser_interaction（浏览器交互等待）。permission_request /
@@ -122,14 +123,7 @@ inline const char* const kNotificationConfirmTypes[] = {
     "permission_request", "permission_prompt", "confirmation", "input_needed",
     "document_review", "ask_user_question", "browser_interaction",
 };
-constexpr int kNotificationConfirmTypesCount = 7;
-// 其中定义上绑定 in-flight 工具的子集（迟于 PostToolUse 送达即过期，
-// 见 StateManager 乱序防护）：permission_prompt 类。document_review /
-// browser_interaction / ask_user_question 是 UI 流程等待，不在此列。
-inline const char* const kNotificationToolBoundConfirmTypes[] = {
-    "permission_request", "permission_prompt", "confirmation", "input_needed",
-};
-constexpr int kNotificationToolBoundConfirmTypesCount = 4;
+constexpr int kNotificationConfirmTypesCount = sizeof(kNotificationConfirmTypes) / sizeof(kNotificationConfirmTypes[0]);
 
 // 表明 Notification 在请求用户确认的关键词（覆盖"运行命令/执行命令"措辞 ——
 // Trae IDE 的 "Trae wants to run command: ..." 即使没有 tool_name 也要触发 alert）
@@ -139,11 +133,9 @@ inline const char* const kNotificationConfirmKeywords[] = {
     "run command", "execute command", "wants to run", "want to run",
     "wants to execute", "want to execute",
 };
-constexpr int kNotificationConfirmKeywordsCount = 18;
+constexpr int kNotificationConfirmKeywordsCount = sizeof(kNotificationConfirmKeywords) / sizeof(kNotificationConfirmKeywords[0]);
 
-// 歧义 Notification（working 中收到、无法分类）的处理：
-//   false = 当作任务完成（-> idle），避免误报 alert（默认）
-constexpr bool kAlertOnAmbiguousNotification = false;
+// 歧义 Notification 只作信息更新，不结束工作或清理其他确认请求。
 
 // ===== IDE 窗口扫描 =====
 // 自适应间隔：有会话 4s，无会话 15s。

@@ -94,7 +94,7 @@ Plan/Spec 文档审阅、智能体提问（AskUserQuestion 通知形态）、浏
 
 乱序防护（`state_manager.cpp`）：
 
-- `permission_prompt` 类（`kNotificationToolBoundConfirmTypes`：permission_request / permission_prompt / confirmation / input_needed）定义上绑定 in-flight 工具（payload 带 `tool_use_id`）→ 到达时 `pending_tool` 已空即判定过期，忽略（保持现状态）
+- 历史方案（已由 v2.0.14 替代）：`permission_prompt` 类曾在 pending 为空时直接忽略。这会漏掉早于 PreToolUse 的合法权限请求。现仅凭同一代理下同一工具调用的已完成记录、或同一请求的已答复记录抑制迟到提醒，不再以空账本推断过期。
 - **UI 流程类不设此防护**：document_review / browser_interaction / ask_user_question 是界面流程等待，不一定有 in-flight 工具，无 pending 也必须警报
 - 依赖故障 1 的修复（pending 记账 + Notification 不清账）——若 Notification 清账，合法的待确认通知会被误判过期
 

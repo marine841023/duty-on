@@ -1,4 +1,4 @@
-// 会话状态机 —— src-tauri/src/state_manager.rs 的 C++ 移植（逻辑 1:1）。
+// Hook 状态机：按会话、代理、工具调用及确认请求独立跟踪并聚合。
 
 #include "backend/state_manager.h"
 
@@ -81,7 +81,8 @@ std::optional<HookEvent> HookEvent::fromJson(const nlohmann::json& j) {
     const auto& name = ev.hook_event_name;
     if (!containsStr(bc::kHookEvents, bc::kHookEventsCount, name) &&
         !containsStr(bc::kQoderHookEvents, bc::kQoderHookEventsCount, name) &&
-        !containsStr(bc::kCodexHookEvents, bc::kCodexHookEventsCount, name)) return std::nullopt;
+        !containsStr(bc::kCodexHookEvents, bc::kCodexHookEventsCount, name) &&
+        name != "PermissionResolved") return std::nullopt;
     ev.project_path = read_str("project_path");
     ev.project_name = read_str("project_name");
     ev.cwd = read_str("cwd");
@@ -97,6 +98,9 @@ std::optional<HookEvent> HookEvent::fromJson(const nlohmann::json& j) {
     ev.message = read_optional("message");
     ev.source = read_optional("source");
     ev.turn_id = read_optional("turn_id");
+    ev.agent_id = read_optional("agent_id");
+    ev.parent_session_id = read_optional("parent_session_id");
+    ev.request_id = read_optional("request_id");
     if (auto it = j.find("timestamp"); it != j.end() && it->is_number_unsigned())
         ev.timestamp = it->get<uint64_t>();
     return ev;
@@ -117,247 +121,195 @@ void StateManager::handleHookEvent(const HookEvent& ev) {
 void StateManager::handleHookEventLocked(const HookEvent& ev) {
     const uint64_t now = nowMs();
 
-    // SessionEnd 是删除信号；迟到的工具/模型事件不能重建已结束的会话。
-    if (ev.hook_event_name == "SessionEnd") {
-        sessions_.erase(ev.session_id);
-        window_miss_counts_.erase(ev.session_id);
-        cli_miss_counts_.erase(ev.session_id);
-        ended_sessions_[ev.session_id] = now;
+    const std::string& name = ev.hook_event_name;
+    const std::string sid = ev.parent_session_id.value_or(ev.session_id);
+    const bool child_session = sid != ev.session_id;
+    // Separate actors inside one IDE conversation. OpenCode children have their
+    // own session IDs; Trae/Qoder children share a session and carry agent_id.
+    const bool child_lifecycle = name == "SubagentStart" || name == "SubagentStop";
+    std::string actor_id = child_session ? ev.session_id : ev.agent_id.value_or("");
+    // Cursor currently supplies subagent_id on Start but not on Stop. Observe
+    // these as conversation activity instead of creating an unfinishable actor.
+    if (child_lifecycle && ev.ide == IdeKind::Cursor) actor_id.clear();
+    if (name == "SessionEnd" && !child_session && !ev.agent_id) {
+        sessions_.erase(sid);
+        window_miss_counts_.erase(sid);
+        cli_miss_counts_.erase(sid);
+        ended_sessions_[sid] = now;
         last_event_at_ = now;
         recomputeStateLocked();
         return;
     }
-    if ((ev.hook_event_name == "SessionStart" && ev.source != "compact") ||
-        ev.hook_event_name == "UserPromptSubmit") {
-        ended_sessions_.erase(ev.session_id);
-    } else if (ended_sessions_.count(ev.session_id)) {
+    const bool restart = name == "UserPromptSubmit" ||
+                         (name == "SessionStart" && ev.source != "compact");
+    if (restart && !child_session && !child_lifecycle) ended_sessions_.erase(sid);
+    else if (ended_sessions_.count(sid)) return;
+
+    auto [it, inserted] = sessions_.try_emplace(sid);
+    Session& session = it->second;
+    if (inserted) {
+        session.session_id = sid;
+        session.project_name = "Unknown";
+    }
+    if (!child_session && !child_lifecycle && restart && ev.agent_id &&
+        !session.root_agent_id) session.root_agent_id = ev.agent_id;
+    if (!child_session && ev.agent_id == session.root_agent_id) actor_id.clear();
+    if (name == "SessionEnd" && actor_id.empty()) {
+        sessions_.erase(sid);
+        window_miss_counts_.erase(sid);
+        cli_miss_counts_.erase(sid);
+        ended_sessions_[sid] = now;
+        last_event_at_ = now;
+        recomputeStateLocked();
         return;
     }
-
-    // 取出或创建会话
-    auto it = sessions_.find(ev.session_id);
-    if (it == sessions_.end()) {
-        Session s;
-        s.session_id = ev.session_id;
-        s.project_path = !ev.project_path.empty() ? ev.project_path : ev.cwd;
-        s.project_name = !ev.project_name.empty()
-                             ? ev.project_name
-                             : [](const std::string& path) {
-                                   if (path.empty()) return std::string("Unknown");
-                                   std::string norm;
-                                   for (char c : path) norm += (c == '\\') ? '/' : c;
-                                   std::string last;
-                                   size_t pos = 0;
-                                   while (pos <= norm.size()) {
-                                       size_t next = norm.find('/', pos);
-                                       std::string seg = norm.substr(
-                                           pos, next == std::string::npos ? std::string::npos
-                                                                          : next - pos);
-                                       if (!seg.empty()) last = seg;
-                                       if (next == std::string::npos) break;
-                                       pos = next + 1;
-                                   }
-                                   return last.empty() ? std::string("Unknown") : last;
-                               }(s.project_path);
-        s.ide = ev.ide;
-        s.status = SessionStatus::Idle;
-        s.last_event = ev.hook_event_name;
-        s.last_event_time = now;
-        it = sessions_.emplace(ev.session_id, std::move(s)).first;
-    }
-    Session& session = it->second;
-
-    const std::string& name = ev.hook_event_name;
+    if (restart && actor_id.empty()) session.interrupted = false;
+    else if (session.interrupted) return;
+    // Anonymous subagent lifecycles are deliberately not counted: without an
+    // identity a duplicate Start or out-of-order Stop cannot be paired safely.
+    // They still refresh Thinking; identified children get independent ledgers.
+    Actor& actor = session.actors[actor_id];
     const bool codex = ev.ide.value_or(session.ide.value_or(IdeKind::Trae)) == IdeKind::Codex;
-    if (codex && name != "UserPromptSubmit" &&
-        !(name == "SessionStart" && ev.source != "compact") &&
-        ev.turn_id && session.turn_id &&
-        ev.turn_id != session.turn_id) return; // 上一轮的并行 hook 迟到
-    if (codex && session.turn_finished && name != "UserPromptSubmit" &&
-        !(name == "SessionStart" && ev.source != "compact")) return;
-    if (ev.turn_id) session.turn_id = ev.turn_id;
+    if (codex && !restart && !child_lifecycle && ev.turn_id && actor.turn_id &&
+        ev.turn_id != actor.turn_id) return;
+    if (actor.finished && !restart) return;
+    if (ev.turn_id && !child_lifecycle) actor.turn_id = ev.turn_id;
 
-    // 更新会话信息（后到事件缺字段时保留旧的非空值，避免会话丢标签）
     if (!ev.project_name.empty()) session.project_name = ev.project_name;
     if (!ev.project_path.empty()) session.project_path = ev.project_path;
     else if (!ev.cwd.empty()) session.project_path = ev.cwd;
-    if (ev.ide.has_value()) session.ide = ev.ide;
-    session.last_event = ev.hook_event_name;
+    if (session.project_name == "Unknown" && !session.project_path.empty()) {
+        auto path = session.project_path;
+        std::replace(path.begin(), path.end(), '\\', '/');
+        while (!path.empty() && path.back() == '/') path.pop_back();
+        session.project_name = path.substr(path.find_last_of('/') + 1);
+    }
+    if (ev.ide) session.ide = ev.ide;
+    session.last_event = name;
     session.last_event_time = now;
     last_event_at_ = now;
 
-    const bool ask_user_tool =
-        ev.tool_name.has_value() &&
+    const bool identified_tool = ev.tool_use_id.has_value();
+    const std::string tool_key = identified_tool ? "id:" + *ev.tool_use_id
+                                               : "name:" + ev.tool_name.value_or("unknown");
+    const bool ask_user_tool = ev.tool_name &&
         containsStr(bc::kAskUserTools, bc::kAskUserToolsCount, *ev.tool_name);
-    const bool confirm_tool =
-        !codex && ev.tool_name.has_value() &&
+    // A browser/computer tool is not itself evidence of a permission prompt.
+    // Retain this legacy fallback only for Trae/Qoder, which expose such cards.
+    const auto ide = session.ide.value_or(IdeKind::Trae);
+    const bool confirm_tool = (ide == IdeKind::Trae || ide == IdeKind::Qoder) && ev.tool_name &&
         containsStr(bc::kConfirmTools, bc::kConfirmToolsCount, *ev.tool_name);
-    const auto tool_key = ev.tool_use_id.value_or(ev.tool_name.value_or("unknown"));
-    auto alert_msg = [&]() {
-        if (ev.tool_name.has_value()) return "需要确认: " + *ev.tool_name;
-        if (ev.message.has_value()) return *ev.message;
-        return std::string("需要你的确认");
+    auto add_confirmation = [&]() {
+        if (ev.request_id && actor.resolved_requests.count(*ev.request_id)) return;
+        std::optional<std::string> bound_tool;
+        if (ev.tool_use_id || ev.tool_name) bound_tool = tool_key;
+        else if (!ev.request_id && actor.pending_tools.size() == 1)
+            bound_tool = *actor.pending_tools.begin();
+        const std::string key = ev.request_id ? "request:" + *ev.request_id :
+            bound_tool.value_or("notification:" + ev.notification_type.value_or("unknown"));
+        const std::string message = ev.tool_name ? "需要确认: " + *ev.tool_name :
+            ev.message.value_or("需要你的确认");
+        if (actor.confirmations.emplace(key, Confirmation{bound_tool, message}).second) {
+            ++alert_seq_;
+            last_alert_time_ = now;
+        }
     };
-
-    // 工具执行记账：PreToolUse 记 pending（工具开始跑）、PostToolUse(Failure)
-    // 销账（结束）。非 pending 期间静默才可能是真空闲。Pre/Post 之间完全无
-    // 事件是常态（长构建/长命令/子代理长任务），降级超时见
-    // bc::kToolRunningTimeout。SessionStart/UserPromptSubmit/Stop 到来说明
-    // 回合推进，兜底清账。Notification/SubagentStart/SubagentStop/PreCompact
-    // 例外：异步或生命周期事件、不代表在途工具收尾（permission_prompt 到达
-    // 时工具仍在等待批准 = 仍 in-flight；子代理工具另发 Pre/PostToolUse 记账；
-    // 压缩在回合之间），不得清账 —— 否则合法的待确认通知会被乱序防护误判为
-    // 过期、在途工具会丢掉 kToolRunningTimeout 放宽而被提前降级。
-    if (name == "PreToolUse") {
-        // 有 ID 的重复上报幂等；没有 ID 时按工具名计数。
-        if (!ev.tool_use_id || !session.pending_tools.count(tool_key))
-            session.pending_tools.insert(tool_key);
-    } else if (name == "PostToolUse" || name == "PostToolUseFailure") {
-        auto pending = session.pending_tools.find(tool_key);
-        if (pending != session.pending_tools.end()) session.pending_tools.erase(pending);
-        session.confirmation_tools.erase(tool_key);
-    } else if (name == "UserPromptSubmit" || name == "Stop" || name == "Interrupt" ||
-               (name == "SessionStart" && ev.source != "compact")) {
-        session.pending_tools.clear();
-        session.confirmation_tools.clear();
-    }
-    if (name == "SessionStart" && ev.source != "compact") {
-        session.turn_finished = false;
-        session.turn_id = ev.turn_id;
-        session.status = SessionStatus::Idle;
-        session.alert_message.reset();
-    } else if (name == "UserPromptSubmit") {
-        session.turn_finished = false;
-        session.turn_id = ev.turn_id;
-        session.status = SessionStatus::Thinking;
-        session.alert_message.reset();
+    auto finish_tool = [&]() {
+        auto pending = actor.pending_tools.find(tool_key);
+        if (pending != actor.pending_tools.end()) actor.pending_tools.erase(pending);
+        if (identified_tool) {
+            // Bound history used only for duplicate/late events, never as work.
+            if (actor.completed_tools.size() >= 512) actor.completed_tools.erase(actor.completed_tools.begin());
+            actor.completed_tools.insert(tool_key);
+        }
+        for (auto c = actor.confirmations.begin(); c != actor.confirmations.end();) {
+            if (c->second.tool_key == tool_key) c = actor.confirmations.erase(c);
+            else ++c;
+        }
+    };
+    if (restart) {
+        actor = Actor{};
+        actor.turn_id = ev.turn_id;
+        actor.status = name == "UserPromptSubmit" ? SessionStatus::Thinking : SessionStatus::Idle;
     } else if (name == "PreToolUse") {
-        if (ask_user_tool || confirm_tool) {
-            // 代理被阻塞等待用户回答/点击"运行"（Qoder 无 Notification 事件；
-            // computer-use 卡片出现即等待）
-            session.confirmation_tools.insert(tool_key);
-            session.status = SessionStatus::ConfirmationNeeded;
-            session.alert_message = alert_msg();
-        } else if (session.status != SessionStatus::ConfirmationNeeded) {
-            session.status = SessionStatus::ToolUse;
-            session.alert_message.reset();
+        if (!(identified_tool && actor.completed_tools.count(tool_key))) {
+            if (!identified_tool || !actor.pending_tools.count(tool_key)) actor.pending_tools.insert(tool_key);
+            if (ask_user_tool || confirm_tool) add_confirmation();
+            actor.status = SessionStatus::ToolUse;
         }
     } else if (name == "PostToolUse" || name == "PostToolUseFailure") {
-        if (!session.confirmation_tools.empty()) {
-            session.status = SessionStatus::ConfirmationNeeded;
-        } else if (session.status == SessionStatus::ToolUse ||
-                   session.status == SessionStatus::Working ||
-                   session.status == SessionStatus::Thinking ||
-                   session.status == SessionStatus::ConfirmationNeeded) {
-            // 工具完成/失败 —— 都 -> Thinking：成功据结果继续、失败据错误
-            // 继续（PostToolUseFailure 是 Qoder IDE 实测支持的事件）。包括
-            // ConfirmationNeeded：工具收尾意味着用户已批准（或回答了挂起的
-            // ask），保持 alert 会永远响
-            session.status = session.pending_tools.empty() ? SessionStatus::Thinking
-                                                         : SessionStatus::ToolUse;
-            session.alert_message.reset();
+        finish_tool();
+        actor.status = SessionStatus::Thinking;
+    } else if (name == "PermissionRequest" || name == "Notification") {
+        bool needs_confirmation = name == "PermissionRequest";
+        bool complete = false;
+        if (ev.notification_type) {
+            needs_confirmation = needs_confirmation || containsStr(bc::kNotificationConfirmTypes,
+                bc::kNotificationConfirmTypesCount, *ev.notification_type);
+            complete = containsStr(bc::kNotificationCompleteTypes,
+                bc::kNotificationCompleteTypesCount, *ev.notification_type);
         }
-        // Idle（如手动中止后的 Stop）时迟到的 PostToolUse(Failure) 不得复活会话
-    } else if (name == "Notification") {
-        // check_confirmation_needed 三级判定
-        bool needs_confirmation = false;
-        bool stale_ignore = false;  // 过期乱序通知：保持现状态，只当没来过
-        {
-            // 1. 显式类型分类（最高优先级）
-            bool classified = false;
-            if (ev.notification_type.has_value()) {
-                const std::string& nt = *ev.notification_type;
-                if (containsStr(bc::kNotificationCompleteTypes,
-                                bc::kNotificationCompleteTypesCount, nt)) {
-                    needs_confirmation = false;
-                    classified = true;
-                } else if (containsStr(bc::kNotificationConfirmTypes,
-                                       bc::kNotificationConfirmTypesCount, nt)) {
-                    needs_confirmation = true;
-                    classified = true;
-                    // 过期乱序防护：Notification 是异步事件（官方文档：不阻塞
-                    // 主流程），permission_prompt 类可迟于对应工具的
-                    // PostToolUse 送达 —— 此时 pending_tool 已清空，若仍置
-                    // alert 会永久卡死（ConfirmationNeeded 豁免所有超时）。
-                    // permission_prompt 定义上绑定 in-flight 工具（带
-                    // tool_use_id），无 pending 即过期，忽略。
-                    // document_review / browser_interaction / ask_user_question
-                    // 是 UI 流程等待，不一定有 in-flight 工具，不设此防护。
-                    if (session.pending_tools.empty() &&
-                        containsStr(bc::kNotificationToolBoundConfirmTypes,
-                                    bc::kNotificationToolBoundConfirmTypesCount, nt)) {
-                        stale_ignore = true;
-                    }
-                }
-            }
-            // 2. 会话状态上下文
-            if (!classified && session.status == SessionStatus::ConfirmationNeeded) {
-                needs_confirmation = false;
-                if (ev.message.has_value()) {
-                    const std::string lower = asciiLower(*ev.message);
-                    for (int i = 0; i < bc::kNotificationConfirmKeywordsCount; i++)
-                        if (lower.find(asciiLower(bc::kNotificationConfirmKeywords[i])) !=
-                            std::string::npos) {
-                            needs_confirmation = true;
-                            break;
-                        }
-                }
-                classified = true;  // confirmation-needed + 歧义 = 完成通知
-            }
-            // 3. 非 confirmation 状态（idle/working）：tool_name 暗示待授权
-            if (!classified) {
-                if (ev.tool_name.has_value()) {
-                    needs_confirmation = true;
-                } else if (ev.message.has_value()) {
-                    const std::string& msg = *ev.message;
-                    const std::string lower = asciiLower(msg);
-                    for (int i = 0; i < bc::kNotificationConfirmKeywordsCount; i++) {
-                        if (lower.find(asciiLower(bc::kNotificationConfirmKeywords[i])) !=
-                            std::string::npos) {
-                            needs_confirmation = true;
-                            break;
-                        }
-                    }
-                    if (!needs_confirmation && matchesCmdPattern(msg))
+        if (!needs_confirmation && !complete) {
+            needs_confirmation = ev.tool_name.has_value();
+            if (ev.message) {
+                const auto lower = asciiLower(*ev.message);
+                for (int i = 0; i < bc::kNotificationConfirmKeywordsCount; ++i)
+                    if (lower.find(asciiLower(bc::kNotificationConfirmKeywords[i])) != std::string::npos)
                         needs_confirmation = true;
-                }
-                if (!needs_confirmation) needs_confirmation = bc::kAlertOnAmbiguousNotification;
+                if (matchesCmdPattern(*ev.message)) needs_confirmation = true;
             }
         }
-        if (stale_ignore) {
-            // 过期乱序通知：保持现状态（见上方防护注释）
-        } else if (needs_confirmation) {
-            session.status = SessionStatus::ConfirmationNeeded;
-            session.alert_message = alert_msg();
-        } else {
-            // 任务完成通知 -> 直接 Idle
-            session.status = SessionStatus::Idle;
-            session.alert_message.reset();
+        // Permission may precede PreToolUse. Only positive evidence of that
+        // exact call completing makes it stale; an empty ledger is not evidence.
+        if (needs_confirmation && !(identified_tool && actor.completed_tools.count(tool_key))) {
+            add_confirmation();
+        } else if (complete) {
+            // Completion notices must not clear a concurrent permission request.
+            if (actor.pending_tools.empty() && actor.confirmations.empty()) actor.status = SessionStatus::Idle;
         }
-    } else if (name == "PermissionRequest") {
-        // 代理请求工具权限 —— 需要用户输入
-        session.confirmation_tools.insert(tool_key);
-        session.status = SessionStatus::ConfirmationNeeded;
-        session.alert_message = alert_msg();
-    } else if (name == "Stop" || name == "Interrupt") {
-        session.status = SessionStatus::Idle;
-        session.turn_finished = true;
-        session.alert_message.reset();
+        // Ambiguous notifications are informational and never terminate a turn.
+    } else if (name == "PermissionResolved") {
+        if (ev.request_id) {
+            actor.confirmations.erase("request:" + *ev.request_id);
+            if (actor.resolved_requests.size() >= 512) actor.resolved_requests.erase(actor.resolved_requests.begin());
+            actor.resolved_requests.insert(*ev.request_id);
+        }
+        else if (ev.tool_use_id || ev.tool_name) {
+            for (auto c = actor.confirmations.begin(); c != actor.confirmations.end();) {
+                if (c->second.tool_key == tool_key) c = actor.confirmations.erase(c);
+                else ++c;
+            }
+        }
+        actor.status = SessionStatus::Thinking;
+    } else if (name == "Stop" || name == "Interrupt" || name == "SessionEnd" ||
+               (name == "SubagentStop" && !actor_id.empty())) {
+        actor = Actor{};
+        actor.finished = true;
+        // Interrupt of the main conversation cancels its whole actor tree.
+        if (name == "Interrupt" && actor_id.empty()) {
+            session.interrupted = true;
+            for (auto& [id, child] : session.actors) { child = Actor{}; child.finished = true; }
+        }
     } else if (name == "SubagentStart" || name == "SubagentStop" ||
                name == "PreCompact" || name == "PostCompact" ||
                name == "PreModelRequest" || name == "PostModelRequest" ||
                (name == "SessionStart" && ev.source == "compact")) {
-        // 子代理起止 / 上下文压缩：会话仍在推进 —— 子代理跑长任务时主代理
-        // 在等它、压缩是回合间的自动上下文整理。统一 -> Thinking（忙），避免
-        // 这些阶段的长静默被超时误降级为 Idle（进而误播"任务完成"音）；事件
-        // 本身也刷新 last_event_time，进一步压低误判概率。
-        // 绝不打断 ConfirmationNeeded：主代理正等用户确认时收到的子代理/压缩
-        // 信号是并行的陈旧事件，清掉 alert 会让提醒停响。
-        if (session.status != SessionStatus::ConfirmationNeeded) {
-            session.status = session.pending_tools.empty() ? SessionStatus::Thinking
-                                                         : SessionStatus::ToolUse;
-            session.alert_message.reset();
-        }
+        actor.status = SessionStatus::Thinking;
+        actor.finished = false;
+    }
+
+    // Derive the conversation from all actors. A sibling event cannot clear
+    // another actor's pending tool or confirmation, including a parent Stop.
+    session.status = SessionStatus::Idle;
+    session.alert_message.reset();
+    for (const auto& [id, a] : session.actors) {
+        auto state = !a.confirmations.empty() ? SessionStatus::ConfirmationNeeded :
+                     !a.pending_tools.empty() ? SessionStatus::ToolUse : a.status;
+        if (dedupPriority(state) > dedupPriority(session.status) ||
+            (state == SessionStatus::ToolUse && session.status == SessionStatus::Thinking))
+            session.status = state;
+        if (!a.confirmations.empty() && !session.alert_message)
+            session.alert_message = a.confirmations.begin()->second.message;
     }
 
     // 真实 hook 会话已覆盖该项目；删除窗口扫描建立的占位会话避免列表重复
@@ -374,9 +326,8 @@ void StateManager::resetAllToIdle() {
     for (auto& [id, s] : sessions_) {
         s.status = SessionStatus::Idle;
         s.alert_message.reset();
-        s.pending_tools.clear();
-        s.confirmation_tools.clear();
-        s.turn_finished = true;
+        s.actors.clear();
+        s.interrupted = false;
         s.last_event_time = now;
     }
     recomputeStateLocked();
@@ -409,7 +360,7 @@ void StateManager::recomputeStateLocked() {
     overall_state_ = new_state;
 
     // 脏检查：仅"有意义的快照"变化时才算新版本（不含 lastEventTime/timestamp）
-    const std::string signature = snapshotSignatureLocked();
+    const std::string signature = snapshotSignatureLocked() + "|alert:" + std::to_string(alert_seq_);
     const bool sig_changed = !last_signature_.has_value() || *last_signature_ != signature;
     if (sig_changed) {
         last_signature_ = signature;
@@ -520,6 +471,7 @@ nlohmann::json StateManager::snapshotJson() {
     }
     return {
         {"overallState", petStateStr(overall_state_)},
+        {"alertSeq", alert_seq_},
         {"sessions", arr},
         {"lastEventAt", last_event_at_},
         {"timestamp", nowMs()},
@@ -531,6 +483,7 @@ dutyon::PetStatus StateManager::petStatus() {
     auto sessions = dedupSessionsLocked();
     dutyon::PetStatus ps;
     ps.overall_state = petStateStr(overall_state_);
+    ps.alert_seq = alert_seq_;
     for (const auto& s : sessions) {
         dutyon::SessionInfo si;
         si.project_name = s.project_name;
@@ -565,7 +518,9 @@ void StateManager::cleanupStaleSessions() {
         // Windows 上窗口真正关闭时由 syncDetectedWindows 删除。
         if (it->second.status == SessionStatus::ConfirmationNeeded) continue;
         // 工具执行中：降级/删除超时放宽（见 bc::kToolRunningTimeout）
-        const uint64_t limit = !it->second.pending_tools.empty()
+        const bool active_child_or_tool = std::any_of(it->second.actors.begin(), it->second.actors.end(),
+            [](const auto& entry) { return (!entry.first.empty() && !entry.second.finished) || !entry.second.pending_tools.empty(); });
+        const uint64_t limit = active_child_or_tool
                                    ? bc::kToolRunningTimeout
                                    : bc::kSessionTimeout;
         if (elapsed > limit) {
@@ -581,7 +536,7 @@ void StateManager::cleanupStaleSessions() {
         // kThinkingTimeout 放宽（kWorkingTimeout 的 3 分钟会误睡生成中的
         // 会话，见 backend_config.h 注释）。
         const uint64_t downgrade_timeout =
-            !it->second.pending_tools.empty()
+            active_child_or_tool
                 ? bc::kToolRunningTimeout
                 : (it->second.status == SessionStatus::Thinking
                        ? bc::kThinkingTimeout
@@ -609,6 +564,7 @@ void StateManager::checkAndRemindAlert() {
     const uint64_t since = now >= last_alert_time_ ? now - last_alert_time_ : 0;
     if (since >= bc::kAlertReminder) {
         last_alert_time_ = now;
+        ++alert_seq_;
         last_signature_.reset();  // 使 update 也重新发出
         version_++;
         cv_.notify_all();

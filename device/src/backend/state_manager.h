@@ -1,7 +1,7 @@
 #pragma once
 
 // ---------------------------------------------------------------------------
-// 跨 IDE 实例的 AI 会话状态机 —— 从 src-tauri/src/state_manager.rs 1:1 移植。
+// 跨 IDE 实例的 AI 会话状态机，独立跟踪每个代理和确认请求。
 //
 // 会话生命周期（SessionStatus = Idle + 4 个活跃变体）：
 //   SessionStart                       -> Idle
@@ -13,7 +13,8 @@
 //   Notification（确认类）             -> ConfirmationNeeded
 //   Notification（完成类）/ Stop       -> Idle
 //   SessionEnd（会话结束，权威收尾）   -> 删除会话
-//   SubagentStart/SubagentStop/PreCompact -> Thinking（忙；不打断 ConfirmationNeeded）
+//   SubagentStart/SubagentStop          -> 更新对应子代理，不清理兄弟状态
+//   PermissionResolved                 -> 仅清理对应确认请求
 //   CLI 代理（Codex/OpenCode）崩溃     -> 由 syncCliLiveness 清除
 //
 // 宠物总状态（三档）：
@@ -82,6 +83,9 @@ struct HookEvent {
     std::optional<uint64_t> timestamp;
     std::optional<std::string> source;   // Codex SessionStart: startup/resume/compact
     std::optional<std::string> turn_id;
+    std::optional<std::string> agent_id;
+    std::optional<std::string> parent_session_id;
+    std::optional<std::string> request_id;
 
     // 从 POST body JSON 解析（snake_case；非法输入返回 nullopt）
     static std::optional<HookEvent> fromJson(const nlohmann::json& j);
@@ -132,6 +136,19 @@ public:
     dutyon::PetStatus petStatus();
 
 private:
+    struct Confirmation {
+        std::optional<std::string> tool_key;
+        std::string message;
+    };
+    struct Actor {
+        SessionStatus status = SessionStatus::Idle;
+        std::multiset<std::string> pending_tools;
+        std::map<std::string, Confirmation> confirmations;
+        std::set<std::string> completed_tools;
+        std::set<std::string> resolved_requests;
+        std::optional<std::string> turn_id;
+        bool finished = false;
+    };
     struct Session {
         std::string session_id;
         std::string project_path;
@@ -145,10 +162,9 @@ private:
         // 非空 = 工具正在跑，静默是预期的（见 bc::kToolRunningTimeout）——
         // 覆盖主代理长命令与子代理长任务（子代理工具调用同 session 发
         // hook，agent_id 不同；Task 工具本身不发 hook）
-        std::multiset<std::string> pending_tools;
-        std::set<std::string> confirmation_tools;
-        std::optional<std::string> turn_id;
-        bool turn_finished = false;
+        std::map<std::string, Actor> actors;
+        std::optional<std::string> root_agent_id;
+        bool interrupted = false; // 整树取消后，新主回合才能重新接收子代理事件
     };
 
     // 快照里的单个会话（对外形态）
@@ -175,6 +191,7 @@ private:
     std::map<std::string, Session> sessions_;  // key = session_id
     PetState overall_state_ = PetState::Sleeping;
     uint64_t last_alert_time_ = 0;
+    uint64_t alert_seq_ = 0; // 新确认和定时重提醒均递增，供 PC/设备可靠消费
     std::optional<std::string> last_signature_;
     uint64_t last_event_at_ = 0;
     uint64_t version_ = 0;

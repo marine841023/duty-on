@@ -121,6 +121,101 @@ void stateTests() {
         check(!cliProcessIde(name), "helper processes must not keep Codex sessions alive");
 }
 
+void actorTests() {
+    uint64_t now = 100000;
+    StateManager sm([&] { return now; });
+    auto send = [&](const std::string& name, const std::string& agent = "", const std::string& call = "", const std::string& request = "") {
+        auto e = event(name, "actors", call.empty() ? "" : "Bash", call);
+        if (!agent.empty()) e.agent_id = agent;
+        if (!request.empty()) e.request_id = request;
+        sm.handleHookEvent(e);
+    };
+    send("SessionStart", "root");
+    send("UserPromptSubmit", "root");
+    send("PreToolUse", "root", "same-call");
+    send("SubagentStart", "child");
+    send("PreToolUse", "child", "same-call");
+    send("PermissionRequest", "child", "same-call", "q1");
+    const auto first_seq = sm.petStatus().alert_seq;
+    check(first_seq > 0, "new confirmation must increment reminder sequence");
+    send("PostToolUse", "root", "same-call");
+    check(status(sm) == "confirmation-needed", "same call ID in parent must not clear child confirmation");
+    send("Stop", "root");
+    check(status(sm) == "confirmation-needed", "parent Stop must preserve child confirmation");
+    send("PermissionRequest", "child", "same-call", "q1");
+    check(sm.petStatus().alert_seq == first_seq, "duplicate request must not replay sound");
+    send("PermissionRequest", "child", "second-call", "q2");
+    check(sm.petStatus().alert_seq == first_seq + 1, "additional request while alert must remind");
+    send("PermissionResolved", "child", "", "q1");
+    check(status(sm) == "confirmation-needed", "resolving one request must preserve the other");
+    send("PermissionRequest", "child", "same-call", "q1");
+    check(sm.petStatus().alert_seq == first_seq + 1, "late resolved request must not alert again");
+    now += bc::kAlertReminder - 1; sm.checkAndRemindAlert();
+    check(sm.petStatus().alert_seq == first_seq + 1, "reminder must respect interval");
+    ++now; sm.checkAndRemindAlert();
+    check(sm.petStatus().alert_seq == first_seq + 2, "ongoing confirmation must emit periodic reminder sequence");
+    check(sm.snapshotJson()["alertSeq"] == sm.petStatus().alert_seq, "local and network reminder sequence must match");
+    send("PostToolUseFailure", "child", "second-call");
+    check(status(sm) == "tool-use", "failed call must clear its permission but keep other work");
+    send("SubagentStop", "child");
+    check(status(sm) == "idle", "finished child and finished parent must become idle");
+    send("SubagentStart", "child");
+    send("PermissionRequest", "child", "late");
+    check(status(sm) == "idle", "duplicate lifecycle must not revive finished child");
+    send("SessionEnd", "root");
+    check(sm.sessionCount() == 0, "root SessionEnd with agent ID must delete conversation");
+
+    send("UserPromptSubmit");
+    send("PermissionRequest", "", "early", "early-request");
+    check(status(sm) == "confirmation-needed", "permission before Pre must alert");
+    send("PreToolUse", "", "early");
+    send("PostToolUse", "", "unrelated");
+    check(status(sm) == "confirmation-needed", "unrelated completion cannot clear early permission");
+    send("PostToolUse", "", "early");
+    send("PermissionRequest", "", "early", "late-request");
+    check(status(sm) == "thinking", "permission for completed call must stay suppressed");
+    auto notice = event("Notification", "actors");
+    notice.notification_type = "document_review";
+    sm.handleHookEvent(notice);
+    send("PostToolUse", "", "unrelated");
+    notice.notification_type = "idle_prompt";
+    sm.handleHookEvent(notice);
+    check(status(sm) == "confirmation-needed", "unbound review confirmation must survive unrelated completion notices");
+    send("SubagentStart", "child2");
+    send("PermissionRequest", "child2", "pending");
+    send("Interrupt");
+    send("PreToolUse", "child2", "late");
+    send("SubagentStart", "previously-unseen-child");
+    send("PermissionRequest", "previously-unseen-child", "late");
+    check(status(sm) == "idle", "root interrupt must cancel whole tree and suppress late child work");
+
+    sm.resetAllToIdle();
+    auto child = event("UserPromptSubmit", "child-session");
+    child.parent_session_id = "actors"; child.ide = IdeKind::OpenCode;
+    sm.handleHookEvent(child);
+    check(sm.sessionCount() == 1 && status(sm) == "thinking", "child sessions must aggregate under parent");
+    now += bc::kThinkingTimeout + 1; sm.cleanupStaleSessions();
+    check(sm.sessionCount() == 1 && status(sm) == "thinking", "active child needs longer silence allowance");
+    child.hook_event_name = "SessionEnd"; sm.handleHookEvent(child);
+    check(sm.sessionCount() == 1 && status(sm) == "idle", "child SessionEnd must not remove parent");
+
+    sm.resetAllToIdle();
+    auto cursor = event("UserPromptSubmit", "actors"); cursor.ide = IdeKind::Cursor;
+    sm.handleHookEvent(cursor);
+    cursor.hook_event_name = "SubagentStart"; cursor.agent_id = "unpairable-child";
+    sm.handleHookEvent(cursor);
+    cursor.hook_event_name = "Stop"; cursor.agent_id.reset();
+    sm.handleHookEvent(cursor);
+    check(status(sm) == "idle", "Cursor lifecycle without pairable stop must not leave ghost work");
+
+    sm.resetAllToIdle();
+    send("UserPromptSubmit");
+    notice.notification_type.reset();
+    notice.message = "progress updated";
+    sm.handleHookEvent(notice);
+    check(status(sm) == "thinking", "informational notification must not finish active work");
+}
+
 #ifdef _WIN32
 namespace fs = std::filesystem;
 json readJson(const fs::path& path) { std::ifstream in(path); return json::parse(in); }
@@ -196,6 +291,7 @@ void installerTests(const std::string& hooks) {
 int main(int argc, char** argv) {
     try {
         stateTests();
+        actorTests();
 #ifdef _WIN32
         check(argc == 2, "pass hooks source directory");
         installerTests(argv[1]);

@@ -763,6 +763,7 @@ int main() {
     // 提示音边沿检测基准（首帧仅记录不发声，避免开机误报）
     std::string snd_prev_overall;
     bool snd_prev_confirm = false;
+    uint64_t snd_prev_alert_seq = 0;
     bool snd_seen = false;
     // 相框模式轮播状态：动作列表签名（形象变化重建）+ 当前序号 + 计时
     std::string frame_sig;
@@ -2528,8 +2529,16 @@ int main() {
                 printf("[Mode] flip horizontal -> %s\n",
                        current_status.flip_horizontal ? "on" : "off");
             }
-            // 事件提示音：提醒（待确认）播 3 次，开始/结束各 1 次；边沿触发。
+            // 事件提示音：提醒（待确认）播 3 次，开始/结束各 1 次。
+            // 新请求与定时重提醒通过序号触发，遵守全局及 alert 状态静音。
             // 对应状态绑定了自定义音频且未静音时，替代内置 beep
+            const bool alert_muted = current_status.sound_mute ||
+                std::find(current_status.sound_muted_states.begin(),
+                          current_status.sound_muted_states.end(), "alert") !=
+                    current_status.sound_muted_states.end();
+            if (!alert_muted && current_status.has_confirmation &&
+                (!snd_seen || !snd_prev_confirm || current_status.alert_seq != snd_prev_alert_seq))
+                sound_player.play(SoundPlayer::Event::Reminder);
             if (snd_seen) {
                 // 状态音频就绪判定：未完全静音、该状态未被单独静音、有绑定
                 auto has_state_audio = [&](const std::string& st) {
@@ -2540,8 +2549,6 @@ int main() {
                     return a != current_status.active_audio.end() &&
                            !a->second.empty();
                 };
-                if (!snd_prev_confirm && current_status.has_confirmation)
-                    sound_player.play(SoundPlayer::Event::Reminder);
                 if (snd_prev_overall != current_status.overall_state) {
                     if (current_status.overall_state == "working") {
                         if (!has_state_audio("working"))
@@ -2553,7 +2560,8 @@ int main() {
                     }
                 }
             }
-            // 首帧只定基准不发声（防开机误报）；但 overall 基准设为 sleeping，
+            snd_prev_alert_seq = current_status.alert_seq;
+            // 首帧已有待确认时立即提醒；overall 基准设为 sleeping，
             // 使"连接/重启时已有活跃任务"在下一帧补播开始提示音——避免服务
             // 重启落在 working 期间导致边沿被吞、全程无声
             if (!snd_seen) {

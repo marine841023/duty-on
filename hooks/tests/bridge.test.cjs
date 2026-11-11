@@ -33,20 +33,26 @@ function Invoke-RestMethod {
   });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, '', 'hooks must not write to model stdout');
+  const reply = ide === 'cursor' && ['preToolUse', 'subagentStart'].includes(event) ? '{"permission":"allow"}' :
+    ide === 'cursor' && event === 'beforeSubmitPrompt' ? '{"continue":true}' : '';
+  assert.equal(result.stdout.trim(), reply, 'only Cursor observer acknowledgement may use stdout');
   count++;
   return fs.existsSync(capture) ? JSON.parse(fs.readFileSync(capture, 'utf8')) : null;
 }
 try {
   let payload = run({session_id: 'session-中文', hook_event_name: 'PreToolUse',
     cwd: 'D:\\工程\\测试项目\\', tool_name: 'Bash', tool_use_id: 'call-1',
-    turn_id: 'turn-1', prompt: 'SECRET_PROMPT', tool_input: {command: 'SECRET_COMMAND'}});
+    turn_id: 'turn-1', agent_id: 'agent-1', parent_session_id: 'parent-1', request_id: 'request-1',
+    prompt: 'SECRET_PROMPT', tool_input: {command: 'SECRET_COMMAND'}});
   assert.ok(payload, 'valid Codex event must be forwarded');
   assert.equal(payload.session_id, 'session-中文');
   assert.equal(payload.project_path, 'D:\\工程\\测试项目\\');
   assert.equal(payload.project_name, '测试项目');
   assert.equal(payload.turn_id, 'turn-1');
   assert.equal(payload.tool_use_id, 'call-1');
+  assert.equal(payload.agent_id, 'agent-1');
+  assert.equal(payload.parent_session_id, 'parent-1');
+  assert.equal(payload.request_id, 'request-1');
   assert.equal(payload.ide, 'codex');
   assert.equal(payload.prompt, undefined);
   assert.equal(payload.tool_input, undefined);
@@ -63,6 +69,17 @@ try {
   assert.equal(payload.session_id, 'cursor-id');
   assert.equal(payload.project_name, 'workspace');
   assert.equal(payload.tool_name, 'AskUserQuestion');
+  payload = run({conversation_id: 'conversation', session_id: 'cross-conversation',
+    generation_id: 'generation', subagent_id: 'child', parent_conversation_id: 'parent'}, 'cursor', 'subagentStart');
+  assert.equal(payload.session_id, 'conversation');
+  assert.equal(payload.agent_id, 'child');
+  assert.equal(payload.parent_session_id, 'parent');
+  assert.equal(payload.turn_id, 'generation');
+  for (const name of ['sessionEnd', 'postToolUseFailure', 'subagentStop', 'preCompact']) {
+    payload = run({conversation_id: 'c'}, 'cursor', name);
+    assert.equal(payload.hook_event_name, name[0].toUpperCase() + name.slice(1));
+  }
+  assert.equal(run('{broken', 'cursor', 'preToolUse'), null, 'unavailable observer must still respond');
   payload = run('\uFEFF' + JSON.stringify({session_id: 'bom', hook_event_name: 'Interrupt', cwd: 'D:/p'}));
   assert.equal(payload.hook_event_name, 'Interrupt');
   for (const input of ['{broken SECRET_INVALID_JSON', 'null', '[]', '"scalar"', '',

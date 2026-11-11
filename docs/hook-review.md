@@ -10,6 +10,24 @@ DutyOn 是 C++17 原生桌宠，Windows 端在一个进程内运行 GLFW/OpenGL�
 
 Codex 的进程可以在对话空闲时持续存在，也可以同时服务多个会话，因此“存在 codex.exe”不能作为“所有 Codex 会话正在工作”的依据。
 
+## 2026-11-11：v2.0.14 子代理与确认复查
+
+发现并修复的关键问题：主代理 Stop 原先清空整个会话，误消除子代理待确认；设备声音仅观察状态切换，连续确认期间的新请求和周期提醒没有发声；空 pending 被错误当作通知过期证据；普通 Notification 的关键词遍历使用 18 作为 17 项数组的长度，可能越界崩溃。
+
+现按 Session → Actor → Tool/Confirmation 记账。完成事件只清理相同代理的相同调用，请求答复只清理相同 request_id；主 Interrupt 取消整树并阻挡尚未见过的迟到子代理。已完成调用和已答复请求保存有限历史以抑制重复。`alertSeq` 在新确认和每 60 秒提醒时递增，随快照和 SSE 传到设备。
+
+| IDE | 本次处理 | 限制 |
+| --- | --- | --- |
+| Trae | Notification 分类，确认先于 Pre 可提醒；保留浏览器/电脑确认启发式 | 当前安装接口没有完整子代理事件，依赖宿主实际上报的身份字段 |
+| Qoder | 子代理起止、工具失败、权限/通知独立聚合 | 缺少 agent_id/tool_use_id 时只能退化关联；工具名启发式可能误报 |
+| Codex | agent_id 隔离、turn_id 过滤、主子停止/取消、同步 request_user_input | 云端或未信任 Hook 不可见；异步提问返回不代表已回答 |
+| OpenCode | callID 流去重、父子 session 聚合、permission/question asked/replied/rejected、question.v2 | 按本机 1.19.5 协议及回归事件验证，其他版本需检查事件兼容 |
+| Cursor | 10 种事件归一化；观察 Hook 合法响应，失败不阻塞 IDE | 官方无通用权限等待/答复事件；subagentStop 无稳定 ID，生命周期只刷新会话活动，不建立无法关闭的独立子代理 |
+
+这不是所有 IDE 的现场全覆盖测试。后端 CTest 覆盖主子并发、精确答复、重复/迟到事件、新请求/周期序号、取消整树和通知崩溃路径；Windows 桥接 19 场景与 OpenCode 插件事件流回归通过。Shell 仅检查语法。
+
+Windows Release 与 ARM 交叉编译通过，v2.0.14 已替换本机运行程序并部署到设备。通过真实 `/hook` 和 `/api/status` 接口验证了主 Stop 保留子代理确认、第二个请求递增提醒序号、重复请求不重播、逐个答复以及取消后抑制迟到子代理；测试会话随后清理。设备服务保持 active，日志记录两次独立的提醒音播放事件（`[Sound] play ev=2`），这确认了事件消费与播放调用，不等同于人工听音验证。每 60 秒提醒使用模拟时钟回归验证。
+
 ## 本次修复
 
 | 级别 | 原问题及影响 | 修改 |
@@ -53,6 +71,7 @@ cmake -S device/tests -B device/build/backend-tests -G "Visual Studio 17 2022" -
 cmake --build device/build/backend-tests --config Release --parallel 4
 ctest --test-dir device/build/backend-tests -C Release --output-on-failure
 node hooks/tests/bridge.test.cjs
+node hooks/tests/opencode.test.cjs
 bash -n hooks/trae-hook-bridge.sh
 cmake --build device/build --config Release --parallel 4
 git diff --check

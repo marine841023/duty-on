@@ -30,7 +30,7 @@
 | 🖥 Windows 桌面版 v2.0.12 | [GitHub Releases](https://github.com/marine841023/duty-on/releases) · [Gitee Releases](https://gitee.com/megrezsoft/duty-on/releases) |
 | 📟 设备端源码 | [v2.0-dev 分支](https://gitee.com/megrezsoft/duty-on/tree/v2.0-dev) `device/` 目录（交叉编译，见下文"设备端构建"） |
 
-当前源码版本：**v2.0.13**，见[变更与验证说明](docs/release-notes/v2.0.13.md)。
+当前源码版本：**v2.0.14**，见[变更与验证说明](docs/release-notes/v2.0.14.md)。
 上表指向已发布版本；本地构建的安装包输出到 `tools/dist/`。
 
 </div>
@@ -187,7 +187,8 @@ Codex 使用 `$CODEX_HOME/hooks.json`（未设置时为 `~/.codex/hooks.json`）
 | `UserPromptSubmit` | 用户发送消息 | → 忙碌 (working) |
 | `PreToolUse` / `PostToolUse` | AI 工具执行前/后 | → 忙碌 (working) |
 | `Notification` | 需要用户确认 | → 提醒 (alert) |
-| `Stop` | AI 完成任务 | → 空闲 (idle) |
+| `Stop` | 当前代理完成，继续跟踪运行中的子代理 | 全部结束后 → 空闲 (idle) |
+| `PermissionResolved` | OpenCode 权限确认/问题已答复 | 只清除对应请求 |
 | `PermissionRequest` / `request_user_input` 工具调用 | Codex 等待授权或回答 | → 提醒 (alert) |
 | `Interrupt` | Codex 当前回合中断 | → 空闲 (idle) |
 | `SessionEnd` | 会话结束 | 移除会话 |

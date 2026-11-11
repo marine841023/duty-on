@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -33,6 +34,7 @@ struct PetStatus {
     std::vector<SessionInfo> sessions;  // 项目列表数据
     int session_count = 0;      // 活跃会话数（sessions 数组长度）
     bool has_confirmation = false; // 有会话处于 confirmation-needed
+    uint64_t alert_seq = 0;     // 新确认/定时重提醒序号，旧后端缺省为 0
     // PC 当前角色键（与 UserConfigStore::listModels 的 ModelEntry::key 同格式）；
     // 设备端据此热切换形象，与 PC 设定保持一致。旧版后端无此字段时为空串。
     std::string active_character;

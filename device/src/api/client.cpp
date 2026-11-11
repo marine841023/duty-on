@@ -27,6 +27,7 @@ static std::optional<PetStatus> FetchStatus(cpr::Session& session, int* http_cod
         auto j = nlohmann::json::parse(r.text);
         PetStatus s;
         s.overall_state = j.value("overallState", "sleeping");
+        s.alert_seq = j.value("alertSeq", uint64_t{0});
         s.active_character = j.value("activeCharacter", std::string{});
         s.device_mode = j.value("deviceMode", "multi");
         s.frame_source = j.value("frameSource", std::string{});
