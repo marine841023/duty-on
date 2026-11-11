@@ -10,70 +10,89 @@
 # 真机若板载 Wi-Fi 不支持 AP（hostapd 报驱动错误），需外接 USB Wi-Fi 或换驱动，
 # 调整点集中在本脚本（无需重编 C++）。
 IFACE="${1:-wlan0}"
-CONF=/run/dutyon
+CONF=${DUTYON_WIFI_RUN_DIR:-/run/dutyon}
 AP_IP=192.168.4.1
 
 log(){ echo "[wifi-ap] $*"; }
+source "$(dirname "$0")/wifi-common.sh" || exit 1
 
-# 【幂等短路】hostapd 已在跑就直接复用，绝不杀它——Unisoc WCN 驱动
-# (sprdwl_ng) 的 AP 是 boot 周期一次性的：hostapd 退出后固件 beacon 槽位
-# 不释放，同 boot 内第二次启动必报 "Beacon set failed -12 (ENOMEM)"
-# （接口 del/type 切换/模块重载均被驱动拒绝，软件层无解）。
-# SSID/密码由设备 MAC 固定派生、conf 不变，复用安全。
-# （注意：本短路只跳过"起 AP"，上面的 client 残留清理仍需执行——见
-#   rogue 分支：C++ 侧周期调 `wifi-ap.sh <iface> clean` 只清残留不动 AP）
-if [ "$2" = "clean" ]; then
-    # 只清 client 残留（wpa_supplicant client 抢接口会丢手机关联帧；
-    # dhcpcd master 会把缓存的旧租约重新挂回 wlan0 产生双 IP），
-    # 绝不碰 hostapd/dnsmasq
-    pkill -9 -f "wpa_supplicant.*-i $IFACE" 2>/dev/null || true
-    pkill -9 dhcpcd 2>/dev/null || true
-    rm -f "$CONF/wpa_supplicant.pid"
-    # dhcpcd 挂上来的多余 IP（旧租约/IPv4LL）也摘掉，只留 AP 网关地址
-    ip -4 addr show dev "$IFACE" 2>/dev/null | grep -v "inet $AP_IP/" \
-      | awk '/inet /{print $2}' | while read -r a; do
-        ip addr del "$a" dev "$IFACE" 2>/dev/null || true
+# AP / client / off 共用锁。AP 自检不排队，避免慢扫描/取址期间反复起脚本。
+# 所有后台守护进程启动时必须关闭 fd 9，否则它们会永久持有锁。
+mkdir -p "$CONF"
+exec 9>"$CONF/wifi.lock"
+flock -n 9 || exit 0
+mode_is_current ap || exit 0
+
+# 仅复用本程序配置的 hostapd；即使 pid 文件丢失，也不能杀掉已有 AP。
+# Unisoc WCN 在同一 boot 内重起 hostapd 可能报 Beacon set failed -12。
+if ! daemon_alive hostapd; then
+    for pid in $(pgrep -x hostapd); do
+        if tr '\0' '\n' 2>/dev/null < "/proc/$pid/cmdline" | grep -Fxq "$CONF/hostapd.conf"; then
+            echo "$pid" > "$CONF/hostapd.pid"
+            break
+        fi
     done
-    exit 0
 fi
-if pgrep -x hostapd >/dev/null 2>&1; then
-    log "hostapd already running, reuse (driver AP is one-shot per boot)"
-    # hostapd 在跑但 client 残留也必须清（fallback 后 wpa_supplicant/
-    # dhcpcd 可能仍在抢占 wlan0）——上一版直接 exit 0 跳过了清理，导致
-    # 热点广播正常但手机连不上
-    pkill -9 -f "wpa_supplicant.*-i $IFACE" 2>/dev/null || true
-    pkill -9 dhcpcd 2>/dev/null || true
-    exit 0
-fi
+reuse_ap=0
+daemon_alive hostapd && reuse_ap=1
 
 # 解除软/硬封锁（有些镜像出厂 rfkill 软关 Wi-Fi）
 rfkill unblock wifi 2>/dev/null || true
-rfkill unblock all  2>/dev/null || true
 
 # 等 wlan0 出现（最多 10s）：dutyon.service 已不等网络（提早启动抢占屏幕），
-# 本脚本可能跑在 sprdwl_ng 驱动加载完成之前。放在 clean/复用短路之后，
-# 保证周期性 clean 调用与 hostapd 复用路径仍然快进快出
+# 本脚本可能跑在 sprdwl_ng 驱动加载完成之前。
 for i in $(seq 1 20); do
     ip link show "$IFACE" >/dev/null 2>&1 && break
     [ "$i" = 1 ] && log "waiting for $IFACE (driver loading...)"
     sleep 0.5
 done
+ip link show "$IFACE" >/dev/null 2>&1 || { log "missing $IFACE"; exit 1; }
 
 # NetworkManager 若存在，别让它管这个 iface（会与 hostapd 抢占）
 if command -v nmcli >/dev/null 2>&1; then nmcli dev set "$IFACE" managed no 2>/dev/null || true; fi
 
 # 停 client 侧 + 旧 AP 实例（幂等，可重复调用）。旧 pid 文件一并删掉：
 # C++ 侧自愈检查（hostapdAlive）读到已死旧 pid 会误重跑。
-# dhcpcd 必须用 pkill -9：`dhcpcd -k` 实测杀不死 master（control socket
-# 通信失败时静默无效），残留的 master 会在 link-up 时把缓存的旧租约
-# （如路由器网段 IP）重新挂回 wlan0 → AP 网关双 IP、路由错乱。
-# wpa_supplicant 用 -9 同理：nl80211 ioctl 阻塞中可能不响应 TERM。
-pkill -9 -f "wpa_supplicant.*-i $IFACE" 2>/dev/null || true
-pkill -9 dhcpcd 2>/dev/null || true
-pkill -x udhcpc  2>/dev/null || true
-pkill -x hostapd 2>/dev/null || true
-pkill -x dnsmasq 2>/dev/null || true
-rm -f "$CONF/hostapd.pid" "$CONF/dnsmasq.pid"
+# 只停本接口的客户端，TERM 后限时升级 KILL；残留 DHCP 会抢走 AP 地址。
+stop_clients
+
+ensure_gateway() {
+    # 保留运行中的 AP，不 down/flush 接口；只移除 client 遗留地址与默认路由。
+    ip -4 -o addr show dev "$IFACE" | awk -v keep="$AP_IP/24" '$4 != keep {print $4}' \
+      | while read -r a; do ip addr del "$a" dev "$IFACE"; done
+    ip route del default dev "$IFACE" 2>/dev/null || true
+    if ! ip -4 -o addr show dev "$IFACE" | awk '{print $4}' | grep -Fxq "$AP_IP/24"; then
+        ip addr replace "$AP_IP/24" dev "$IFACE" || return 1
+        gateway_changed=1
+        log "restored $IFACE -> $AP_IP/24"
+    fi
+}
+
+ensure_dnsmasq() {
+    # bind-interfaces 在启动时固定监听地址。网关被抢走后，即使进程活着也
+    # 需要重新绑定，不能仅看 pid 存活就跳过 DHCP/DNS 修复。
+    if [ "$gateway_changed" = 1 ] && daemon_alive dnsmasq; then
+        stop_owned dnsmasq
+    fi
+    if daemon_alive dnsmasq; then return 0; fi
+    rm -f "$CONF/dnsmasq.pid"
+    dnsmasq -C "$CONF/dnsmasq.conf" --pid-file="$CONF/dnsmasq.pid" 9>&- || {
+        log "dnsmasq FAILED (check ports 53/67 and config)"; return 1;
+    }
+    daemon_alive dnsmasq || { log "dnsmasq not alive after start"; return 1; }
+    log "dnsmasq ready"
+}
+
+gateway_changed=0
+if [ "$reuse_ap" = 1 ]; then
+    ensure_gateway && ensure_dnsmasq
+    exit $?
+fi
+# 不干扰其他服务管理的热点。
+if pgrep -x hostapd >/dev/null 2>&1; then
+    log "another hostapd owns the radio; refusing to reset it"
+    exit 1
+fi
 sleep 1
 
 # 配静态网关地址（先 down/flush 再 up，确保干净）
@@ -87,7 +106,7 @@ ip link set "$IFACE" up
 # 输出即全量结果——直接落盘复用，无需额外 sleep 等待（旧版白等 4s）。
 log "scanning nearby networks..."
 DUMP="$CONF/scan-dump.txt"
-iw dev "$IFACE" scan > "$DUMP" 2>/dev/null
+timeout -k 1 8 iw dev "$IFACE" scan > "$DUMP" 2>/dev/null || log "scan unavailable, use manual SSID input"
 
 # SSID 列表：按信号强->弱去重取前 8
 awk '/signal:/{sig=$2} /SSID:/{s=substr($0,index($0,"SSID:")+6); if(s!="" && s!~/^</) printf "%s\t%s\n", sig, s}' "$DUMP" \
@@ -114,37 +133,33 @@ if [ "${NBSS:-0}" -gt 0 ] && [ -f "$CONF/hostapd.conf" ]; then
     fi
 fi
 
-ip addr add "$AP_IP/24" dev "$IFACE" 2>/dev/null || true
+ip addr replace "$AP_IP/24" dev "$IFACE" || exit 1
 log "$IFACE -> $AP_IP/24"
 
 # 起热点（-B 后台，pid 落盘便于 wifi-off.sh 清理 + C++ 侧自愈检查）
 if [ -f "$CONF/hostapd.conf" ]; then
-    if hostapd -B "$CONF/hostapd.conf" -P "$CONF/hostapd.pid"; then
+    if hostapd -B "$CONF/hostapd.conf" -P "$CONF/hostapd.pid" 9>&-; then
         log "hostapd started"
     else
         log "hostapd FAILED (查 hostapd.conf / 驱动是否支持 AP)"
+        exit 1
     fi
 else
     log "missing $CONF/hostapd.conf"
+    exit 1
 fi
 sleep 1
 # 存活回显：起完 1s 后确认进程还在（驱动 AP 模式/信道不支持会静默退出）
-if [ -f "$CONF/hostapd.pid" ] && kill -0 "$(cat "$CONF/hostapd.pid")" 2>/dev/null; then
+if daemon_alive hostapd; then
     log "hostapd alive (pid $(cat "$CONF/hostapd.pid"))"
 else
     log "hostapd NOT alive after start (驱动不支持 AP/该信道？)"
+    exit 1
 fi
 
 # 起 DHCP + DNS（dnsmasq.conf 里 interface+bind-interfaces 只绑 wlan0；
 # 必须在静态地址配好之后启动，否则 bind 失败）
-if [ -f "$CONF/dnsmasq.conf" ]; then
-    if dnsmasq -C "$CONF/dnsmasq.conf" --pid-file="$CONF/dnsmasq.pid"; then
-        log "dnsmasq started"
-    else
-        log "dnsmasq FAILED (53/67 端口被占？systemd-resolved?)"
-    fi
-else
-    log "missing $CONF/dnsmasq.conf"
-fi
+gateway_changed=1
+ensure_dnsmasq || exit 1
 
 log "AP done (SSID/pass 见 hostapd.conf；captive portal 由 dutyon-pet 监听 :80)"

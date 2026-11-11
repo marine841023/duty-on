@@ -130,12 +130,12 @@ void PhotoPlayer::workerMain() {
                 pending_ready_ = true;
             }
         } else if (!ok) {
-            // 失败（PC 离线 / 无照片 / 传输错误）：退避后重试，避免空转刷网络
-            for (int i = 0; i < 30 && !quit_.load(); ++i)
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             std::lock_guard<std::mutex> lk(q_mtx_);
             if (!pending_ready_) want_fetch_ = true;  // 仍无就绪图 -> 再要一次
         }
+        // Also rate-limit corrupt images that immediately request a new fetch.
+        std::unique_lock<std::mutex> cooldown(q_mtx_);
+        q_cv_.wait_for(cooldown, std::chrono::seconds(3), [&] { return quit_.load(); });
     }
 }
 
@@ -148,13 +148,23 @@ bool PhotoPlayer::takePendingToTexture() {
         pending_ready_ = false;
     }
     int w = 0, h = 0, ch = 0;
-    unsigned char* rgba = stbi_load_from_memory(
-        bytes.data(), (int)bytes.size(), &w, &h, &ch, 4);
+    // Bound compressed and decoded sizes before asking stb to allocate.
+    const bool valid = !bytes.empty() && bytes.size() <= 8 * 1024 * 1024 &&
+        stbi_info_from_memory(bytes.data(), (int)bytes.size(), &w, &h, &ch) &&
+        w > 0 && h > 0 && w <= 4096 && h <= 4096 &&
+        static_cast<long long>(w) * h <= 4096 * 2048;
+    unsigned char* rgba = valid ? stbi_load_from_memory(
+        bytes.data(), (int)bytes.size(), &w, &h, &ch, 4) : nullptr;
     if (!rgba || w <= 0 || h <= 0) {
         if (rgba) stbi_image_free(rgba);
         fprintf(stderr, "[PhotoPlayer] decode failed: %s\n",
                 stbi_failure_reason());
-        return false;  // 解不开：丢弃，等下一张
+        {
+            std::lock_guard<std::mutex> lock(q_mtx_);
+            want_fetch_ = true;
+        }
+        q_cv_.notify_all();
+        return false;
     }
     if (!tex_) {
         glGenTextures(1, &tex_);
@@ -204,7 +214,11 @@ void PhotoPlayer::ensureProgram() {
     if (program_) return;
     GLuint vs = compileShader(GL_VERTEX_SHADER, kPhotoVertSrc);
     GLuint fs = compileShader(GL_FRAGMENT_SHADER, kPhotoFragSrc);
-    if (!vs || !fs) return;
+    if (!vs || !fs) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return;
+    }
     program_ = glCreateProgram();
     glAttachShader(program_, vs);
     glAttachShader(program_, fs);

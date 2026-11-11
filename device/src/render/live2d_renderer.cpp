@@ -13,6 +13,7 @@
 //          —— 由 CMakeLists 按平台定义
 
 #include "render/live2d_renderer.h"
+#include "render/media_limits.h"
 
 #include <cfloat>
 #include <cstdio>
@@ -77,19 +78,19 @@ public:
     }
     void Deallocate(void* memory) override { free(memory); }
     void* AllocateAligned(const csmSizeType size, const csmUint32 alignment) override {
-        size_t offset, shift, addr;
-        void** preamble;
-        offset = alignment - 1 + sizeof(void*);
-        shift = 0;
-        void* allocated = malloc(size + static_cast<csmUint32>(offset));
-        addr = reinterpret_cast<size_t>(allocated) + sizeof(void*);
-        while (addr % alignment != 0) { addr++; shift++; }
-        preamble = reinterpret_cast<void**>(addr);
+        if (!alignment || (alignment & (alignment - 1))) return nullptr;
+        const size_t offset = size_t(alignment) - 1 + sizeof(void*);
+        if (size > SIZE_MAX - offset) return nullptr;
+        void* allocated = malloc(size + offset);
+        if (!allocated) return nullptr;
+        const size_t addr = (reinterpret_cast<size_t>(allocated) + offset) &
+                            ~(size_t(alignment) - 1);
+        auto** preamble = reinterpret_cast<void**>(addr);
         preamble[-1] = allocated;
-        (void)shift;
         return reinterpret_cast<void*>(addr);
     }
     void DeallocateAligned(void* aligned_memory) override {
+        if (!aligned_memory) return;
         void** preamble = static_cast<void**>(aligned_memory);
         free(preamble[-1]);
     }
@@ -99,14 +100,18 @@ public:
 // 读文件到内存（框架要求自行实现 IO）
 // ---------------------------------------------------------------------------
 static csmByte* CreateBuffer(const char* path, csmSizeInt* out_size) {
+    *out_size = 0;
     FILE* fp = fopen(path, "rb");
     if (!fp) return nullptr;
-    fseek(fp, 0, SEEK_END);
-    long size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return nullptr; }
+    const long size = ftell(fp);
+    if (size <= 0 || size > 64 * 1024 * 1024 || fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp); return nullptr;
+    }
     auto* buf = static_cast<csmByte*>(malloc(size));
-    fread(buf, size, 1, fp);
+    const bool ok = buf && fread(buf, 1, size, fp) == static_cast<size_t>(size);
     fclose(fp);
+    if (!ok) { free(buf); return nullptr; }
     *out_size = static_cast<csmSizeInt>(size);
     return buf;
 }
@@ -155,6 +160,7 @@ bool HalveRGBA(unsigned char* data, int* w, int* h) {
 
 static GLuint CreateTextureFromPng(const char* path, int* out_w, int* out_h) {
     int w, h, channels;
+    if (!stbi_info(path, &w, &h, &channels) || !validImageSize(w, h)) return 0;
     unsigned char* data = stbi_load(path, &w, &h, &channels, STBI_rgb_alpha);
     if (!data) {
         fprintf(stderr, "[Live2D] texture load failed: %s\n", path);
@@ -206,6 +212,7 @@ public:
 
     // 从 <dir>/<name>.model3.json 加载全部资源
     bool LoadAssets(const std::string& dir, const std::string& file_name) {
+        if (dir.empty() || file_name.empty()) return false;
         _modelHomeDir = dir;
         if (_modelHomeDir.back() != '/') _modelHomeDir += '/';
 
@@ -219,7 +226,7 @@ public:
         ICubismModelSetting* setting = new CubismModelSettingJson(buffer, size);
         DeleteBuffer(buffer);
 
-        SetupModel(setting);
+        if (!SetupModel(setting)) return false;
         SetupTextures();
 
         // 表情/物理/眨眼/姿势由 SetupModel 内部按 setting 加载
@@ -488,7 +495,7 @@ private:
                _contentMinX, _contentMaxX, _contentMinY, _contentMaxY);
     }
     // 参照官方 LAppModel::SetupModel
-    void SetupModel(ICubismModelSetting* setting) {
+    bool SetupModel(ICubismModelSetting* setting) {
         _updating = true;
         _initialized = false;
         _setting = setting;
@@ -499,9 +506,15 @@ private:
             std::string path = _modelHomeDir + setting->GetModelFileName();
             csmByte* buffer = CreateBuffer(path.c_str(), &size);
             if (buffer) {
-                LoadModel(buffer, size);
+                LoadModel(buffer, size, true);
                 DeleteBuffer(buffer);
             }
+        }
+
+        if (!_model || !_modelMatrix) {
+            fprintf(stderr, "[Live2D] missing or invalid model data\n");
+            _updating = false;
+            return false;
         }
 
         // 表情
@@ -591,6 +604,7 @@ private:
 
         _updating = false;
         _initialized = true;
+        return true;
     }
 
     // 参照官方 LAppModel::PreloadMotionGroup
@@ -743,7 +757,9 @@ bool Live2DRenderer::frameworkInit() {
 
 void Live2DRenderer::frameworkDispose() {
     CubismFramework::Dispose();
-    // allocator 由 CubismFramework::CleanUp 释放；此处简化不重复释放
+    CubismFramework::CleanUp();
+    delete g_allocator;
+    g_allocator = nullptr;
 }
 
 Live2DRenderer::Live2DRenderer() : impl_(std::make_unique<Impl>()) {}

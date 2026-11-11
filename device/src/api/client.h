@@ -134,9 +134,9 @@ public:
     // 端与源码哈希比对触发自动更新。空串 = 未知（旧固件/未同步）
     void setProgramVersion(const std::string& version);
 
-    // 工作线程配对成功后返回新 token（消费一次后返回空串）；主线程据此
+    // 工作线程配对成功后返回新 token（无事件返回 nullopt；空串表示撤销）；主线程据此
     // 调 DeviceIdentity::setToken 持久化
-    std::string takePairToken();
+    std::optional<std::string> takePairToken();
 
     // 是否已持有有效 token（本地视角）
     bool paired() const;

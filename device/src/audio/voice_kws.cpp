@@ -3,6 +3,8 @@
 #include "audio/voice_kws.h"
 
 #include <signal.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -16,6 +18,7 @@
 
 #include "config.h"
 #include "audio/voice_match.h"
+#include "platform/child_process.h"
 
 namespace dutyon {
 
@@ -38,7 +41,9 @@ bool VoiceKws::assetsReady() const {
     const std::string dir = kKwsDir;
     for (const char* f :
          {"asr-offline", "sense-voice/model.int8.onnx", "sense-voice/tokens.txt", "silero_vad.onnx", "pinyin.txt"}) {
-        if (std::fopen((dir + f).c_str(), "rb") == nullptr) return false;
+        FILE* file = std::fopen((dir + f).c_str(), "rb");
+        if (!file) return false;
+        std::fclose(file);
     }
     return true;
 }
@@ -63,10 +68,7 @@ bool VoiceKws::start() {
 
 void VoiceKws::stop() {
     if (!running_.exchange(false)) return;  // 未在运行（幂等）
-    // 杀子进程解除 worker 在 fgets 的阻塞；worker 侧也有补刀（stop 时
-    // 恰逢刚 fork 的竞态窗口），双保险后 join 不会挂死
-    const pid_t pid = pid_.load();
-    if (pid > 0) ::kill(pid, SIGTERM);
+    // Worker owns the PID and checks running every 100ms, including silence.
     if (worker_.joinable()) worker_.join();
     std::lock_guard<std::mutex> lk(mu_);
     events_.clear();
@@ -102,6 +104,12 @@ void VoiceKws::run() {
 
     int retryMs = kRetryMinMs;
     while (running_.load()) {
+        pid_t pending = pid_.load();
+        if (!reapChild(pending)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+        pid_ = -1;
         std::fprintf(stderr, "[Voice] starting asr-offline (mic=%s)\n", mic.c_str());
         // argv 在 fork 前构建（fork 后子进程内不能 malloc，见下）
         std::vector<char*> argv;
@@ -109,7 +117,7 @@ void VoiceKws::run() {
         argv.push_back(nullptr);
 
         int outfd[2];
-        if (::pipe(outfd) != 0) {
+        if (::pipe2(outfd, O_CLOEXEC) != 0) {
             std::fprintf(stderr, "[Voice] pipe failed\n");
         } else {
             const pid_t pid = ::fork();
@@ -129,35 +137,64 @@ void VoiceKws::run() {
             } else {
                 ::close(outfd[1]);
                 pid_ = pid;
-                available_ = true;
-                retryMs = kRetryMinMs;  // 存活过则重置退避
-                FILE* pipe = ::fdopen(outfd[0], "r");
+                ::fcntl(outfd[0], F_SETFL, O_NONBLOCK);
+                const auto started = std::chrono::steady_clock::now();
                 // v4.2 输出协议（实测）：每个 VAD 语音段一行 "段号: 转写文本"，
                 // 段级一次性输出（无 partial 刷新）；banner 配置行不含该前缀，
                 // 自然被过滤
-                char line[16384];
-                while (running_.load() && pipe &&
-                       std::fgets(line, sizeof(line), pipe)) {
-                    char* p = line;
+                auto processLine = [this](const std::string& line) {
+                    const char* p = line.c_str();
                     while (*p == ' ' || *p == '\t') ++p;
-                    if (*p < '0' || *p > '9') continue;  // banner / 状态行
-                    char* q = p;
+                    if (*p < '0' || *p > '9') return;
+                    const char* q = p;
                     while (*q >= '0' && *q <= '9') ++q;
-                    if (*q != ':') continue;
+                    if (*q != ':') return;
                     std::string text(q + 1);
                     while (!text.empty() &&
                            (text.back() == '\n' || text.back() == '\r'))
                         text.pop_back();
                     if (!text.empty()) handleSegment(text);
+                };
+                std::string line;
+                bool overflow = false;
+                bool eof = false;
+                pid_t child = pid;
+                while (running_.load() && !eof) {
+                    pollfd pfd{outfd[0], POLLIN, 0};
+                    const int ready = ::poll(&pfd, 1, 100);
+                    if (ready < 0 && errno != EINTR) break;
+                    if (ready > 0) {
+                        char buf[4096];
+                        // Bound work per poll so a noisy child cannot delay stop.
+                        for (int batch = 0; batch < 16; ++batch) {
+                            const ssize_t n = ::read(outfd[0], buf, sizeof(buf));
+                            if (n == 0) { eof = true; break; }
+                            if (n < 0) {
+                                if (errno != EAGAIN && errno != EINTR) eof = true;
+                                break;
+                            }
+                            for (ssize_t i = 0; i < n; ++i) {
+                                if (buf[i] == '\n') {
+                                    if (!overflow) processLine(line);
+                                    line.clear();
+                                    overflow = false;
+                                } else if (line.size() < 16384 && !overflow) {
+                                    line += buf[i];
+                                } else { overflow = true; line.clear(); }
+                            }
+                        }
+                    }
+                    if (reapChild(child)) break;
+                    if (std::chrono::steady_clock::now() - started > std::chrono::seconds(1))
+                        available_ = true;
                 }
-                if (pipe) ::fclose(pipe);
-                // 停机补刀：stop() 恰在 fork 后、pid_ 写入前杀了个寂寞，
-                // 由这里补杀；正常运行期子进程已死则 kill 无害（ESRCH）
-                if (!running_.load() && pid_.load() > 0)
-                    ::kill(pid_.load(), SIGTERM);
-                ::waitpid(pid, nullptr, 0);  // 收尸防僵尸
-                pid_ = -1;
+                ::close(outfd[0]);
+                terminateChild(child);
+                pid_ = child;
                 available_ = false;
+                // A fork succeeding is not a healthy ASR session.
+                if (std::chrono::steady_clock::now() - started > std::chrono::seconds(30))
+                    retryMs = kRetryMinMs;
                 if (running_.load())
                     std::fprintf(stderr, "[Voice] asr-offline exited\n");
             }

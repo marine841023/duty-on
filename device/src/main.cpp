@@ -73,7 +73,7 @@
 using namespace dutyon;
 using Clock = std::chrono::steady_clock;
 
-static volatile bool g_running = true;
+static volatile std::sig_atomic_t g_running = true;
 
 void signalHandler(int) {
     g_running = false;
@@ -676,6 +676,7 @@ int main() {
         return 1;
     }
 
+    { // All renderers and workers must die before Cubism and the GL context.
     // 3. 用户配置（复用 1.x ~/.dutyon/config.json）——语言须在 UI 字体构建前生效
     UserConfig cfg = UserConfigStore::load();
     if (!cfg.language.empty()) I18n::setLang(cfg.language);
@@ -2216,8 +2217,8 @@ int main() {
             wifi_was_online = online_now;
         }
         // 配对握手成功后工作线程产出 token：取走持久化（重启免再配）。
-        if (std::string tok = api.takePairToken(); !tok.empty())
-            identity.setToken(tok);
+        if (auto tok = api.takePairToken())
+            identity.setToken(*tok);
         // 仅入网(Online)后广播发现 PC。发现应答只用于「找到 PC / 跟随 PC
         // 换 IP」，不作为拆除链路的依据——UDP 发现（2s 广播 + 8s 回包 TTL）
         // 在弱信号（实测 -81dBm）下丢几对包就超时，若据此清空地址会白白
@@ -3116,10 +3117,8 @@ int main() {
             // renderDate=主字体（含中文提示）。位置按 WIN_H 比例，横竖屏通用。
             if (dev_screen == DevScreen::WifiProvision) {
                 // 配网引导：热点 SSID/密码大字（用户要抄的）+ 分步说明。
-                //（QR 与浏览器手动地址均已移除——实测手机连热点后会被 MIUI
-                //  自动回切到家庭路由，扫码/浏览器路径全部失效。配网页入口
-                //  实测是手机 captive portal 检测弹出的「登录到网络」系统
-                //  通知，点击通知打开，就此引导。）
+                // 自动弹窗由手机系统决定；保留手动 HTTP 地址作为兜底，
+                // 并提醒用户在无互联网提示中继续使用设备热点。
                 //  横屏：左列热点信息、右列步骤；竖屏单列。
                 // 注意：本渲染系 y 轴向上（0=屏底），阅读顺序"上"= 大 y ——
                 // 标题在最大 y，步骤自上而下 = y 递减。
@@ -3173,23 +3172,15 @@ int main() {
                 // ---- ② ~ ⑥ 步骤（自上而下正序：y 从 s_top 递减）----
                 // 配网阶段用户往往还没装 PC 端 DutyOn，就地告知去哪下载；
                 // renderDate 过宽自动缩字。
-                //（QR 已移除：扫码/浏览器路径实测全部失效。配网页真实入口：
-                //  手机连上热点后，系统 captive portal 检测会在通知栏弹出
-                //  「登录到网络」消息，点击它即打开配网页——实测唯一可靠的
-                //  打开方式，浏览器手动输入 portal 地址打不开。）
-                // ⑥：DutyOn 安装 hooks 只写 hooks.json 文件；Trae 出于安全
-                //  要求在应用内（设置 → Hooks）手动启用开关才真正生效——
-                //  不启用则宠物对 AI 活动无反应（实测：装完不启用，宠物
-                //  一直睡觉、无声）。放在最后一步完成整个开箱引导闭环。
                 const std::string steps[] = {
-                    "② 手机弹出「登录到网络」",
-                    "    点击通知打开配网页",
+                    "② 点「登录到网络」通知",
+                    "    未弹出打开 192.168.4.1",
                     "③ 选 Wi-Fi 输密码提交",
                     "④ 联网后屏幕显示配对码",
                     "⑤ 电脑端右键宠物头像",
                     "    设备 → 配对设备 输码",
-                    "⑥ 打开 Trae 的 Hooks",
-                    "    设置 → Hooks → 启用",
+                    "⑥ 提示无互联网时",
+                    "    请选择继续使用此网络",
                 };
                 const int n = (int)(sizeof(steps) / sizeof(steps[0]));
                 // 行距：普通字号 1.5 倍行高
@@ -3553,6 +3544,7 @@ int main() {
     photo_player.stop();
 #endif
     ui.shutdown();
+    }
     Live2DRenderer::frameworkDispose();
     window->shutdown();
     delete window;

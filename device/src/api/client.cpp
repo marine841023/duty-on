@@ -1,5 +1,6 @@
 #include "api/client.h"
 #include "config.h"
+#include "platform/atomic_file.h"
 
 #include <atomic>
 #include <chrono>
@@ -123,6 +124,7 @@ struct ApiClient::Impl {
     // 目标地址（由 pc_discovery 发现动态更新；空 = 链路未建立）
     std::mutex url_mtx;
     std::string url;
+    uint64_t url_generation = 0;
 
     std::string snapshotUrl() {
         std::lock_guard<std::mutex> lk(url_mtx);
@@ -137,7 +139,7 @@ struct ApiClient::Impl {
 
     std::mutex tok_mtx;
     std::string token;          // 已附加到 session 请求头的令牌
-    std::string pending_token;  // 配对成功待主线程取走持久化
+    std::optional<std::string> pending_token;  // 配对成功待主线程取走持久化
     std::atomic<bool> has_token{false};
 
     // 本设备程序版本（附加到 X-DutyOn-Version 头；main 启动时读
@@ -157,20 +159,27 @@ struct ApiClient::Impl {
         std::lock_guard<std::mutex> lk(ver_mtx);
         return prog_ver;
     }
-    std::string takePendingToken() {
+    std::optional<std::string> takePendingToken() {
         std::lock_guard<std::mutex> lk(tok_mtx);
-        std::string t;
-        t.swap(pending_token);
+        auto t = std::move(pending_token);
+        pending_token.reset();
         return t;
+    }
+    cpr::Header authHeader() {
+        cpr::Header h{{"Content-Type", "application/json"}};
+        const auto tok = snapshotToken();
+        if (!tok.empty()) h["X-DutyOn-Token"] = tok;
+        return h;
     }
     void clearToken() {
         std::lock_guard<std::mutex> lk(tok_mtx);
         token.clear();
+        pending_token = std::string{};
         has_token = false;
     }
     // POST /api/pair-request {deviceId, code}；PC 记 pending 或（用户已输码）
     // 直接签发 token。拿到 token 即置 has_token，后续请求自动带头。
-    void tryPair(const std::string& base) {
+    void tryPair(const std::string& base, uint64_t generation) {
         std::string did, code;
         {
             std::lock_guard<std::mutex> lk(id_mtx);
@@ -191,6 +200,8 @@ struct ApiClient::Impl {
             if (j.value("status", std::string{}) == "paired") {
                 const std::string tok = j.value("token", std::string{});
                 if (!tok.empty()) {
+                    std::lock_guard<std::mutex> url_lk(url_mtx);
+                    if (generation != url_generation) return;
                     std::lock_guard<std::mutex> lk(tok_mtx);
                     token = tok;
                     pending_token = tok;
@@ -237,7 +248,13 @@ struct ApiClient::Impl {
         std::string applied_version; // 已应用到 session 请求头的程序版本
 
         while (!stop.load()) {
-            const std::string url = snapshotUrl();
+            std::string url;
+            uint64_t generation;
+            {
+                std::lock_guard<std::mutex> lk(url_mtx);
+                url = this->url;
+                generation = url_generation;
+            }
             if (url.empty()) {
                 // 链路未建立（未入网 / PC 未发现）：暂停请求等 setBaseUrl
                 applied_url.clear();
@@ -273,7 +290,7 @@ struct ApiClient::Impl {
                 if (identityReady() &&
                     now - last_pair >= std::chrono::milliseconds(3000)) {
                     last_pair = now;
-                    tryPair(url);
+                    tryPair(url, generation);
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
@@ -285,21 +302,32 @@ struct ApiClient::Impl {
                 if (auto s = FetchStatus(status_session, &code)) {
                     // 收到"重新配网"指令：先回执再入缓存（PC 清挂起；执行
                     // 由主线程消费 status 时触发，断网重进配网不影响本线程）
+                    {
+                        std::lock_guard<std::mutex> lk(url_mtx);
+                        if (generation != url_generation) continue;
+                    }
                     if (!s->reset_wifi_cmd.empty())
                         ackDeviceCmd(url, s->reset_wifi_cmd);
+                    std::lock_guard<std::mutex> url_lk(url_mtx);
+                    if (generation != url_generation) continue;
                     std::lock_guard<std::mutex> lk(mtx);
+                    // Preserve an acknowledged command until the UI consumes it.
+                    if (s->reset_wifi_cmd.empty() && status_seq != status_consumed)
+                        s->reset_wifi_cmd = status.reset_wifi_cmd;
                     status = *s;
                     status_seq++;
                 } else if (code == 401) {
                     // PC 侧已解除配对 / 令牌失效：丢弃令牌，下轮重新握手
                     printf("[ApiClient] 401, token rejected -> re-pair\n");
-                    clearToken();
-                    applied_token.clear();
+                    std::lock_guard<std::mutex> lk(url_mtx);
+                    if (generation == url_generation) clearToken();
                 }
             }
             if (now - last_metrics >= std::chrono::milliseconds(1500)) {
                 last_metrics = now;
                 if (auto m = FetchMetrics(metrics_session)) {
+                    std::lock_guard<std::mutex> url_lk(url_mtx);
+                    if (generation != url_generation) continue;
                     std::lock_guard<std::mutex> lk(mtx);
                     metrics = *m;
                     metrics_seq++;
@@ -333,6 +361,12 @@ void ApiClient::setBaseUrl(const std::string& url) {
     std::lock_guard<std::mutex> lk(impl_->url_mtx);
     if (impl_->url != url) {
         impl_->url = url;
+        ++impl_->url_generation;
+        {
+            std::lock_guard<std::mutex> cache_lk(impl_->mtx);
+            impl_->status_consumed = impl_->status_seq;
+            impl_->metrics_consumed = impl_->metrics_seq;
+        }
         printf("[ApiClient] base url -> %s\n",
                url.empty() ? "(link down)" : url.c_str());
     }
@@ -361,7 +395,7 @@ void ApiClient::setProgramVersion(const std::string& version) {
     impl_->prog_ver = version;
 }
 
-std::string ApiClient::takePairToken() { return impl_->takePendingToken(); }
+std::optional<std::string> ApiClient::takePairToken() { return impl_->takePendingToken(); }
 
 bool ApiClient::paired() const { return impl_->has_token.load(); }
 
@@ -399,7 +433,7 @@ bool ApiClient::bringToFront(const std::string& target) {
     try {
         auto r = cpr::Post(
             cpr::Url{base + "/api/bring-to-front"},
-            cpr::Header{{"Content-Type", "application/json"}},
+            impl_->authHeader(),
             cpr::Body{nlohmann::json{{"target", target}}.dump()},
             cpr::ConnectTimeout{1000}, cpr::Timeout{3000},
             cpr::Proxies{{"http", ""}, {"https", ""}});
@@ -413,7 +447,7 @@ std::string ApiClient::getHooks() {
     const std::string base = impl_->snapshotUrl();
     if (base.empty()) return {};
     try {
-        auto r = cpr::Get(cpr::Url{base + "/api/hooks"},
+        auto r = cpr::Get(cpr::Url{base + "/api/hooks"}, impl_->authHeader(),
                           cpr::ConnectTimeout{1000}, cpr::Timeout{3000},
                           cpr::Proxies{{"http", ""}, {"https", ""}});
         return r.status_code == 200 ? r.text : std::string{};
@@ -426,7 +460,7 @@ std::string ApiClient::installHooks() {
     const std::string base = impl_->snapshotUrl();
     if (base.empty()) return {};
     try {
-        auto r = cpr::Post(cpr::Url{base + "/api/hooks/install"},
+        auto r = cpr::Post(cpr::Url{base + "/api/hooks/install"}, impl_->authHeader(),
                            cpr::ConnectTimeout{1000}, cpr::Timeout{15000},
                            cpr::Proxies{{"http", ""}, {"https", ""}});
         return r.status_code == 200 ? r.text : std::string{};
@@ -439,7 +473,7 @@ bool ApiClient::quitApp() {
     const std::string base = impl_->snapshotUrl();
     if (base.empty()) return false;
     try {
-        auto r = cpr::Post(cpr::Url{base + "/api/quit"},
+        auto r = cpr::Post(cpr::Url{base + "/api/quit"}, impl_->authHeader(),
                            cpr::ConnectTimeout{1000}, cpr::Timeout{3000},
                            cpr::Proxies{{"http", ""}, {"https", ""}});
         return r.status_code == 200;
@@ -452,7 +486,7 @@ int ApiClient::getAutostart() {
     const std::string base = impl_->snapshotUrl();
     if (base.empty()) return -1;
     try {
-        auto r = cpr::Get(cpr::Url{base + "/api/autostart"},
+        auto r = cpr::Get(cpr::Url{base + "/api/autostart"}, impl_->authHeader(),
                           cpr::ConnectTimeout{1000}, cpr::Timeout{3000},
                           cpr::Proxies{{"http", ""}, {"https", ""}});
         if (r.status_code != 200) return -1;
@@ -468,8 +502,7 @@ bool ApiClient::setAutostart(bool enable) {
     if (base.empty()) return false;
     try {
         auto r = cpr::Post(
-            cpr::Url{base + "/api/autostart"},
-            cpr::Header{{"Content-Type", "application/json"}},
+            cpr::Url{base + "/api/autostart"}, impl_->authHeader(),
             cpr::Body{nlohmann::json{{"enabled", enable}}.dump()},
             cpr::ConnectTimeout{1000}, cpr::Timeout{3000},
             cpr::Proxies{{"http", ""}, {"https", ""}});
@@ -507,6 +540,24 @@ CustomCharacter ApiClient::fetchCharacter(const std::string& expect_id) {
     return out;
 }
 
+static std::optional<std::string> boundedGet(const std::string& url,
+                                              const cpr::Header& header,
+                                              size_t limit, int timeout_ms) {
+    std::string bytes;
+    bool overflow = false;
+    auto r = cpr::Get(cpr::Url{url}, header,
+        cpr::WriteCallback{[&](std::string chunk, intptr_t) {
+            if (chunk.size() > limit - bytes.size()) { overflow = true; return false; }
+            bytes.append(chunk);
+            return true;
+        }},
+        cpr::ConnectTimeout{2000}, cpr::Timeout{timeout_ms},
+        cpr::Proxies{{"http", ""}, {"https", ""}});
+    if (overflow || r.error.code != cpr::ErrorCode::OK || r.status_code != 200 || bytes.empty())
+        return std::nullopt;
+    return bytes;
+}
+
 bool ApiClient::downloadAnimation(const std::string& file_name,
                                    const std::string& save_path) {
     const std::string base = impl_->snapshotUrl();
@@ -515,17 +566,9 @@ bool ApiClient::downloadAnimation(const std::string& file_name,
         cpr::Header h;  // 已配对令牌（PC 对 /api/* 非回环请求门控）
         if (const std::string tok = impl_->snapshotToken(); !tok.empty())
             h["X-DutyOn-Token"] = tok;
-        auto r = cpr::Get(cpr::Url{base + "/api/animations/" + file_name}, h,
-                          cpr::ConnectTimeout{2000}, cpr::Timeout{30000},
-                          cpr::Proxies{{"http", ""}, {"https", ""}});
-        if (r.status_code != 200 || r.text.empty()) return false;
-        std::error_code ec;
-        std::filesystem::create_directories(
-            std::filesystem::path(save_path).parent_path(), ec);
-        std::ofstream out(save_path, std::ios::binary);
-        if (!out) return false;
-        out.write(r.text.data(), (std::streamsize)r.text.size());
-        return out.good();
+        auto bytes = boundedGet(base + "/api/animations/" + file_name, h,
+                                16 * 1024 * 1024, 30000);
+        return bytes && atomicWritePrivate(save_path, *bytes);
     } catch (...) {
         return false;
     }
@@ -539,11 +582,10 @@ bool ApiClient::fetchFramePhoto(std::vector<unsigned char>& out_bytes) {
         cpr::Header h;  // 已配对令牌（PC 对 /api/* 非回环请求门控）
         if (const std::string tok = impl_->snapshotToken(); !tok.empty())
             h["X-DutyOn-Token"] = tok;
-        auto r = cpr::Get(cpr::Url{base + "/api/frame/photo?max_side=1024"}, h,
-                          cpr::ConnectTimeout{2000}, cpr::Timeout{20000},
-                          cpr::Proxies{{"http", ""}, {"https", ""}});
-        if (r.status_code != 200 || r.text.empty()) return false;
-        out_bytes.assign(r.text.begin(), r.text.end());
+        auto bytes = boundedGet(base + "/api/frame/photo?max_side=1024", h,
+                                8 * 1024 * 1024, 20000);
+        if (!bytes) return false;
+        out_bytes.assign(bytes->begin(), bytes->end());
         return true;
     } catch (...) {
         out_bytes.clear();
@@ -581,17 +623,9 @@ bool ApiClient::downloadLive2dFile(const std::string& rel_path,
         cpr::Header h;  // 已配对令牌（PC 对 /live2d/* 非回环请求门控）
         if (const std::string tok = impl_->snapshotToken(); !tok.empty())
             h["X-DutyOn-Token"] = tok;
-        auto r = cpr::Get(cpr::Url{base + "/live2d/" + UrlEncodePath(rel_path)}, h,
-                          cpr::ConnectTimeout{2000}, cpr::Timeout{30000},
-                          cpr::Proxies{{"http", ""}, {"https", ""}});
-        if (r.status_code != 200 || r.text.empty()) return false;
-        std::error_code ec;
-        std::filesystem::create_directories(
-            std::filesystem::path(save_path).parent_path(), ec);
-        std::ofstream out(save_path, std::ios::binary);
-        if (!out) return false;
-        out.write(r.text.data(), (std::streamsize)r.text.size());
-        return out.good();
+        auto bytes = boundedGet(base + "/live2d/" + UrlEncodePath(rel_path), h,
+                                64 * 1024 * 1024, 30000);
+        return bytes && atomicWritePrivate(save_path, *bytes);
     } catch (...) {
         return false;
     }

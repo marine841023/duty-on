@@ -11,6 +11,10 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <limits>
+#ifndef _WIN32
+#include "platform/atomic_file.h"
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -20,6 +24,14 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 namespace {
+
+bool validInt(const json& value) {
+    if (!value.is_number_integer()) return false;
+    if (value.is_number_unsigned())
+        return value.get<uint64_t>() <= static_cast<uint64_t>(std::numeric_limits<int>::max());
+    const auto n = value.get<int64_t>();
+    return n >= std::numeric_limits<int>::min() && n <= std::numeric_limits<int>::max();
+}
 
 std::string homeDir() {
     const char* home = getenv("USERPROFILE");
@@ -52,8 +64,13 @@ void updateConfig(Fn&& fn) {
     fn(j);
     std::error_code ec;
     fs::create_directories(fs::path(path).parent_path(), ec);
+#ifdef _WIN32
     std::ofstream out(path);
     if (out) out << j.dump(2) << std::endl;
+#else
+    if (!atomicWritePrivate(path, j.dump(2) + "\n"))
+        fprintf(stderr, "[Config] failed to save configuration\n");
+#endif
 }
 
 // stateMotions JSON -> map（条目格式 {"sleeping": ["Flick3", 1], ...}）
@@ -62,7 +79,7 @@ std::map<std::string, std::pair<std::string, int>> parseMotions(const json& j) {
     if (!j.is_object()) return out;
     for (auto it = j.begin(); it != j.end(); ++it) {
         const json& v = it.value();
-        if (v.is_array() && v.size() >= 2 && v[0].is_string() && v[1].is_number())
+        if (v.is_array() && v.size() >= 2 && v[0].is_string() && validInt(v[1]) && v[1].get<int>() >= 0)
             out[it.key()] = {v[0].get<std::string>(), v[1].get<int>()};
     }
     return out;
@@ -127,10 +144,10 @@ UserConfig UserConfigStore::load() {
             if (it.value().is_string())
                 cfg.character_colors[it.key()] = it.value().get<std::string>();
     }
-    if (j.contains("deviceBrightness") && j["deviceBrightness"].is_number())
+    if (j.contains("deviceBrightness") && validInt(j["deviceBrightness"]))
         cfg.device_brightness =
             std::clamp(j["deviceBrightness"].get<int>(), 10, 100);
-    if (j.contains("deviceVolume") && j["deviceVolume"].is_number())
+    if (j.contains("deviceVolume") && validInt(j["deviceVolume"]))
         cfg.device_volume = std::clamp(j["deviceVolume"].get<int>(), 0, 100);
     if (j.contains("deviceRepo") && j["deviceRepo"].is_string())
         cfg.device_repo = j["deviceRepo"].get<std::string>();
@@ -152,8 +169,11 @@ UserConfig UserConfigStore::load() {
             if (it.value().is_boolean())
                 cfg.state_audio_muted[it.key()] = it.value().get<bool>();
     }
-    if (j.contains("screenRotation") && j["screenRotation"].is_number())
-        cfg.screen_rotation = std::clamp(j["screenRotation"].get<int>(), 0, 270);
+    if (j.contains("screenRotation") && validInt(j["screenRotation"])) {
+        const int rotation = j["screenRotation"].get<int>();
+        if (rotation == 0 || rotation == 90 || rotation == 180 || rotation == 270)
+            cfg.screen_rotation = rotation;
+    }
     if (j.contains("cloudServer") && j["cloudServer"].is_string())
         cfg.cloud_server = j["cloudServer"].get<std::string>();
     if (j.contains("cloudToken") && j["cloudToken"].is_string())
@@ -180,8 +200,8 @@ UserConfig UserConfigStore::load() {
     }
     if (j.contains("windowPosition") && j["windowPosition"].is_object()) {
         const json& wp = j["windowPosition"];
-        if (wp.contains("x") && wp["x"].is_number() &&
-            wp.contains("y") && wp["y"].is_number()) {
+        if (wp.contains("x") && validInt(wp["x"]) &&
+            wp.contains("y") && validInt(wp["y"])) {
             cfg.has_window_pos = true;
             cfg.win_x = wp["x"].get<int>();
             cfg.win_y = wp["y"].get<int>();
@@ -189,7 +209,8 @@ UserConfig UserConfigStore::load() {
     }
     if (j.contains("customCharacters") && j["customCharacters"].is_array()) {
         for (const auto& c : j["customCharacters"]) {
-            if (!c.is_object() || !c.contains("id") || !c.contains("name")) continue;
+            if (!c.is_object() || !c.contains("id") || !c["id"].is_string() ||
+                !c.contains("name") || !c["name"].is_string()) continue;
             CustomCharacter ch;
             ch.id = c["id"].get<std::string>();
             ch.name = c["name"].get<std::string>();

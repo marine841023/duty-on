@@ -1,10 +1,12 @@
 #ifndef _WIN32  // 仅设备端（ARM Linux）
 
 #include "net/device_identity.h"
+#include "platform/atomic_file.h"
 
 #include <nlohmann/json.hpp>
 
 #include <cstdio>
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -65,37 +67,41 @@ void DeviceIdentity::load() {
         ss << in.rdbuf();
         json j = json::parse(ss.str(), nullptr, /*allow_exceptions=*/false);
         if (!j.is_discarded() && j.is_object()) {
-            device_id_ = j.value("deviceId", std::string{});
-            pair_code_ = j.value("pairCode", std::string{});
-            ap_pass_ = j.value("apPass", std::string{});
-            token_ = j.value("token", std::string{});
+            const auto text = [&](const char* key) {
+                return j.contains(key) && j[key].is_string() ? j[key].get<std::string>() : std::string{};
+            };
+            device_id_ = text("deviceId");
+            pair_code_ = text("pairCode");
+            ap_pass_ = text("apPass");
+            token_ = text("token");
         }
     }
     bool changed = false;
-    if (device_id_.size() < 8) { device_id_ = randomHex(8); changed = true; }
-    if (pair_code_.size() != 6) { pair_code_ = randomDigits(6); changed = true; }
+    const auto digits = [](const std::string& s) {
+        return std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
+    };
+    const auto hex = [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); };
+    if (device_id_.size() < 8 || device_id_.size() > 64 ||
+        !std::all_of(device_id_.begin(), device_id_.end(), hex)) { device_id_ = randomHex(8); changed = true; }
+    if (pair_code_.size() != 6 || !digits(pair_code_)) { pair_code_ = randomDigits(6); changed = true; }
     // AP 口令：8 位随机数字（WPA2 最短 8 位）；持久化保证跨重启热点口令不变
-    if (ap_pass_.size() != 8) { ap_pass_ = randomDigits(8); changed = true; }
+    if (ap_pass_.size() != 8 || !digits(ap_pass_)) { ap_pass_ = randomDigits(8); changed = true; }
     if (changed) save();
-    printf("[Identity] device_id=%s pair_code=%s paired=%d\n",
-           device_id_.c_str(), pair_code_.c_str(), paired() ? 1 : 0);
+    printf("[Identity] device_id=%s paired=%d\n", device_id_.c_str(), paired() ? 1 : 0);
 }
 
 void DeviceIdentity::save() const {
     const fs::path p = identityPath();
     std::error_code ec;
-    fs::create_directories(p.parent_path(), ec);
     json j;
     j["deviceId"] = device_id_;
     j["pairCode"] = pair_code_;
     j["apPass"] = ap_pass_;
     j["token"] = token_;
-    std::ofstream out(p);
-    if (!out) {
+    if (!atomicWritePrivate(p.string(), j.dump(2))) {
         fprintf(stderr, "[Identity] save failed: %s\n", p.string().c_str());
         return;
     }
-    out << j.dump(2);
 }
 
 std::string DeviceIdentity::shortSuffix() const {

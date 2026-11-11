@@ -80,9 +80,11 @@ small display becomes a **desk companion screen for your AI tasks**:
   the character vertically centered
 - **Clock + status icons** — themed clock/date, Wi-Fi / PC link icons in the
   corner (disconnected icons get a big red X overlay — readable at a glance)
-- **Wi-Fi provisioning** — the device opens a hotspot (`DutyOn-XXXX`) on
-  boot; connect your phone and the **captive portal pops up automatically**
-  to pick your home Wi-Fi. No keyboard needed. The PC can later send a
+- **Wi-Fi provisioning** — without usable saved Wi-Fi credentials, the device
+  opens a hotspot (`DutyOn-XXXX`). Connect using the password on its screen;
+  the password is generated once and retained across restarts. A captive
+  portal helps pick your home Wi-Fi; if the phone does not open it, visit
+  `http://192.168.4.1/`. The PC can later send a
   "re-provision" command to switch networks
 - **Pairing & sync** — the screen shows a 6-digit pairing code; enter it on
   the PC (right-click the pet → Device → Pair). Characters, Live2D models
@@ -115,6 +117,11 @@ powershell .userdata/deploy-cross.ps1
 > Reference hardware: Orange Pi Zero 2W (H616) + Debian 13 + HDMI display.
 > The Cubism Native SDK must be placed manually at
 > `device/third_party/CubismNativeSdk/`.
+
+Deployment must include `wifi-common.sh`, `wifi-ap.sh`, `wifi-client.sh`,
+`wifi-off.sh` and `arp-keepalive.sh` alongside the binary. See the
+[device stability review](docs/device-review.md) for fixes, regression tests
+and hardware verification limits.
 
 ## 🖥 Desktop features
 

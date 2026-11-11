@@ -31,7 +31,7 @@ const long long kOfferTtlMs = 8000;       // 回包有效期（超时视为 PC �
 } // namespace
 
 PcDiscovery::PcDiscovery(std::string device_id) : device_id_(std::move(device_id)) {
-    fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+    fd_ = ::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (fd_ < 0) {
         fprintf(stderr, "[Discover] socket: %s\n", strerror(errno));
         return;
@@ -45,8 +45,11 @@ PcDiscovery::PcDiscovery(std::string device_id) : device_id_(std::move(device_id
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_ANY);
     a.sin_port = 0;  // 内核分配临时端口
-    if (::bind(fd_, reinterpret_cast<sockaddr*>(&a), sizeof(a)) < 0)
+    if (::bind(fd_, reinterpret_cast<sockaddr*>(&a), sizeof(a)) < 0) {
         fprintf(stderr, "[Discover] bind: %s\n", strerror(errno));
+        ::close(fd_);
+        fd_ = -1;
+    }
 }
 
 PcDiscovery::~PcDiscovery() {
@@ -88,6 +91,10 @@ std::optional<std::string> PcDiscovery::poll(bool* paired_out) {
             inet_ntop(AF_INET, &src.sin_addr, ip, sizeof(ip));
             std::string url =
                 std::string("http://") + ip + ":" + std::to_string(api_port);
+            // Keep a fresh paired PC; another PC's broadcast reply must not
+            // bounce the API endpoint and invalidate the device token.
+            const bool current_fresh = last_offer_ms_ != 0 && now - last_offer_ms_ < kOfferTtlMs;
+            if (current_fresh && paired_ && (url != base_url_ || paired == 0)) continue;
             if (url != base_url_)
                 printf("[Discover] PC offer: %s (paired=%d)\n", url.c_str(), paired);
             base_url_ = url;
@@ -96,8 +103,8 @@ std::optional<std::string> PcDiscovery::poll(bool* paired_out) {
         }
     }
 
-    if (paired_out) *paired_out = paired_;
     const bool fresh = (last_offer_ms_ != 0) && (now - last_offer_ms_ < kOfferTtlMs);
+    if (paired_out) *paired_out = fresh && paired_;
     if (!fresh) return std::nullopt;
     return base_url_;
 }

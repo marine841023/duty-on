@@ -550,6 +550,8 @@ void GifSprite::render() {
 #include <stb_image.h>
 
 #include <fstream>
+#include <cmath>
+#include "render/media_limits.h"
 #include <string>
 #include <vector>
 
@@ -611,7 +613,11 @@ struct GifSprite::Impl {
         if (program) return;
         GLuint vs = compileShader(GL_VERTEX_SHADER, kVertSrc);
         GLuint fs = compileShader(GL_FRAGMENT_SHADER, kFragSrc);
-        if (!vs || !fs) return;
+        if (!vs || !fs) {
+            if (vs) glDeleteShader(vs);
+            if (fs) glDeleteShader(fs);
+            return;
+        }
         program = glCreateProgram();
         glAttachShader(program, vs);
         glAttachShader(program, fs);
@@ -646,8 +652,12 @@ bool GifSprite::load(const std::string& path_utf8) {
         fprintf(stderr, "GIF load failed: %s\n", path_utf8.c_str());
         return false;
     }
-    std::vector<unsigned char> buf((std::istreambuf_iterator<char>(in)),
-                                   std::istreambuf_iterator<char>());
+    in.seekg(0, std::ios::end);
+    const auto length = in.tellg();
+    if (length <= 0 || length > 16 * 1024 * 1024) return false;
+    in.seekg(0);
+    std::vector<unsigned char> buf(static_cast<size_t>(length));
+    if (!in.read(reinterpret_cast<char*>(buf.data()), length)) return false;
     if (buf.empty()) {
         fprintf(stderr, "GIF load failed (empty): %s\n", path_utf8.c_str());
         return false;
@@ -658,6 +668,7 @@ bool GifSprite::load(const std::string& path_utf8) {
     int* delays_ms = nullptr;
     unsigned char* data = nullptr;
     if (is_gif) {
+        if (!validGifBudget(buf.data(), buf.size())) return false;
         // stb 与浏览器/WIC 的语义差异：首帧未覆盖的像素会被
         // GIF 逻辑屏幕背景色强制不透明填充（绿幕 GIF 因此出现绿色边框）。
         // 置 bgindex=0 让 stb 跳过该填充，与 PC 端 WIC 渲染一致。
@@ -668,10 +679,13 @@ bool GifSprite::load(const std::string& path_utf8) {
     } else {
         // 静态图（PNG/JPG 等）：单帧，帧时长拉长让 update 自然停留
         z = 1;
+        if (!stbi_info_from_memory(buf.data(), (int)buf.size(), &w, &h, nullptr) ||
+            !validImageSize(w, h)) return false;
         data = stbi_load_from_memory(buf.data(), (int)buf.size(), &w, &h,
                                      nullptr, 4);
     }
-    if (!data || z <= 0) {
+    if (!data || z <= 0 || !validImageSize(w, h)) {
+        if (data) stbi_image_free(data);
         fprintf(stderr, "GIF load failed: %s (%s)\n", path_utf8.c_str(),
                 stbi_failure_reason());
         if (delays_ms) stbi_image_free(delays_ms);
@@ -693,6 +707,7 @@ bool GifSprite::load(const std::string& path_utf8) {
     }
     stbi_image_free(data);
     if (delays_ms) stbi_image_free(delays_ms);  // delays 是独立分配
+    if (impl_->tex) { glDeleteTextures(1, &impl_->tex); impl_->tex = 0; }
     impl_->w = w;
     impl_->h = h;
     impl_->n = z;
@@ -723,7 +738,10 @@ void GifSprite::unload() {
 
 void GifSprite::update(float delta_seconds) {
     if (impl_->frames.empty()) return;
-    impl_->elapsed += delta_seconds;
+    if (!std::isfinite(delta_seconds) || delta_seconds <= 0) return;
+    float cycle = 0;
+    for (float delay : impl_->delays) cycle += delay;
+    impl_->elapsed += std::fmod(delta_seconds, cycle);
     float dur = impl_->delays[impl_->cur];
     while (impl_->elapsed >= dur) {
         impl_->elapsed -= dur;

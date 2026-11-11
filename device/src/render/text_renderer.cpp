@@ -110,7 +110,11 @@ struct TextRenderer::Impl {
         if (program) return;
         GLuint vs = compileShader(GL_VERTEX_SHADER, kVertSrc);
         GLuint fs = compileShader(GL_FRAGMENT_SHADER, kFragSrc);
-        if (!vs || !fs) return;
+        if (!vs || !fs) {
+            if (vs) glDeleteShader(vs);
+            if (fs) glDeleteShader(fs);
+            return;
+        }
         program = glCreateProgram();
         glAttachShader(program, vs);
         glAttachShader(program, fs);
@@ -174,7 +178,7 @@ struct TextRenderer::Impl {
         int bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
         stbtt_GetGlyphBitmapBox(&font, gi, scale, scale, &bx0, &by0, &bx1, &by1);
         const int bw = bx1 - bx0, bh = by1 - by0;
-        if (gi == 0 || bw <= 0 || bh <= 0) {  // 缺字/空白：只走 advance
+        if (gi == 0 || bw <= 0 || bh <= 0 || bw + 2 >= kAtlas || bh + 2 >= kAtlas) {
             g.has_bitmap = false;
             if (g.advance <= 0.0f) g.advance = size * 0.5f;
             return &cache.emplace(key, g).first->second;
@@ -252,19 +256,24 @@ bool TextRenderer::load(const std::string& font_path) {
     fseek(f, 0, SEEK_END);
     const long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (sz <= 0) {
+    if (sz < 12 || sz > 32 * 1024 * 1024) {
         fclose(f);
         return false;
     }
-    impl_->font_buf.resize((size_t)sz);
-    const size_t rd = fread(impl_->font_buf.data(), 1, (size_t)sz, f);
+    std::vector<unsigned char> font_buf((size_t)sz);
+    const size_t rd = fread(font_buf.data(), 1, (size_t)sz, f);
     fclose(f);
     if (rd != (size_t)sz) return false;
-    if (!stbtt_InitFont(&impl_->font, impl_->font_buf.data(),
-                        stbtt_GetFontOffsetForIndex(impl_->font_buf.data(), 0))) {
+    stbtt_fontinfo font{};
+    const int offset = stbtt_GetFontOffsetForIndex(font_buf.data(), 0);
+    if (offset < 0 || (size_t)offset >= font_buf.size() ||
+        !stbtt_InitFont(&font, font_buf.data(), offset)) {
         fprintf(stderr, "[TextRenderer] font parse failed: %s\n", font_path.c_str());
         return false;
     }
+    impl_->font_buf.swap(font_buf);
+    impl_->font = font;
+    if (impl_->tex) impl_->resetAtlas();
     impl_->loaded = true;
     printf("[TextRenderer] font loaded: %s (%ld bytes)\n", font_path.c_str(), sz);
     return true;

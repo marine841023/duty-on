@@ -1,4 +1,4 @@
-# sync-device.ps1 —— 设备程序自动更新（本地交叉编译 + 直推部署）
+﻿# sync-device.ps1 —— 设备程序自动更新（本地交叉编译 + 直推部署）
 #
 # 由 PC 端 dutyon-pet 的 launchDeviceSync() 调用（设备连上 PC 且源码哈希与
 # 设备上报版本不一致时触发），CLI 接口与进度标记沿用旧设备端编译版：
@@ -71,9 +71,11 @@ Log 'PROGRESS=70 deploy'
 scp @sshOpts $bin "${Device}:/opt/dutyon-src/device/build/dutyon-pet" *> $null
 if ($LASTEXITCODE -ne 0) { Fail 'scp binary failed' }
 scp @sshOpts `
+    "$Repo\device\scripts\wifi-common.sh" `
     "$Repo\device\scripts\wifi-ap.sh" `
     "$Repo\device\scripts\wifi-client.sh" `
     "$Repo\device\scripts\wifi-off.sh" `
+    "$Repo\device\scripts\arp-keepalive.sh" `
     "${Device}:/opt/dutyon-src/device/scripts/" *> $null
 if ($LASTEXITCODE -ne 0) { Fail 'scp wifi scripts failed' }
 ssh @sshOpts $Device 'mkdir -p /opt/dutyon-src/.userdata' *> $null

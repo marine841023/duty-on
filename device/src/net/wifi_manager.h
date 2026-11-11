@@ -47,13 +47,12 @@ public:
     void stop();
 
     WifiState state() const { return state_.load(); }
-    bool hasSavedCreds() const { return has_creds_; }
+    bool hasSavedCreds() const { return has_creds_.load(); }
 
     // AP 模式信息（供配网屏幕大字与提示文案）
     const std::string& apSsid() const { return ap_ssid_; }
     const std::string& apPass() const { return ap_pass_; }
-    // captive portal 基地址（portal 服务的 / 跳转 Location 用；配网屏不再
-    // 提示浏览器手动访问——实测打不开，未弹窗改引导断开重连热点）
+    // captive portal 基地址（系统探测跳转及未弹窗时的手动访问入口）
     const std::string& portalUrl() const { return portal_url_; }
 
     // client 模式拿到 IP 后非空（Online 状态）
@@ -61,7 +60,7 @@ public:
 
     // captive portal 提交的家庭 Wi-Fi 凭据 -> 持久化并请求切 client（portal
     // 线程调用；仅置标志，实际切换在 poll() 里做，避免跨线程动射频）
-    void saveAndJoin(const std::string& ssid, const std::string& pass);
+    bool saveAndJoin(const std::string& ssid, const std::string& pass);
 
     // PC 端"重新配网"指令入口（api/client 收到 deviceCmd=reset-wifi 后经
     // main 调用）：清除已存家庭 Wi-Fi 凭据并重回 AP 配网模式（换路由器
@@ -80,7 +79,6 @@ private:
     bool clientConnected();      // wlan0 有 IP 且非 AP 地址
     bool hostapdAlive() const;   // hostapd 进程存活（pid 文件 + kill 0）
     void loadCreds();            // 读 ~/.dutyon/wifi.json
-    void saveCreds();            // 写 ~/.dutyon/wifi.json
     void startPortal();          // 启动 httplib captive portal（80）
     void stopPortal();
 
@@ -94,7 +92,7 @@ private:
     std::string wlan_ = "wlan0";
 
     mutable std::mutex cred_mu_;
-    bool has_creds_ = false;
+    std::atomic<bool> has_creds_{false};
     std::string home_ssid_;
     std::string home_pass_;
 
@@ -105,8 +103,7 @@ private:
     long long state_since_ms_ = 0;   // 进入当前状态的时刻（超时回退用）
     long long last_ap_check_ms_ = 0; // hostapd 存活检查的上次时刻（AP 自愈）
     int join_attempts_ = 0;
-    // AP 自愈连续失败计数：≥3 判定驱动 beacon 槽位泄漏（同 boot 内
-    // hostapd 起过一次后必 ENOMEM，软件层无法复位）→ 自动重启设备
+    // 仅记录 AP 修复次数，配置/服务错误不能触发整机重启循环。
     int ap_revives_ = 0;
     // ARP 广播保活上次执行时刻（配网态每 5s 一次，见 poll()）
     long long last_arp_keepalive_ms_ = 0;

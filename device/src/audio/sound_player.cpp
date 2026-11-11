@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <condition_variable>
+#include <fcntl.h>
 #include <map>
 #include <mutex>
 #include <poll.h>
@@ -23,6 +25,7 @@
 #include <vector>
 
 #include "config.h"
+#include "platform/child_process.h"
 
 namespace dutyon {
 
@@ -45,6 +48,7 @@ constexpr int kContentRate = 48000;   // PCM 内容真实采样率（= kStreamRa
 constexpr int kChunkFrames = 2400;    // 每块 50ms（@kContentRate）
 constexpr int kChunkSamples = kChunkFrames * kStreamCh;
 constexpr int kPrebufferChunks = 10;  // 启动预缓冲 500ms，防开局 underrun
+constexpr size_t kMaxPcmSamples = kStreamRate * kStreamCh * 60; // 60 seconds
 
 // ---- PCM 合成兜底（wav 缺失时用）：stereo S16LE @kContentRate -------------
 void appendSilence(std::vector<int16_t>& out, float ms) {
@@ -140,8 +144,9 @@ std::vector<int16_t> loadWavRaw(const std::string& path, uint32_t* out_rate,
                 fread(&align, 2, 1, f) != 1 || fread(&bps, 2, 1, f) != 1) {
                 break;
             }
-            if (sz > 16) fseek(f, (long)(sz - 16), SEEK_CUR);
-            if (tag != 1 || bps != 16) {  // 仅支持未压缩 16bit PCM
+            if (sz > 1024 * 1024 || fseek(f, (long)(sz - 16 + (sz & 1)), SEEK_CUR) != 0) break;
+            if (tag != 1 || bps != 16 || sr < 8000 || sr > 192000 ||
+                (nch != 1 && nch != 2) || align != nch * 2) {
                 fprintf(stderr, "[Sound] %s: unsupported fmt tag=%u bps=%u\n",
                         path.c_str(), (unsigned)tag, (unsigned)bps);
                 break;
@@ -151,12 +156,14 @@ std::vector<int16_t> loadWavRaw(const std::string& path, uint32_t* out_rate,
             got_fmt = true;
         } else if (memcmp(id, "data", 4) == 0 && got_fmt) {
             const size_t n = sz / sizeof(int16_t);
+            if (n > kMaxPcmSamples || n % ch != 0 || sz % 2 != 0) break;
             out.resize(n);
             const size_t rd = fread(out.data(), sizeof(int16_t), n, f);
             out.resize(rd);
             break;
         } else {
-            fseek(f, (long)(sz + (sz & 1)), SEEK_CUR);  // chunk 奇数长度需对齐
+            if (sz > 32 * 1024 * 1024 ||
+                fseek(f, (long)(sz + (sz & 1)), SEEK_CUR) != 0) break;
         }
     }
 
@@ -201,7 +208,7 @@ std::vector<int16_t> resampleToContent(const std::vector<int16_t>& in,
     if (rate == (uint32_t)kContentRate) return st;
     const double step = (double)rate / (double)kContentRate;
     const size_t outFrames = (size_t)((double)inFrames / step);
-    if (outFrames == 0) return {};
+    if (outFrames == 0 || outFrames > kMaxPcmSamples / 2) return {};
     std::vector<int16_t> out(outFrames * 2);
     for (size_t i = 0; i < outFrames; ++i) {
         const double pos = (double)i * step;
@@ -219,6 +226,8 @@ std::vector<int16_t> resampleToContent(const std::vector<int16_t>& in,
 
 // ---- 外部命令与 shell 引用（playFile 压缩格式解码用） ----------------------
 bool haveCmd(const char* cmd) {
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
     static std::map<std::string, bool> cache;
     auto it = cache.find(cmd);
     if (it != cache.end()) return it->second;
@@ -226,19 +235,6 @@ bool haveCmd(const char* cmd) {
     const bool ok = system(c.c_str()) == 0;
     cache[cmd] = ok;
     return ok;
-}
-
-// shell 单引号包裹并转义（路径由本程序生成通常安全，仍防御单引号）
-std::string shellQuote(const std::string& s) {
-    std::string out = "'";
-    for (char ch : s) {
-        if (ch == '\'')
-            out += "'\\''";
-        else
-            out += ch;
-    }
-    out += "'";
-    return out;
 }
 
 }  // namespace
@@ -258,7 +254,7 @@ std::string shellQuote(const std::string& s) {
 // snd_pcm_writei 永不退出——pclose() 死等 aplay → worker 卡死，pre-ack
 // 重建与 15 分钟健康重建全部失效（实测 stream rebuild 后无 respawned 日志）。
 // 直控 PID 后：writeChunk 用 poll 超时检测管道拥塞（aplay 不读 stdin），
-// respawn 先 SIGKILL 再 waitpid（无条件、不阻塞），卡死流必能重建。
+// 有界终止/回收；驱动 D 状态无法回收时保留 PID，避免无限创建替代进程。
 // ---------------------------------------------------------------------------
 struct SoundPlayer::Impl {
     int pipe_fd_ = -1;      // aplay stdin 管道写端（父进程持有）
@@ -270,7 +266,11 @@ struct SoundPlayer::Impl {
     std::atomic<bool> rebuild_requested_{false};  // 唤醒应答前强制重建请求
     std::atomic<int> volume_{80};  // 软件音量 0-100（PC 菜单「设备→音量」下发）
     std::thread worker_;
-    bool warn_once_ = false;
+    std::thread decoder_;
+    std::deque<std::string> decode_jobs_;
+    std::condition_variable decode_cv_;
+    pid_t decoder_pid_ = -1; // decoder thread only
+    std::atomic<bool> warn_once_{false};
     // pcm 流最近一次打开时刻：HDMI 链路保活用（见 run 中的定期重建）
     std::chrono::steady_clock::time_point stream_opened_at_{};
     // 保活间隔：USB 麦在位时 HDMI 音频通道可能一次性卡死（ALSA 层仍在
@@ -287,8 +287,9 @@ struct SoundPlayer::Impl {
 
     // fork/execv 启动 aplay（stdin = 管道读端，raw 流模式）
     bool spawnAplay() {
+        if (!reapChild(aplay_pid_)) return false;
         int fds[2];
-        if (::pipe(fds) != 0) return false;
+        if (::pipe2(fds, O_CLOEXEC) != 0) return false;
         const std::string rate = std::to_string(kStreamRate);
         const std::string ch = std::to_string(kStreamCh);
         // argv 在 fork 前构建（子进程内不 malloc）
@@ -312,38 +313,39 @@ struct SoundPlayer::Impl {
             _exit(127);  // exec 失败
         }
         ::close(fds[0]);
+        ::fcntl(fds[1], F_SETFL, O_NONBLOCK);
         pipe_fd_ = fds[1];
         aplay_pid_ = pid;
         return true;
     }
 
-    // 强杀并回收 aplay（SIGKILL 无条件，HDMI DMA 卡死也能解除；不阻塞）
+    // Driver D-state may survive KILL. Retain PID and suppress replacements.
     void killAplay() {
-        if (aplay_pid_ > 0) {
-            ::kill(aplay_pid_, SIGKILL);
-            ::waitpid(aplay_pid_, nullptr, 0);
-            aplay_pid_ = -1;
-        }
         if (pipe_fd_ >= 0) {
             ::close(pipe_fd_);
             pipe_fd_ = -1;
         }
+        terminateChild(aplay_pid_);
     }
 
     void start() {
         ::signal(SIGPIPE, SIG_IGN);  // aplay 被杀后 write 得 EPIPE 而非进程终止
-        if (!spawnAplay()) {
-            fprintf(stderr, "[Sound] aplay unavailable, sound disabled\n");
-            return;
-        }
-
         running_ = true;
-        // 预缓冲：先灌静音建立水位，再启动写线程，避免开局 underrun
-        const std::vector<int16_t> silence(kChunkSamples, 0);
-        for (int i = 0; i < kPrebufferChunks; ++i) writeChunk(silence);
-        stream_opened_at_ = std::chrono::steady_clock::now();
-
-        worker_ = std::thread([this] { run(); });
+        worker_ = std::thread([this] { if (respawn()) run(); });
+        decoder_ = std::thread([this] {
+            while (running_.load()) {
+                std::string path;
+                {
+                    std::unique_lock<std::mutex> lock(mu_);
+                    decode_cv_.wait(lock, [this] { return !running_.load() || !decode_jobs_.empty(); });
+                    if (!running_.load()) break;
+                    path = std::move(decode_jobs_.front());
+                    decode_jobs_.pop_front();
+                }
+                decodeFile(path);
+            }
+            terminateChild(decoder_pid_);
+        });
         printf("[Sound] stream ready: %s %dHz/%dch (content %dHz)\n",
                device().c_str(), kStreamRate, kStreamCh, kContentRate);
     }
@@ -351,6 +353,8 @@ struct SoundPlayer::Impl {
     void stop() {
         stopping_ = true;
         running_ = false;
+        decode_cv_.notify_all();
+        if (decoder_.joinable()) decoder_.join();
         if (worker_.joinable()) worker_.join();
         killAplay();  // 关闭流，codec 下电（此刻有最后一次 pop）
     }
@@ -359,28 +363,27 @@ struct SoundPlayer::Impl {
     // stdin、管道满 → POLLOUT 不就绪 → false → 上层 respawn 强杀重建）
     bool writeChunk(const std::vector<int16_t>& chunk) {
         if (pipe_fd_ < 0) return false;
-        struct pollfd pfd;
-        pfd.fd = pipe_fd_;
-        pfd.events = POLLOUT;
-        pfd.revents = 0;
-        if (::poll(&pfd, 1, 250) != 1) return false;  // 超时 = 流卡死
         const size_t bytes = chunk.size() * sizeof(int16_t);
-        const ssize_t n = ::write(pipe_fd_, chunk.data(), bytes);
-        if (n != (ssize_t)bytes) {
-            if (!warn_once_ && !stopping_.load()) {
-                warn_once_ = true;
-                // 措辞中性：正常停机时连 aplay 一起杀，这里必然拿到 EPIPE，
-                // 属预期路径；运行中 aplay 意外退出也走同一分支。
-                fprintf(stderr, "[Sound] aplay stream closed\n");
-            }
-            return false;
+        size_t sent = 0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+        while (sent < bytes && running_.load() && std::chrono::steady_clock::now() < deadline) {
+            pollfd pfd{pipe_fd_, POLLOUT, 0};
+            const int ready = ::poll(&pfd, 1, 25);
+            if (ready < 0 && errno == EINTR) continue;
+            if (ready < 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) return false;
+            if (!ready) continue;
+            const ssize_t n = ::write(pipe_fd_, reinterpret_cast<const char*>(chunk.data()) + sent, bytes - sent);
+            if (n > 0) sent += static_cast<size_t>(n);
+            else if (n < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+            else return false;
         }
-        return true;
+        return sent == bytes;
     }
 
     void run() {
         std::vector<int16_t> chunk(kChunkSamples, 0);
         while (running_.load()) {
+            std::fill(chunk.begin(), chunk.end(), 0);
             // 应答前强制重建请求（唤醒应答防 H616 HDMI 间歇静音）：
             // 重建后本轮流空 chunk 预热，下一轮恢复常规输出
             if (rebuild_requested_.exchange(false)) {
@@ -436,13 +439,14 @@ struct SoundPlayer::Impl {
     // 死锁——aplay 阻塞在 snd_pcm_writei，writeChunk poll 超时，必须
     // SIGKILL 才能解除。失败退避 1s 重试，期间入队丢弃。
     bool respawn() {
-        killAplay();  // SIGKILL + waitpid：不阻塞，卡死的 aplay 也必死
+        killAplay();
         const std::vector<int16_t> silence(kChunkSamples, 0);
+        int retry_ms = 1000;
         while (running_.load() && !stopping_.load()) {
             if (spawnAplay()) {
                 bool ok = true;
-                for (int i = 0; i < kPrebufferChunks; ++i)
-                    ok = writeChunk(silence) && ok;
+                for (int i = 0; i < kPrebufferChunks && ok; ++i)
+                    ok = writeChunk(silence);
                 if (ok) {
                     stream_opened_at_ = std::chrono::steady_clock::now();
                     printf("[Sound] stream respawned: %s\n", device().c_str());
@@ -450,30 +454,29 @@ struct SoundPlayer::Impl {
                 }
                 killAplay();  // aplay 起了但立刻死（设备未就绪），继续等
             }
-            for (int w = 0; w < 10 && running_.load() && !stopping_.load(); ++w)
+            for (int w = 0; w < retry_ms / 100 && running_.load() && !stopping_.load(); ++w)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            retry_ms = std::min(retry_ms * 2, 30000);
         }
         return false;
     }
 
     void enqueue(std::vector<int16_t> buf) {
-        if (buf.empty() || pipe_fd_ < 0) return;
+        if (buf.empty() || buf.size() > kMaxPcmSamples || !running_.load()) return;
         std::lock_guard<std::mutex> lk(mu_);
         if (queue_.size() >= 4) queue_.pop_front();  // 防提示音堆积
         queue_.push_back(std::move(buf));
     }
 
-    // playFile 解码输出整段入队（不参与 cap-4 淘汰，避免长音频被挤掉）
+    // playFile 解码输出整段入队（同样受队列容量限制）
     void enqueueFull(std::vector<int16_t> buf) {
-        if (buf.empty()) return;
-        std::lock_guard<std::mutex> lk(mu_);
-        queue_.push_back(std::move(buf));
+        enqueue(std::move(buf));
     }
 
     // playFile 工作体：按扩展名提取 PCM 后整段注入常驻流队列。
     // wav 直接解析 + 重采样；压缩格式统一走 ffmpeg（24k stereo S16LE），
     // 缺 ffmpeg 时告警一次后忽略（mpg123 的重采样/声道 CLI 管道不可控，
-    // 不再兜底）。解码在 detached 线程执行，避免阻塞渲染主线程
+    // 不再兜底）。解码在可 join 的工作线程执行，避免阻塞渲染主线程
     void decodeFile(const std::string& path) {
         uint32_t rate = 0;
         uint16_t ch = 0;
@@ -491,18 +494,47 @@ struct SoundPlayer::Impl {
             }
             return;
         }
-        const std::string cmd = "ffmpeg -v quiet -i " + shellQuote(path) +
-                                " -f s16le -ar " + std::to_string(kContentRate) +
-                                " -ac 2 - 2>/dev/null";
-        FILE* f = popen(cmd.c_str(), "r");
-        if (!f) return;
-        std::vector<int16_t> acc;
-        int16_t buf[4096];
-        size_t n;
-        while ((n = fread(buf, sizeof(int16_t), 4096, f)) > 0)
-            acc.insert(acc.end(), buf, buf + n);
-        pclose(f);
-        enqueueFull(std::move(acc));
+        if (!running_.load() || !reapChild(decoder_pid_)) return;
+        std::vector<std::string> args = {"ffmpeg", "-nostdin", "-v", "quiet", "-i", path,
+            "-t", "60", "-f", "s16le", "-ar", std::to_string(kContentRate), "-ac", "2", "-"};
+        std::vector<char*> argv;
+        for (auto& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
+        argv.push_back(nullptr);
+        int fds[2];
+        if (::pipe2(fds, O_CLOEXEC) != 0) return;
+        decoder_pid_ = ::fork();
+        if (decoder_pid_ == 0) {
+            ::dup2(fds[1], STDOUT_FILENO);
+            ::close(fds[0]); ::close(fds[1]);
+            ::execvp("ffmpeg", argv.data());
+            _exit(127);
+        }
+        ::close(fds[1]);
+        if (decoder_pid_ < 0) { ::close(fds[0]); return; }
+        ::fcntl(fds[0], F_SETFL, O_NONBLOCK);
+        std::vector<unsigned char> bytes;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        bool eof = false, valid = true;
+        while (running_.load() && !eof && std::chrono::steady_clock::now() < deadline) {
+            pollfd pfd{fds[0], POLLIN, 0};
+            int ready = ::poll(&pfd, 1, 50);
+            if (ready < 0 && errno != EINTR) { valid = false; break; }
+            if (ready <= 0) continue;
+            unsigned char buf[8192];
+            const ssize_t n = ::read(fds[0], buf, sizeof(buf));
+            if (n == 0) eof = true;
+            else if (n > 0) {
+                if (bytes.size() + static_cast<size_t>(n) > kMaxPcmSamples * 2) { valid = false; break; }
+                bytes.insert(bytes.end(), buf, buf + n);
+            } else if (errno != EAGAIN && errno != EINTR) { valid = false; break; }
+        }
+        ::close(fds[0]);
+        terminateChild(decoder_pid_);
+        if (valid && eof && running_.load() && bytes.size() % 4 == 0) {
+            std::vector<int16_t> pcm(bytes.size() / 2);
+            std::memcpy(pcm.data(), bytes.data(), bytes.size());
+            enqueueFull(std::move(pcm));
+        }
     }
 
     // 取提示音 PCM：优先读 wav 资源，缺失或格式不符则回退合成音
@@ -555,10 +587,11 @@ void SoundPlayer::play(Event ev) {
 
 void SoundPlayer::playFile(const std::string& path) {
     if (path.empty()) return;
-    // 解码/重采样可能耗时数十 ms 至数秒，detached 线程执行；PCM 注入常驻
-    // 流队列后播放时序由流保证。主进程退出时析构 SoundPlayer，此线程若
-    // 仍在解码会随进程终止（全局对象生命周期覆盖全部业务场景）
-    std::thread([path, this] { impl_->decodeFile(path); }).detach();
+    std::lock_guard<std::mutex> lock(impl_->mu_);
+    if (!impl_->running_.load()) return;
+    if (impl_->decode_jobs_.size() >= 4) impl_->decode_jobs_.pop_front();
+    impl_->decode_jobs_.push_back(path);
+    impl_->decode_cv_.notify_one();
 }
 
 // 唤醒应答前调用：请求 worker 线程 pclose→popen 强制重建 HDMI PCM 流

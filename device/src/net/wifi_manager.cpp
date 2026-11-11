@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -24,6 +25,8 @@
 #include <vector>
 
 #include "net/device_identity.h"
+#include "net/wifi_credentials.h"
+#include "platform/atomic_file.h"
 
 namespace dutyon {
 
@@ -34,8 +37,7 @@ namespace {
 
 // ---- 常量 ----
 const char* kApIp = "192.168.4.1";        // AP 模式设备自身地址（portal 网关）
-const char* kApIpPrefix = "192.168.4.";   // 该网段地址不算"已入网"
-const long long kJoinTimeoutMs = 25000;   // 单次加入家庭 Wi-Fi 的等待上限
+const long long kJoinTimeoutMs = 65000;   // 含锁等待、接口初始化和最多 28s DHCP
 const int kMaxJoinAttempts = 2;           // 连续失败几次后回退 AP 重新配网
 const char* kWlan = "wlan0";
 
@@ -52,7 +54,26 @@ std::string scriptDir() {
 }
 
 // 运行期配置目录（tmpfs，掉电即清；hostapd/dnsmasq/wpa_supplicant 配置写这里）
-std::string runDir() { return "/run/dutyon"; }
+std::string runDir() {
+    const char* e = getenv("DUTYON_WIFI_RUN_DIR");
+    return (e && *e) ? std::string(e) : std::string("/run/dutyon");
+}
+
+bool daemonAlive(const char* name) {
+    std::ifstream in(runDir() + "/" + name + ".pid");
+    long pid = 0;
+    if (!(in >> pid) || pid <= 1 || pid > std::numeric_limits<pid_t>::max()) return false;
+    std::ifstream comm("/proc/" + std::to_string(pid) + "/comm");
+    std::string actual;
+    if (!std::getline(comm, actual) || actual != name) return false;
+    std::ifstream args("/proc/" + std::to_string(pid) + "/cmdline", std::ios::binary);
+    const std::string config = runDir() + "/" + name + ".conf";
+    bool owned = false;
+    while (std::getline(args, actual, '\0'))
+        if (actual == config || actual == "--conf-file=" + config) owned = true;
+    if (!owned) return false;
+    return kill((pid_t)pid, 0) == 0 || errno == EPERM;
+}
 
 std::string wifiJsonPath() {
     const char* home = getenv("HOME");
@@ -68,10 +89,18 @@ bool pathExists(const std::string& p) {
 // 后台起脚本：system() 里的 sh 立即返回（尾部 &），setsid 让脚本脱离会话，
 // poll() 不阻塞——脚本内部起 hostapd/wpa_supplicant 守护进程，连接与否由
 // 后续帧轮询 wlan0 是否有 IP 判定。参数只有固定脚本名 + iface（无用户输入）。
-void spawnDetached(const std::string& script_and_args) {
-    std::string cmd = "setsid " + scriptDir() + "/" + script_and_args +
-                      " >>" + runDir() + "/wifi.log 2>&1 &";
-    printf("[Wifi] $ %s/%s\n", scriptDir().c_str(), script_and_args.c_str());
+std::string shellQuote(const std::string& value) {
+    std::string result = "'";
+    for (char c : value) result += c == '\'' ? "'\\''" : std::string(1, c);
+    return result + "'";
+}
+
+void spawnDetached(const std::string& script_and_args, bool quiet = false) {
+    const auto split = script_and_args.find(' ');
+    std::string cmd = "setsid " + shellQuote(scriptDir() + "/" + script_and_args.substr(0, split));
+    if (split != std::string::npos) cmd += " " + shellQuote(script_and_args.substr(split + 1));
+    cmd += " >>" + shellQuote(runDir() + "/wifi.log") + " 2>&1 &";
+    if (!quiet) printf("[Wifi] $ %s/%s\n", scriptDir().c_str(), script_and_args.c_str());
     // system() 带 warn_unused_result：GCC 下 (void) 转型无法消警，用分支消费返回值
     //（后台脚本的返回码无意义，setsid + 尾部 & 已立即返回）
     if (system(cmd.c_str()) != 0) { /* ignore */ }
@@ -88,15 +117,12 @@ std::string wpaEscape(const std::string& s) {
     return out;
 }
 
-void writeFile(const std::string& path, const std::string& content) {
-    std::error_code ec;
-    fs::create_directories(fs::path(path).parent_path(), ec);
-    std::ofstream out(path, std::ios::trunc);
-    if (!out) {
+bool writeFile(const std::string& path, const std::string& content) {
+    if (!atomicWritePrivate(path, content)) {
         fprintf(stderr, "[Wifi] write failed: %s\n", path.c_str());
-        return;
+        return false;
     }
-    out << content;
+    return true;
 }
 
 // HTML 转义（SSID 可能含 & < > " 等，直接拼进属性/文本会破坏页面）
@@ -194,7 +220,7 @@ input:focus{outline:none;border-color:#4c8dff}
     // 旧的"SSID 输入框 + 密码框同屏"信息过载，且移动端软键盘易误触。
     // 隐藏网络/未扫到时走"手动输入其他网络"分支（仍免打 SSID 之外的任何字）。
     h << "<h1>DutyOn 设备配网</h1>"
-      << "<div class=\"tag\">热点 " << ap_ssid << "</div>"
+      << "<div class=\"tag\">热点 " << htmlEsc(ap_ssid) << "</div>"
       << "<p class=\"sub\">选择 Wi-Fi 并输入密码，提交后设备自动联网，"
          "屏幕随后显示配对码，请在电脑端 DutyOn 完成配对。</p>"
       << "<form method=\"post\" action=\"/configure\">"
@@ -235,7 +261,7 @@ input:focus{outline:none;border-color:#4c8dff}
          "document.querySelectorAll('.net').forEach(function(b){"
          "b.onclick=function(){toStep2(b.getAttribute('data-s'));};});"
          "document.getElementById('use-manual').onclick=function(){"
-         "var v=document.getElementById('manual-ssid').value.trim();"
+         "var v=document.getElementById('manual-ssid').value;"
          "if(v)toStep2(v);};"
          "document.getElementById('reselect').onclick=function(){"
          "document.getElementById('step2').classList.add('hidden');"
@@ -279,7 +305,7 @@ b{color:#e8eaed}
       << "</style></head><body><div class=\"card\">"
       << "<div class=\"big\">&#10003;</div>"
       << "<h1>已收到 Wi-Fi 信息</h1>"
-      << "<p>设备正在连接 <b>" << ssid
+      << "<p>设备正在连接 <b>" << htmlEsc(ssid)
       << "</b>……<br>此页面可以关闭，请回到设备屏幕查看配对码。</p>"
       << "</div></body></html>";
     return h.str();
@@ -309,8 +335,11 @@ struct WifiManager::PortalImpl {
     std::thread th;
     WifiManager* owner = nullptr;
 
-    void start(WifiManager* o) {
+    bool start(WifiManager* o) {
         owner = o;
+        svr.set_payload_max_length(4096);
+        svr.set_read_timeout(3, 0);
+        svr.set_write_timeout(3, 0);
         svr.Get(R"(/.*)", [this](const httplib::Request& req, httplib::Response& res) {
             // 系统连网探测 -> 302 到配网页触发自动弹窗；其余 GET 直接配网页
             if (isProbePath(req.path)) {
@@ -323,33 +352,27 @@ struct WifiManager::PortalImpl {
         svr.Post("/configure", [this](const httplib::Request& req, httplib::Response& res) {
             std::string ssid = req.has_param("ssid") ? req.get_param_value("ssid") : "";
             std::string pass = req.has_param("pass") ? req.get_param_value("pass") : "";
-            // 去首尾空白（移动端输入法易带空格）
-            auto trim = [](std::string& s) {
-                const char* ws = " \t\r\n";
-                size_t b = s.find_first_not_of(ws);
-                size_t e = s.find_last_not_of(ws);
-                s = (b == std::string::npos) ? "" : s.substr(b, e - b + 1);
-            };
-            trim(ssid);
-            trim(pass);
-            if (ssid.empty()) {
-                res.set_content(portalPage(owner->apSsid(), readScanList()), "text/html; charset=utf-8");
+            if (!validWifiCredentials(ssid, pass)) {
+                res.status = 400;
+                res.set_content("Wi-Fi 名称须为 1–32 字节；密码须为 8–63 位 ASCII、64 位十六进制，或留空。", "text/plain; charset=utf-8");
                 return;
             }
-            printf("[Portal] configure ssid=\"%s\" pass_len=%zu\n", ssid.c_str(), pass.size());
-            owner->saveAndJoin(ssid, pass);
+            if (!owner->saveAndJoin(ssid, pass)) {
+                res.status = 503;
+                res.set_content("无法保存 Wi-Fi 信息，请稍后重试。", "text/plain; charset=utf-8");
+                return;
+            }
             res.set_content(portalSuccess(ssid), "text/html; charset=utf-8");
         });
 
-        th = std::thread([this]() {
-            // 绑定失败（80 被占）时 listen 直接返回，不抛异常
-            if (!svr.listen("0.0.0.0", 80)) {
-                fprintf(stderr, "[Portal] listen :80 failed\n");
-            }
-        });
-        // 等 listen 就绪（最多 ~2s），确保 stop() 时 is_running 已置位
-        for (int i = 0; i < 40 && !svr.is_running(); ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // 同步绑定：失败时不能声称已启动，也不遗留尚未 listen 的线程。
+        if (!svr.bind_to_port("0.0.0.0", 80)) {
+            fprintf(stderr, "[Portal] bind :80 failed\n");
+            return false;
+        }
+        th = std::thread([this]() { svr.listen_after_bind(); });
+        svr.wait_until_ready();
+        return svr.is_running();
     }
 
     void stop() {
@@ -368,15 +391,11 @@ WifiManager::~WifiManager() { stop(); }
 bool WifiManager::start() {
     if (run_.load()) return true;
 
-    // 无 wlan 设备（缺 Wi-Fi 芯片/驱动）：保持 Off，调用方按无 Wi-Fi 处理
-    if (!pathExists(std::string("/sys/class/net/") + kWlan)) {
-        fprintf(stderr, "[Wifi] no %s interface, Wi-Fi unavailable\n", kWlan);
-        return false;
-    }
+    // 驱动可能晚于显示服务就绪；脚本等待接口，poll 继续重试，不能永久 Off。
     wlan_ = kWlan;
 
     // 射频编排脚本缺失只告警不阻断：状态机照常跑，起不来 AP 时日志可查
-    for (const char* s : {"wifi-ap.sh", "wifi-client.sh", "wifi-off.sh"}) {
+    for (const char* s : {"wifi-ap.sh", "wifi-client.sh", "wifi-off.sh", "wifi-common.sh"}) {
         if (!pathExists(scriptDir() + "/" + s))
             fprintf(stderr, "[Wifi] missing script %s/%s\n", scriptDir().c_str(), s);
     }
@@ -409,22 +428,26 @@ void WifiManager::stop() {
         return;
     }
     stopPortal();
-    spawnDetached("wifi-off.sh " + wlan_);
+    if (writeFile(runDir() + "/desired-mode", "off\n"))
+        spawnDetached("wifi-off.sh " + wlan_);
     setState(WifiState::Off);
 }
 
 std::string WifiManager::clientIp() const { return cached_ip_; }
 
-void WifiManager::saveAndJoin(const std::string& ssid, const std::string& pass) {
+bool WifiManager::saveAndJoin(const std::string& ssid, const std::string& pass) {
+    if (!validWifiCredentials(ssid, pass)) return false;
     {
         std::lock_guard<std::mutex> lk(cred_mu_);
+        if (!run_.load() || state_.load() != WifiState::ApProvisioning) return false;
+        json j = {{"ssid", ssid}, {"pass", pass}};
+        if (!writeFile(wifiJsonPath(), j.dump(2))) return false;
         home_ssid_ = ssid;
         home_pass_ = pass;
         has_creds_ = true;
     }
-    saveCreds();
-    join_attempts_ = 0;
     pending_join_ = true;  // poll() 里切 client（避免在 portal 线程动射频）
+    return true;
 }
 
 void WifiManager::poll() {
@@ -435,6 +458,7 @@ void WifiManager::poll() {
 
     // portal 提交了凭据 -> 切 client
     if (pending_join_.exchange(false)) {
+        join_attempts_ = 0;
         enterClient();
         return;
     }
@@ -465,43 +489,34 @@ void WifiManager::poll() {
         break;
 
     case WifiState::ApProvisioning:
-        // 等待手机经 portal 提交凭据（pending_join_）。hostapd 存活自愈：
-        // 起初 10s 宽限（脚本含 sleep/起进程耗时），此后每 5s 查一次进程，
-        // 挂了/没起来就重跑 wifi-ap.sh（脚本幂等）。重跑连续 3 次仍失败
-        // → Unisoc WCN 驱动 beacon 槽位泄漏（hostapd 起过一次后，同 boot
-        // 内第二次启动必 ENOMEM，接口/模块层均无法复位）→ 自动重启设备，
-        // 冷启动后第一任 hostapd 必成功，回到配网模式闭环。
-        if (now - state_since_ms_ > 10000 &&
+        // 脚本最多等接口 10s + 扫描 8s，宽限后再检查。进程失败只修复
+        // Wi-Fi，不把普通配置/端口错误推断为驱动崩溃而重启整台设备。
+        if (now - state_since_ms_ > 25000 &&
             now - last_ap_check_ms_ >= 5000) {
             last_ap_check_ms_ = now;
             if (!hostapdAlive()) {
-                if (++ap_revives_ >= 3) {
-                    printf("[Wifi] hostapd dead after %d revives "
-                           "(driver beacon leak), rebooting device\n",
-                           ap_revives_);
-                    fflush(stdout);
-                    // reboot 是系统命令（不走 spawnDetached 的脚本目录拼接）
-                    if (system("/usr/sbin/reboot") != 0) { /* ignore */ }
-                    return;
-                }
+                ++ap_revives_;
                 printf("[Wifi] hostapd not alive, restarting AP "
                        "(attempt %d)\n", ap_revives_);
-                spawnDetached("wifi-ap.sh " + wlan_);
+                spawnDetached("wifi-ap.sh " + wlan_, true);
                 // 重跑脚本全程 ~8s（含扫描/hostapd/dnsmasq 起停），期间 pid
                 // 文件会被脚本删除重建——把检查点推后 15s 防止重复触发
                 last_ap_check_ms_ = now + 15000;
             } else {
-                // 起来了（或复用短路成功），清零失败计数
                 ap_revives_ = 0;
+                // 热点进程存活不代表网关/DHCP 正常。幂等脚本只修复缺失部分，
+                // 保留已有 hostapd 和手机关联，同时清除 client 残留。
+                spawnDetached("wifi-ap.sh " + wlan_, true);
+            }
+            if (!portal_ || !portal_->svr.is_running()) {
+                stopPortal();
+                startPortal();
             }
         }
-        // ARP 保活：配网态每 5s ping 一次广播地址，把网关 MAC 刷进所有
-        // 已连接手机的 ARP 表。手机刚关联/DHCP 完成后 ARP 未解析时访问
-        // 192.168.4.1 会被丢包（配网页"有一定概率打不开"的主因）——
-        // 广播 ping 让手机提前应答并学到我们的 MAC，消除这个窗口。
+        // 广播仅作辅助保活；网关/DHCP/DNS 的健康由上面的幂等修复负责。
         if (now - last_arp_keepalive_ms_ >= 5000) {
             last_arp_keepalive_ms_ = now;
-            spawnDetached("arp-keepalive.sh " + wlan_);
+            spawnDetached("arp-keepalive.sh " + wlan_, true);
         }
         break;
 
@@ -520,6 +535,14 @@ void WifiManager::setState(WifiState s) {
 }
 
 bool WifiManager::clientConnected() {
+    if (!daemonAlive("wpa_supplicant") || hostapdAlive()) {
+        cached_ip_.clear();
+        return false;
+    }
+    // DHCP 租约仍在时，断开的链路也不能算 Online。
+    std::ifstream carrier("/sys/class/net/" + wlan_ + "/carrier");
+    int link = 0;
+    if (!(carrier >> link) || link != 1) { cached_ip_.clear(); return false; }
     struct ifaddrs* ifa = nullptr;
     if (getifaddrs(&ifa) != 0) return false;
     std::string ip;
@@ -529,13 +552,17 @@ bool WifiManager::clientConnected() {
         char buf[INET_ADDRSTRLEN] = {};
         auto* sa = reinterpret_cast<struct sockaddr_in*>(p->ifa_addr);
         inet_ntop(AF_INET, &sa->sin_addr, buf, sizeof(buf));
-        ip = buf;
+        const std::string candidate = buf;
+        if (candidate == kApIp ||
+            candidate.rfind("169.254.", 0) == 0 ||
+            candidate.rfind("127.", 0) == 0 || candidate == "0.0.0.0") continue;
+        ip = candidate;
         break;
     }
     freeifaddrs(ifa);
 
-    // 无 IP 或仍是 AP 网关地址（192.168.4.x）都不算"已入网"
-    if (ip.empty() || ip.rfind(kApIpPrefix, 0) == 0) {
+    // 家庭网络可以使用 192.168.4.0/24，不能排除整个网段。
+    if (ip.empty()) {
         cached_ip_.clear();
         return false;
     }
@@ -555,18 +582,14 @@ void WifiManager::loadCreds() {
     ss << in.rdbuf();
     json j = json::parse(ss.str(), nullptr, /*allow_exceptions=*/false);
     if (j.is_discarded() || !j.is_object()) return;
-    home_ssid_ = j.value("ssid", std::string{});
-    home_pass_ = j.value("pass", std::string{});
-    has_creds_ = !home_ssid_.empty();
-}
-
-void WifiManager::saveCreds() {
-    std::lock_guard<std::mutex> lk(cred_mu_);
-    json j;
-    j["ssid"] = home_ssid_;
-    j["pass"] = home_pass_;
-    writeFile(wifiJsonPath(), j.dump(2));
-    printf("[Wifi] creds saved (ssid=\"%s\")\n", home_ssid_.c_str());
+    if (!j.contains("ssid") || !j["ssid"].is_string() ||
+        (j.contains("pass") && !j["pass"].is_string())) return;
+    const auto ssid = j["ssid"].get<std::string>();
+    const auto pass = j.value("pass", std::string{});
+    if (!validWifiCredentials(ssid, pass)) return;
+    home_ssid_ = ssid;
+    home_pass_ = pass;
+    has_creds_ = true;
 }
 
 void WifiManager::enterAp() {
@@ -590,20 +613,25 @@ void WifiManager::enterAp() {
       << "wpa_key_mgmt=WPA-PSK\n"
       << "rsn_pairwise=CCMP\n"
       << "ignore_broadcast_ssid=0\n";
-    writeFile(runDir() + "/hostapd.conf", h.str());
+    if (!writeFile(runDir() + "/hostapd.conf", h.str())) return;
 
     // dnsmasq.conf：给客户端派地址 + 把任意域名解析到设备 IP（captive portal
     // 探测的关键——所有 DNS 都指向 192.168.4.1，手机才会弹配网页）
     std::ostringstream d;
     d << "interface=" << wlan_ << "\n"
       << "bind-interfaces\n"
+      << "dhcp-authoritative\n"
+      << "no-resolv\n"
       << "dhcp-range=192.168.4.100,192.168.4.200,255.255.255.0,12h\n"
       << "dhcp-option=3," << kApIp << "\n"
       << "dhcp-option=6," << kApIp << "\n"
       << "address=/#/" << kApIp << "\n";
-    writeFile(runDir() + "/dnsmasq.conf", d.str());
+    if (!writeFile(runDir() + "/dnsmasq.conf", d.str())) return;
 
+    if (!writeFile(runDir() + "/desired-mode", "ap\n")) return;
     spawnDetached("wifi-ap.sh " + wlan_);
+    ap_revives_ = 0;
+    last_ap_check_ms_ = 0;
     startPortal();
     setState(WifiState::ApProvisioning);
 }
@@ -621,24 +649,34 @@ void WifiManager::enterClient() {
     w << "ctrl_interface=/run/wpa_supplicant\n"
       << "update_config=1\n"
       << "network={\n"
-      << "    ssid=\"" << wpaEscape(ssid) << "\"\n";
+      << "    ssid=" << wifiSsidHex(ssid) << "\n";
     if (pass.empty()) {
         w << "    key_mgmt=NONE\n";
     } else {
-        w << "    psk=\"" << wpaEscape(pass) << "\"\n"
+        w << "    psk=" << (pass.size() == 64 ? pass : "\"" + wpaEscape(pass) + "\"") << "\n"
           << "    key_mgmt=WPA-PSK\n";
     }
     w << "}\n";
-    writeFile(runDir() + "/wpa_supplicant.conf", w.str());
+    if (!writeFile(runDir() + "/wpa_supplicant.conf", w.str())) return;
 
+    if (!writeFile(runDir() + "/desired-mode", "client\n")) return;
     spawnDetached("wifi-client.sh " + wlan_);
     setState(WifiState::Joining);
+    // 重试时状态仍是 Joining，setState 不会更新时间戳，必须单独重置。
+    state_since_ms_ = nowMs();
+    cached_ip_.clear();
 }
 
 void WifiManager::startPortal() {
     if (portal_) return;
     portal_ = new PortalImpl();
-    portal_->start(this);
+    if (!portal_->start(this)) {
+        portal_->stop();
+        delete portal_;
+        portal_ = nullptr;
+        fprintf(stderr, "[Wifi] captive portal unavailable; will retry\n");
+        return;
+    }
     printf("[Wifi] captive portal listening on :80 (%s)\n", portal_url_.c_str());
 }
 
@@ -653,14 +691,11 @@ void WifiManager::stopPortal() {
 // hostapd 进程是否存活（wifi-ap.sh 启动时落盘 pid 文件）。pid 文件缺失/
 // 进程不存在都视为不活；EPERM（进程存在但不属当前用户）算活
 bool WifiManager::hostapdAlive() const {
-    std::ifstream in(runDir() + "/hostapd.pid");
-    long pid = 0;
-    if (!(in >> pid) || pid <= 0) return false;
-    if (kill((pid_t)pid, 0) == 0) return true;
-    return errno == EPERM;
+    return daemonAlive("hostapd");
 }
 
 void WifiManager::resetToAp() {
+    stopPortal(); // Drain in-flight submissions before clearing credentials.
     // 清内存 + 删凭据文件，重回 AP 配网模式。配对关系（token）不动：
     // 新网络入网后自动恢复与 PC 的连接，无需重新输配对码
     {

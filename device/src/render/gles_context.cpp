@@ -43,6 +43,8 @@ struct DrmState {
     gbm_device* dev = nullptr;
     gbm_surface* surf = nullptr;
     gbm_bo* shown_bo = nullptr;
+    gbm_bo* pending_bo = nullptr;
+    bool flip_done = false; // event user_data must outlive a timed-out wait
     std::map<gbm_bo*, uint32_t> fb_cache;
 };
 
@@ -106,18 +108,18 @@ uint32_t fbIdForBo(DrmState& d, gbm_bo* bo, int width, int height) {
 }
 
 // 等 pageflip 完成（vblank），100ms 超时兜底（防内核事件丢失挂死）
-void waitForFlip(int fd) {
-    static bool flipped = false;
-    flipped = false;
+bool waitForFlip(int fd, bool& flipped) {
+    if (flipped) return true;
     drmEventContext ev = {};
     ev.version = DRM_EVENT_CONTEXT_VERSION;
-    ev.page_flip_handler = [](int, unsigned, unsigned, unsigned, void*) {
-        flipped = true;
+    ev.page_flip_handler = [](int, unsigned, unsigned, unsigned, void* data) {
+        *static_cast<bool*>(data) = true;
     };
     struct pollfd pfd = {fd, POLLIN, 0};
     if (poll(&pfd, 1, 100) > 0) {
         drmHandleEvent(fd, &ev);
     }
+    return flipped;
 }
 
 } // namespace
@@ -266,7 +268,11 @@ bool GlesContext::createCompositeProgram() {
         "void main(){ gl_FragColor = vec4(texture2D(u_tex, v_uv).rgb, 1.0); }\n";
     const GLuint vs = compile(GL_VERTEX_SHADER, kVS);
     const GLuint fs = compile(GL_FRAGMENT_SHADER, kFS);
-    if (!vs || !fs) return false;
+    if (!vs || !fs) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return false;
+    }
     comp_prog_ = glCreateProgram();
     glAttachShader(comp_prog_, vs);
     glAttachShader(comp_prog_, fs);
@@ -397,9 +403,26 @@ void GlesContext::setRotation(int deg) {
 
 void GlesContext::swapBuffers() {
     if (display_ == EGL_NO_DISPLAY || surface_ == EGL_NO_SURFACE) return;
+    auto restore = [this](GlesContext*) { if (logical_active_) bindLogicalTarget(); };
+    std::unique_ptr<GlesContext, decltype(restore)> restore_target(this, restore);
+    auto release = [this](gbm_bo* bo) {
+        if (!bo) return;
+        const auto it = drm_->fb_cache.find(bo);
+        if (it != drm_->fb_cache.end()) {
+            drmModeRmFB(drm_->fd, it->second);
+            drm_->fb_cache.erase(it);
+        }
+        gbm_surface_release_buffer(drm_->surf, bo);
+    };
+    if (drm_ && drm_->pending_bo) {
+        if (!waitForFlip(drm_->fd, drm_->flip_done)) return;
+        release(drm_->shown_bo);
+        drm_->shown_bo = drm_->pending_bo;
+        drm_->pending_bo = nullptr;
+    }
     // 旋转合成：场景渲染在逻辑 FBO，先旋转贴满默认帧缓冲（物理屏）再翻页
     if (logical_active_) compositeToScreen();
-    eglSwapBuffers(display_, surface_);
+    if (!eglSwapBuffers(display_, surface_)) return;
     if (!drm_ || !drm_->surf) return;
 
     gbm_bo* bo = gbm_surface_lock_front_buffer(drm_->surf);
@@ -417,14 +440,20 @@ void GlesContext::swapBuffers() {
         if (drmModeSetCrtc(drm_->fd, drm_->crtc_id, fb, 0, 0,
                            &drm_->connector_id, 1, &drm_->mode) != 0) {
             fprintf(stderr, "[GlesContext] drmModeSetCrtc failed\n");
+            release(bo);
+            return;
         } else {
             printf("[GlesContext] setCrtc ok (fb %u %dx%d)\n", fb, phys_w_,
                    phys_h_);
         }
         drm_->mode_set = true;
     } else if (drmModePageFlip(drm_->fd, drm_->crtc_id, fb,
-                               DRM_MODE_PAGE_FLIP_EVENT, nullptr) == 0) {
-        waitForFlip(drm_->fd);
+                               DRM_MODE_PAGE_FLIP_EVENT, &drm_->flip_done) == 0) {
+        drm_->flip_done = false;
+        drm_->pending_bo = bo;
+        // Both buffers remain locked until the kernel acknowledges the flip.
+        if (!waitForFlip(drm_->fd, drm_->flip_done)) return;
+        drm_->pending_bo = nullptr;
     } else if (drmModeSetCrtc(drm_->fd, drm_->crtc_id, fb, 0, 0,
                               &drm_->connector_id, 1, &drm_->mode) != 0) {
         // H616 内核定制 EDID 时序下 pageflip 恒 EBUSY：同步 setCrtc 兜底。
@@ -435,24 +464,20 @@ void GlesContext::swapBuffers() {
                     errno);
             ++crtc_fail_logged;
         }
-        return;  // fb 未上屏：不释放 shown_bo（下一帧重试同一路径）
+        release(bo);
+        return;
     }
 
     // 翻页完成后释放上一帧（含其 fb 注册）
-    if (drm_->shown_bo) {
-        const auto it = drm_->fb_cache.find(drm_->shown_bo);
-        if (it != drm_->fb_cache.end()) {
-            drmModeRmFB(drm_->fd, it->second);
-            drm_->fb_cache.erase(it);
-        }
-        gbm_surface_release_buffer(drm_->surf, drm_->shown_bo);
-    }
+    release(drm_->shown_bo);
     drm_->shown_bo = bo;
     // 复位逻辑目标（绑 FBO + 视口 + 混合态），供下一帧场景渲染
     if (logical_active_) bindLogicalTarget();
 }
 
 void GlesContext::destroy() {
+    if (drm_ && drm_->fd >= 0 && drm_->mode_set)
+        drmModeSetCrtc(drm_->fd, drm_->crtc_id, 0, 0, 0, nullptr, 0, nullptr);
     if (context_ != EGL_NO_CONTEXT) {
         destroyLogicalTarget();
         if (comp_prog_) { glDeleteProgram(comp_prog_); comp_prog_ = 0; }
@@ -466,6 +491,8 @@ void GlesContext::destroy() {
     if (drm_) {
         for (auto& kv : drm_->fb_cache) drmModeRmFB(drm_->fd, kv.second);
         drm_->fb_cache.clear();
+        if (drm_->surf && drm_->shown_bo) gbm_surface_release_buffer(drm_->surf, drm_->shown_bo);
+        if (drm_->surf && drm_->pending_bo) gbm_surface_release_buffer(drm_->surf, drm_->pending_bo);
         if (drm_->surf) gbm_surface_destroy(drm_->surf);
         if (drm_->dev) gbm_device_destroy(drm_->dev);
         if (drm_->fd >= 0) close(drm_->fd);

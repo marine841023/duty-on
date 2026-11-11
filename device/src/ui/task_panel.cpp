@@ -183,7 +183,11 @@ struct TaskPanel::Impl {
         if (program) return;
         GLuint vs = compileShader(GL_VERTEX_SHADER, kVertSrc);
         GLuint fs = compileShader(GL_FRAGMENT_SHADER, kFragSrc);
-        if (!vs || !fs) return;
+        if (!vs || !fs) {
+            if (vs) glDeleteShader(vs);
+            if (fs) glDeleteShader(fs);
+            return;
+        }
         program = glCreateProgram();
         glAttachShader(program, vs);
         glAttachShader(program, fs);
