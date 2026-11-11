@@ -62,6 +62,8 @@ void DeviceIdentity::load() {
     const fs::path p = identityPath();
     std::error_code ec;
     if (fs::exists(p, ec)) {
+        if (!restrictPrivateFile(p.string()))
+            fprintf(stderr, "[Identity] cannot restrict config permissions: %s\n", p.string().c_str());
         std::ifstream in(p);
         std::stringstream ss;
         ss << in.rdbuf();

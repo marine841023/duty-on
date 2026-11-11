@@ -115,22 +115,12 @@ awk '/signal:/{sig=$2} /SSID:/{s=substr($0,index($0,"SSID:")+6); if(s!="" && s!~
   | head -8 > "$CONF/scan.txt"
 log "scan.txt networks: $(wc -l < "$CONF/scan.txt" 2>/dev/null)"
 
-# 信道自适应：统计 2.4G 互不重叠主信道 1/6/11（freq 2412/2437/2462）上的
-# BSS 数，选最空闲的写回 hostapd.conf（每个 BSS 只数第一个 2.4G freq）。
-# 扫描失败/无结果保持 C++ 侧写入的默认 channel=6 不动。
-NBSS=$(grep -c '^BSS ' "$DUMP" 2>/dev/null || true)
-if [ "${NBSS:-0}" -gt 0 ] && [ -f "$CONF/hostapd.conf" ]; then
-    CH=$(awk '
-      /^BSS /{have=0}
-      /freq:/{ if(have==0 && $2>=2412 && $2<=2472){have=1; c=int(($2-2407)/5);
-               if(c<=3)ch=1; else if(c<=8)ch=6; else ch=11; cnt[ch]++} }
-      END{ best=1; n=1e9; split("1 6 11",ks," ");
-           for(i=1;i<=3;i++){k=ks[i]; v=(k in cnt)?cnt[k]:0; if(v<n){n=v;best=k}}
-           print best }' "$DUMP")
-    if [ -n "$CH" ]; then
-        sed -i "s/^channel=.*/channel=$CH/" "$CONF/hostapd.conf"
-        log "channel auto: $CH (least congested of 1/6/11)"
-    fi
+# 保留附近 SSID 扫描，但不再据扫描结果自动换 AP 信道。
+# UWE5622 真机上信道 11 可见却无法与测试网卡完成关联，切回 6 即恢复；
+# 固定使用已验证的 2.4GHz 信道 6，也避免同一 BSSID 重启后变更信道。
+if [ -f "$CONF/hostapd.conf" ]; then
+    sed -i 's/^channel=.*/channel=6/' "$CONF/hostapd.conf"
+    log "channel fixed: 6 (compatibility)"
 fi
 
 ip addr replace "$AP_IP/24" dev "$IFACE" || exit 1

@@ -69,6 +69,17 @@ static void storageTests(const fs::path& dir) {
     check(atomicWritePrivate(file, "old"), "initial atomic write");
     struct stat st{};
     check(stat(file.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600, "private permissions");
+    check(chmod(file.c_str(), 0644) == 0, "legacy permissions fixture");
+    check(restrictPrivateFile(file) && read(file) == "old", "legacy migration preserves contents");
+    check(stat(file.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600, "legacy permissions restricted");
+    const auto link = dir / "private-link";
+    fs::create_symlink(file, link);
+    check(chmod(file.c_str(), 0644) == 0 && !restrictPrivateFile(link), "symlink migration rejected");
+    check(stat(file.c_str(), &st) == 0 && (st.st_mode & 0777) == 0644, "symlink target unchanged");
+    fs::remove(link);
+    check(restrictPrivateFile(file), "restore private permissions");
+    check(!restrictPrivateFile(dir) && !restrictPrivateFile((dir / "missing").string()),
+          "non-file migration rejected");
     struct rlimit original{};
     check(getrlimit(RLIMIT_FSIZE, &original) == 0, "get file limit");
     auto handler = signal(SIGXFSZ, SIG_IGN);

@@ -577,6 +577,8 @@ void WifiManager::loadCreds() {
     home_pass_.clear();
     const std::string path = wifiJsonPath();
     if (!pathExists(path)) return;
+    if (!restrictPrivateFile(path))
+        fprintf(stderr, "[Wifi] cannot restrict config permissions: %s\n", path.c_str());
     std::ifstream in(path);
     std::stringstream ss;
     ss << in.rdbuf();
@@ -603,7 +605,7 @@ void WifiManager::enterAp() {
       << "driver=nl80211\n"
       << "ssid=" << ap_ssid_ << "\n"
       << "hw_mode=g\n"
-      << "channel=6\n"  // 起始值；wifi-ap.sh 扫描后按占用改写为 1/6/11 最空闲
+      << "channel=6\n"  // 固定已验证的 2.4GHz 信道，避免驱动/客户端换信道兼容问题
       << "country_code=CN\n"
       << "ieee80211d=1\n"
       << "ieee80211n=1\n"

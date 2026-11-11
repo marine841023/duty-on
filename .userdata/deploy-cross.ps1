@@ -12,7 +12,7 @@ if (-not (Test-Path $bin)) { Write-Host "RESULT=FAIL:missing $bin (先本地交�
 Write-Host "[1/3] push binary + wifi scripts + deploy.sh..."
 scp @sshOpts $bin "${Device}:/opt/dutyon-src/device/build/dutyon-pet"
 if ($LASTEXITCODE -ne 0) { Write-Host "RESULT=FAIL:scp push failed"; exit 1 }
-# v2.0.9 的 wifi 脚本（信道自适应等）与 deploy.sh 需随二进制同步
+# Wi-Fi 脚本（共享锁、热点兼容性等）与 deploy.sh 需随二进制同步
 scp @sshOpts "${Repo}\device\scripts\wifi-common.sh" "${Repo}\device\scripts\wifi-ap.sh" "${Repo}\device\scripts\wifi-client.sh" "${Repo}\device\scripts\wifi-off.sh" "${Repo}\device\scripts\arp-keepalive.sh" "${Device}:/opt/dutyon-src/device/scripts/"
 if ($LASTEXITCODE -ne 0) { Write-Host "RESULT=FAIL:scp wifi scripts failed"; exit 1 }
 ssh @sshOpts $Device "mkdir -p /opt/dutyon-src/.userdata"

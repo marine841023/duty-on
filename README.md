@@ -84,7 +84,8 @@ small display becomes a **desk companion screen for your AI tasks**:
   opens a hotspot (`DutyOn-XXXX`). Connect using the password on its screen;
   the password is generated once and retained across restarts. A captive
   portal helps pick your home Wi-Fi; if the phone does not open it, visit
-  `http://192.168.4.1/`. The PC can later send a
+  `http://192.168.4.1/`. The hotspot uses 2.4 GHz channel 6 for compatibility.
+  The PC can later send a
   "re-provision" command to switch networks
 - **Pairing & sync** — the screen shows a 6-digit pairing code; enter it on
   the PC (right-click the pet → Device → Pair). Characters, Live2D models

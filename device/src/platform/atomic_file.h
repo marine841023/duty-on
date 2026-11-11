@@ -12,6 +12,17 @@
 
 namespace dutyon {
 
+// Upgrade files created by older versions without rewriting credentials.
+// Do not change permissions of a symlink target or a non-regular file.
+inline bool restrictPrivateFile(const std::string& path) {
+    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return false;
+    struct stat st{};
+    const bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && fchmod(fd, 0600) == 0;
+    close(fd);
+    return ok;
+}
+
 // Same-directory rename keeps the previous file intact on a failed write.
 // Credentials are private from creation; fsync covers both data and rename.
 inline bool atomicWritePrivate(const std::string& path, const std::string& data) {
