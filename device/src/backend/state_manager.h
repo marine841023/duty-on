@@ -166,6 +166,10 @@ private:
         std::map<std::string, Actor> actors;
         std::optional<std::string> root_agent_id;
         bool interrupted = false; // 整树取消后，新主回合才能重新接收子代理事件
+        // 窗口扫描是否见过同名 IDE 窗口。从没见过的会话（Qoder 的无工作区
+        // 对话、各类 CLI）不受"窗口消失"清理，否则每次扫描都被删、下一个
+        // 事件又重建，列表和提示音来回跳。
+        bool window_seen = false;
     };
 
     // 快照里的单个会话（对外形态）

@@ -19,28 +19,35 @@ import (
 
 func (a *App) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	uid := r.Context().Value(uidKey{}).(string)
-	cfg, err := a.store.LoadConfig(uid)
+	cfg, rev, err := a.store.LoadConfig(uid)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取配置失败"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"config": cfg})
+	writeJSON(w, http.StatusOK, map[string]any{"config": cfg, "rev": rev})
 }
 
 func (a *App) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	uid := r.Context().Value(uidKey{}).(string)
-	var cfg map[string]interface{}
+	var cfg map[string]any
 	if err := readJSON(w, r, &cfg, 1<<20); err != nil {
 		return
 	}
 	if cfg == nil {
-		cfg = map[string]interface{}{}
+		cfg = make(map[string]any)
 	}
-	if err := a.store.SaveConfig(uid, cfg); err != nil {
+	// If-Match: "<版本号>" —— 只有云端仍是自己读到的那一版才写入
+	ifMatch := strings.Trim(strings.TrimSpace(r.Header.Get("If-Match")), "\"")
+	rev, err := a.store.SaveConfig(uid, cfg, ifMatch)
+	if errors.Is(err, errConfigConflict) {
+		writeJSON(w, http.StatusPreconditionFailed, map[string]string{"error": "云端设置已经在别处改过，请先从云端恢复", "rev": rev})
+		return
+	}
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存配置失败"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "rev": rev})
 }
 
 func (a *App) handleManifest(w http.ResponseWriter, r *http.Request) {

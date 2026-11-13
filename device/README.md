@@ -129,6 +129,17 @@ cmake --build build -j$(nproc)
 现有自动同步与部署脚本已包含这些文件。
 
 异常输入和退出流程测试见 [设备端审查记录](../docs/device-review.md)。
+
+### 设备界面预览
+
+设备端界面（`src/ui/task_panel.cpp`）可以在 Windows 上离屏出图，不必每次烧到设备上看：
+`bash device/tools/ui-preview/run.sh` 会用桌面 OpenGL 编译同一份绘制代码，把各模式、
+各引导画面的竖屏和横屏渲染成 PNG，输出到 `device/build/ui-preview/out/`。
+时钟字体和角色图片不在仓库里，需从设备取回放到 `device/build/ui-preview/`
+（`font-clock.ttf`、`char.gif`）；缺少时钟字体会回退到正文字体。
+预览里的布局是照着 `main.cpp` 设备端分支写的，改布局时两边要一起改。
+同目录的 `snap-to-png.ps1` 用于转换设备 `DUTYON_SNAPSHOT` 抓回的真机截图，
+`capture-desktop.ps1` 用于截取桌面端窗口。
 回归测试建议在电脑交叉编译后上传运行，避免低内存设备同时运行图形服务和编译器。
 
 ## 实现状态
@@ -137,7 +148,7 @@ cmake --build build -j$(nproc)
 - [x] Windows: GLFW 透明无边框窗口 + Win32 穿透/托盘/拖拽/右键菜单
 - [x] Windows: 内嵌 HTTP 服务器（/health /api/status /api/metrics /hook /unregister）
 - [x] 状态机（多会话追踪 + 超时清理 + overallState -> 动作组）
-- [x] IDE 窗口扫描 + hook 幂等安装（Trae/Qoder/Cursor/Codex/OpenCode）
+- [x] IDE 窗口扫描 + hook 幂等安装（Trae/Qoder/Cursor/Codex/OpenCode/Claude Code）
 - [x] 系统指标采样（CPU/RAM/GPU-NVML/网络）+ ImGui 监控面板
 - [x] Live2D 完整集成（moc3/表情/物理/姿势/眨眼/呼吸/GLES2+GL3 渲染）
 - [x] 自定义 GIF 精灵（WIC 多帧解码 + 透明索引）

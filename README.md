@@ -50,7 +50,7 @@ Current source and cloud release: **v2.0.16** — [changes and validation](docs/
 
 Running AI agents in several IDE windows at once? Stop Alt-Tabbing to check
 whether they're still working, done, or waiting for your confirmation.
-**Duty On** condenses the live status of every **Trae** / Qoder / Cursor /
+**Duty On** condenses the live status of every **Trae** / Qoder / Cursor / Claude Code /
 Codex / OpenCode session into one character:
 
 - 💤 **Sleeping** — everything is idle (she naps, Zzz…)
@@ -131,8 +131,8 @@ and hardware verification limits.
   per state (💤 / ⚡ / 🔔), replace anytime
 - **Custom Live2D models** — drop any Cubism 4 model into
   `~/.dutyon/live2d/` and it appears in the menu
-- **Multi-IDE** — monitors any number of **Trae** / Qoder / Cursor / Codex /
-  OpenCode instances (5 IDEs, each with native hook integration)
+- **Multi-IDE** — monitors any number of **Trae** / Qoder / Cursor / Codex / Claude Code /
+  OpenCode instances (6 tools, each with native hook integration)
 - **Per-project status bar** — every project listed under the pet; click a
   project to focus its IDE window
 - **Mini mode** — shrinks to a 130×210 corner buddy
@@ -195,6 +195,13 @@ does not confirm trust or delivery. Start the pet with the same `CODEX_HOME` as
 Codex. Session activity comes from local hook events; a running process alone
 does not establish activity. See the [Hook review](docs/hook-review.md) for details.
 
+Claude Code (CLI, desktop app and IDE extensions) reads hooks from
+`~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json` when that is
+set; the pet merges its entries there and leaves your other settings alone.
+Sessions already running pick the hooks up after a restart. Pressing Esc fires
+no hook, so an interrupted turn shows as busy until Claude Code's idle
+notification about a minute later.
+
 ## How it works
 
 ```
@@ -236,7 +243,7 @@ Aggregate priority: alert > working > sleeping.
 
 C++17 single-process (desktop + device share the core) · GLFW · OpenGL ·
 Dear ImGui (FreeType) · DRM/GBM + GLES3 (device) · Live2D Cubism Native SDK ·
-cpp-httplib · nlohmann/json · cpr · Trae / Qoder / Cursor / Codex / OpenCode hooks
+cpp-httplib · nlohmann/json · cpr · Trae / Qoder / Cursor / Codex / OpenCode / Claude Code hooks
 
 ## Roadmap
 
@@ -255,4 +262,4 @@ Inc. and used under their respective licenses — see [NOTICE](NOTICE).
 
 ## Cloud service
 
-The Linux + Docker cloud service is live at [dutyon.megrezsoft.com](https://dutyon.megrezsoft.com), providing installer downloads, OTA, accounts and private content management. Official builds use this HTTPS address by default. See [deployment and API guide](server/README.md). Image-to-character generation and voice cloning are planned for a later release.
+The Linux + Docker cloud service is live at [dutyon.megrezsoft.com](https://dutyon.megrezsoft.com), providing installer downloads, OTA, accounts and private content management. Official builds use this HTTPS address by default. See [deployment and API guide](server/README.md). The web cloud space manages characters per state (animation + sound) with two-way sync; image-to-character generation and voice cloning have a flow preview there (demo data, generation backend in progress).

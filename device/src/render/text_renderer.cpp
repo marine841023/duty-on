@@ -1,11 +1,15 @@
-#ifndef _WIN32  // 仅设备端（ARM Linux GLES）
+#if !defined(_WIN32) || defined(DUTYON_UI_PREVIEW)  // 设备端 GLES；预览工具用桌面 GL
 
 #include "render/text_renderer.h"
 
 #define STB_TRUETYPE_IMPLEMENTATION  // ui_renderer.cpp 的同名定义在 _WIN32 段，
 #include <stb_truetype.h>            // 与本文件互斥编译，无重复定义
 
+#ifdef DUTYON_UI_PREVIEW
+#include <GL/glew.h>
+#else
 #include <GLES3/gl3.h>
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -30,7 +34,7 @@ const char* kVertSrc =
     "}\n";
 
 const char* kFragSrc =
-    "precision mediump float;\n"
+    "#ifdef GL_ES\nprecision mediump float;\n#endif\n"
     "varying vec2 v_uv;\n"
     "uniform vec4 u_color;\n"
     "uniform sampler2D u_tex;\n"
@@ -310,6 +314,13 @@ float TextRenderer::lineHeight(float pixel_size) const {
     return (float)(ascent - descent) * scale;
 }
 
+float TextRenderer::ascent(float pixel_size) const {
+    if (!impl_->loaded) return pixel_size * 0.8f;
+    int ascent = 0, descent = 0, lgap = 0;
+    stbtt_GetFontVMetrics(&impl_->font, &ascent, &descent, &lgap);
+    return (float)ascent * stbtt_ScaleForPixelHeight(&impl_->font, pixel_size);
+}
+
 void TextRenderer::setSpacing(float scale) {
     // 常规保护：极端值回落默认，防止排版错乱
     impl_->spacing = (scale > 0.5f && scale < 2.0f) ? scale : 1.0f;
@@ -395,4 +406,4 @@ void TextRenderer::drawBold(const std::string& text_utf8, float x, float y,
 
 } // namespace dutyon
 
-#endif // !_WIN32
+#endif // !_WIN32 || DUTYON_UI_PREVIEW

@@ -9,6 +9,8 @@
 //                           （Qoder 国际版/CN 版，Nested + shell 字段，仅已装时）
 //   ~/.cursor/hooks.json    （Cursor，Flat 格式 + camelCase 事件，仅已装时）
 //   ~/.codex/hooks.json     （Codex，Nested，剥 version 字段，仅已装时）
+//   ~/.claude/settings.json （Claude Code，Nested + shell 字段，仅已装时；
+//      遵循 CLAUDE_CONFIG_DIR）
 //   ~/.config/opencode/plugins/dutyon-bridge.js（OpenCode JS 插件，仅已装时）
 //
 // 合并逻辑的关键性质（1.x 踩坑沉淀，全部保留）：
@@ -35,6 +37,7 @@ struct InstallResult {
     std::optional<std::string> cursor_hooks_path;
     std::optional<std::string> codex_hooks_path;
     std::optional<std::string> opencode_plugin_path;
+    std::optional<std::string> claude_hooks_path;
     bool needs_enable = false;
 
     nlohmann::json toJson() const;
@@ -49,6 +52,7 @@ struct InstalledStatus {
     bool cursor_hooks_exist = false;
     bool codex_hooks_exist = false;
     bool opencode_plugin_exist = false;
+    bool claude_hooks_exist = false;
 
     nlohmann::json toJson() const;
 };

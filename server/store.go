@@ -16,7 +16,9 @@ package main
 // manifest 不落盘：GET /api/sync/manifest 时实时遍历磁盘计算（永不漂移）。
 
 import (
+	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -424,8 +426,30 @@ var syncFields = []string{"flipHorizontal", "miniMode", "language", "activeChara
 
 // ---- 配置快照 ----
 
-func (s *Store) SaveConfig(uid string, cfg map[string]interface{}) error {
-	filtered := map[string]interface{}{}
+// 配置快照的版本号：保存内容的 SHA-256 前 32 位；还没有快照时为 "0"。
+// 网页和桌宠都可能改设置，写入时带上自己读到的版本号（If-Match），
+// 版本对不上说明别处已经改过，拒绝覆盖。
+func configRev(b []byte) string {
+	if len(b) == 0 {
+		return "0"
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:16])
+}
+
+var errConfigConflict = errors.New("config changed elsewhere")
+
+// SaveConfig 保存白名单字段。
+//
+// ifMatch 非空（网页、新版桌宠）：必须等于当前版本号，否则返回
+// errConfigConflict 和当前版本号。
+//
+// ifMatch 为空（2.0.16 及更早的桌宠，每分钟无条件上传本机设置）：如果云端
+// 这一版是带版本号写入的——也就是网页或新版桌宠改过——而上传内容又与它
+// 不同，同样拒绝。否则旧版桌宠会在一分钟内把网页上的修改悄悄盖掉。旧版桌宠
+// 此时提示同步失败，用户"从云端恢复"后内容一致，上传即恢复正常。
+func (s *Store) SaveConfig(uid string, cfg map[string]any, ifMatch string) (string, error) {
+	filtered := make(map[string]any)
 	for _, key := range syncFields {
 		if v, ok := cfg[key]; ok {
 			filtered[key] = v
@@ -433,29 +457,49 @@ func (s *Store) SaveConfig(uid string, cfg map[string]interface{}) error {
 	}
 	b, err := json.MarshalIndent(filtered, "", "  ")
 	if err != nil {
-		return err
+		return "", err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := os.MkdirAll(s.userDir(uid), 0o755); err != nil {
-		return err
+	cur, _ := os.ReadFile(s.userConfigPath(uid))
+	curRev := configRev(cur)
+	guardPath := s.userConfigPath(uid) + ".guard"
+	if ifMatch != "" {
+		if curRev != ifMatch {
+			return curRev, errConfigConflict
+		}
+	} else if guard, _ := os.ReadFile(guardPath); string(guard) == curRev && !bytes.Equal(b, cur) {
+		return curRev, errConfigConflict
 	}
-	return atomicWrite(s.userConfigPath(uid), b)
+	if err := os.MkdirAll(s.userDir(uid), 0o755); err != nil {
+		return "", err
+	}
+	if err := atomicWrite(s.userConfigPath(uid), b); err != nil {
+		return "", err
+	}
+	rev := configRev(b)
+	if ifMatch != "" {
+		// 记下"这一版是带版本号写入的"，供上面的无条件写入判断
+		if err := atomicWrite(guardPath, []byte(rev)); err != nil {
+			return "", err
+		}
+	}
+	return rev, nil
 }
 
-func (s *Store) LoadConfig(uid string) (map[string]interface{}, error) {
+func (s *Store) LoadConfig(uid string) (map[string]any, string, error) {
 	b, err := os.ReadFile(s.userConfigPath(uid))
 	if errors.Is(err, os.ErrNotExist) {
-		return map[string]interface{}{}, nil
+		return make(map[string]any), "0", nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	cfg := map[string]interface{}{}
+	cfg := make(map[string]any)
 	if err := json.Unmarshal(b, &cfg); err != nil {
-		return map[string]interface{}{}, nil // 损坏快照当空处理
+		return make(map[string]any), configRev(b), nil // 损坏快照当空处理
 	}
-	return cfg, nil
+	return cfg, configRev(b), nil
 }
 
 // ---- 小工具 ----

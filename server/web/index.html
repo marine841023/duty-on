@@ -1,15 +1,212 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DutyOn · 云空间</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0b0b0d">
+<meta name="description" content="Duty On 开工啦：AI 在干活，她替你盯着。下载 Windows 桌宠，把角色、声音和设置存进自己的云空间。">
+<title>Duty On 开工啦 · 下载与云空间</title>
+<link rel="icon" href="/img/icon.png">
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+<script src="/gen.js" defer></script>
+</head>
 <body>
-<header><a class="brand" href="/">DutyOn<span>云空间</span></a><span class="tag">让陪伴随你而行</span></header>
+<a class="skip" href="#download">跳到下载</a>
+
+<header class="top">
+  <a class="brand" href="/">
+    <span class="lamp lamp-working" aria-hidden="true"></span>
+    <span class="brand-name">Duty On</span>
+    <span class="brand-cn">开工啦</span>
+  </a>
+  <nav class="nav" aria-label="页面导航">
+    <a href="#download">下载</a>
+    <a href="#space">云空间</a>
+  </nav>
+  <div class="inks" role="radiogroup" aria-label="主题色">
+    <button type="button" class="ink" data-ink="amber" role="radio" aria-checked="true" title="琥珀"></button>
+    <button type="button" class="ink" data-ink="ice" role="radio" aria-checked="false" title="冰蓝"></button>
+    <button type="button" class="ink" data-ink="white" role="radio" aria-checked="false" title="暖白"></button>
+    <button type="button" class="ink" data-ink="green" role="radio" aria-checked="false" title="竹绿"></button>
+    <button type="button" class="ink" data-ink="pink" role="radio" aria-checked="false" title="樱粉"></button>
+  </div>
+</header>
+
 <main>
-<section class="intro"><p class="eyebrow">YOUR DESKTOP COMPANION</p><h1>桌面上的陪伴，<br>云端的一份安心。</h1><p>下载 DutyOn，保存自己的角色动画、声音和 Live2D 模型。换一台电脑，也能找回熟悉的伙伴。</p></section>
-<section class="panel"><div class="section-head"><div><p class="eyebrow">DOWNLOAD</p><h2>获取 DutyOn</h2></div><span class="tag">Windows · x64</span></div><div id="releases" class="downloads"><p class="muted">正在获取最新版本…</p></div><p id="release-note" class="muted note"></p></section>
-<section class="panel" id="auth-panel"><p class="eyebrow">MY SPACE</p><h2>登录你的云空间</h2><p class="muted">与桌宠内的账号通用。使用桌宠登录时，服务器地址填写本网站地址。</p><form id="auth-form"><label>用户名<input id="username" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}" placeholder="3–32 位字母、数字、下划线或连字符"></label><label>密码<input id="password" type="password" autocomplete="current-password" required minlength="6" maxlength="1024" placeholder="至少 6 位"></label><div class="actions"><button type="submit" name="action" value="login">登录</button><button type="submit" name="action" value="register" class="secondary">创建账号</button></div></form></section>
-<section class="panel" id="space-panel" hidden><div class="section-head"><div><p class="eyebrow">MY SPACE</p><h2 id="greeting">我的内容</h2></div><button id="logout" class="secondary">退出登录</button></div><p id="usage" class="muted"></p><progress id="quota" value="0" max="1"></progress>
-<div class="upload-area"><h3>上传内容</h3><p class="muted">动画和音频支持多文件上传；Live2D 请选择完整模型文件夹。单文件不超过 50 MiB，每个账号 500 MiB。</p><div class="actions"><label class="file-button">选择动画 / 音频<input type="file" id="files" multiple accept=".gif,.png,.jpg,.jpeg,.webp,.wav,.mp3,.ogg,.m4a,.flac"></label><label class="file-button secondary">选择 Live2D 文件夹<input type="file" id="folder" webkitdirectory multiple></label><button id="refresh" class="secondary">刷新列表</button></div><p class="muted note">上传后，在桌宠菜单选择“从云端恢复”，再在角色或动作设定中使用这些文件。网页删除只影响云端；本机仍存在的文件可能再次备份，同步前请一并删除本机副本。</p></div>
-<div class="section-head"><h3>我的文件</h3><label class="search"><input type="search" id="search" placeholder="查找文件"></label></div><div id="file-list" class="file-list"></div></section>
-<p id="status" role="status" aria-live="polite" hidden></p>
-<footer>DutyOn · 你的内容仅对自己的账号开放。</footer>
-</main></body></html>
+<section class="hero">
+  <div class="hero-copy">
+    <h1>AI 在干活，<br>她替你盯着。</h1>
+    <p class="lede">Trae、Qoder、Cursor、Codex、OpenCode、Claude Code 同时开着好几个任务，不用再来回切窗口看进度。Duty On 把它们的状态交给一个角色：没事就睡，有活就忙，要你点头时她会叫你。</p>
+    <div class="cta">
+      <a class="btn btn-ink" id="hero-download" href="#download">下载 Windows 版</a>
+      <a class="btn" href="#space">打开我的云空间</a>
+    </div>
+    <p class="fine" id="hero-fine">原生 C++ 单进程，不带浏览器内核。</p>
+    <ul class="legend" aria-label="三种状态">
+      <li><span class="lamp lamp-idle" aria-hidden="true"></span><b>空闲中</b>所有任务都空闲</li>
+      <li><span class="lamp lamp-working" aria-hidden="true"></span><b>忙碌中</b>有任务正在跑</li>
+      <li><span class="lamp lamp-alert" aria-hidden="true">!</span><b>需要确认</b>有任务等你点头</li>
+    </ul>
+  </div>
+
+  <figure class="device" aria-label="硬件屏画面演示">
+    <div class="screen" id="screen" data-state="working">
+      <div class="scr-head">
+        <div class="scr-time"><span id="scr-hm">14:52</span><small id="scr-ss">07</small></div>
+        <div class="scr-date"><span class="scr-net" aria-hidden="true"><i class="pc"></i><i class="wifi"><b></b><b></b><b></b><b></b></i></span><span id="scr-week">星期四</span><small id="scr-day">11月12日</small></div>
+      </div>
+      <button type="button" class="scr-stage" id="scr-stage" title="换一个角色">
+        <span class="scr-glow" aria-hidden="true"></span>
+        <img id="scr-char" src="/img/nico.png" alt="桌宠角色" width="382" height="480">
+      </button>
+      <ol class="tiles" id="scr-tiles"></ol>
+    </div>
+    <figcaption>这是硬件屏上的画面，桌面版是同一套。点角色可以换一个。</figcaption>
+  </figure>
+</section>
+
+<section class="block" id="download">
+  <div class="block-head">
+    <h2>下载</h2>
+    <p class="muted">Windows 10 / 11，64 位。<span id="release-note"></span></p>
+  </div>
+  <div class="tiles-grid" id="releases">
+    <p class="muted">正在获取最新版本…</p>
+  </div>
+  <p class="fine">硬件屏用同一份源码交叉编译，说明见 <a href="https://github.com/marine841023/duty-on/tree/v2.0-dev/device" rel="noopener">device 目录</a>。</p>
+</section>
+
+<section class="block" id="space">
+  <div class="block-head">
+    <h2 id="space-title">云空间</h2>
+    <p class="muted" id="space-sub">按角色存放你自己的动画和声音，还有 Live2D 模型和桌宠设置的备份。换一台电脑，登录同一个账号就能找回来。</p>
+  </div>
+
+  <div id="auth-panel" class="auth">
+    <form id="auth-form" class="tile-form" novalidate>
+      <label for="username">用户名</label>
+      <input id="username" name="username" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_\-]{3,32}" placeholder="3–32 位字母、数字、下划线或连字符" spellcheck="false" autocapitalize="off">
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required minlength="6" maxlength="1024" placeholder="至少 6 位">
+      <div class="row">
+        <button type="submit" class="btn btn-ink" name="action" value="login">登录</button>
+        <button type="submit" class="btn" name="action" value="register">创建账号</button>
+      </div>
+      <p class="fine">和桌宠里的云账号是同一个。没有密码找回，请自己记好。</p>
+    </form>
+    <ul class="points">
+      <li><b>只有你能看到</b>内容按账号隔离，不公开、不分享。</li>
+      <li><b>每个账号 500 MiB</b>单个文件不超过 50 MiB。</li>
+      <li><b>桌宠每分钟同步一次</b>在这里新建、修改或删除角色，桌宠会自动跟上，不用手动恢复。</li>
+    </ul>
+  </div>
+
+  <div id="space-panel" hidden>
+    <div class="space-bar">
+      <div class="meter" id="meter" role="img" aria-label="存储用量"><span id="meter-fill"></span></div>
+      <p class="muted" id="usage"></p>
+      <button type="button" class="btn btn-quiet" id="logout">退出登录</button>
+    </div>
+    <div class="progress" id="progress" hidden><span id="progress-fill"></span></div>
+
+    <div id="view-home">
+      <div class="sec-head">
+ <h3>角色</h3>
+        <p class="muted">每个角色有空闲中、忙碌中、需要确认三种状态，各配一段动画和一个声音。点开角色就能修改。</p>
+      </div>
+      <ol class="chars" id="char-list"></ol>
+
+      <div class="sec-head">
+        <h3>Live2D 模型</h3>
+        <label class="btn file-btn">上传模型文件夹<input type="file" id="folder" webkitdirectory multiple></label>
+      </div>
+      <ol class="files" id="model-list"></ol>
+
+      <details class="loose" id="loose" hidden>
+        <summary>没有归属的文件 <span class="muted" id="loose-count"></span></summary>
+ <p class="fine">这些文件没有被任何角色用到，多半是换掉以后留下的旧文件，可以放心删除。</p>
+ <ol class="files" id="loose-list"></ol>
+      </details>
+      <p class="fine">这里的修改，桌宠会在一分钟内自动同步过去。在这里删除的文件，本机那一份会被移到 .dutyon/cloud-trash 里，不会直接消失。</p>
+    </div>
+
+    <div id="view-char" hidden>
+      <button type="button" class="btn btn-quiet" id="char-back">返回全部角色</button>
+      <div class="char-head">
+        <label class="sr" for="char-name">角色名字</label>
+ <input id="char-name" maxlength="40" placeholder="角色名字" autocomplete="off">
+ <button type="button" class="btn" id="char-rename">改名</button>
+        <button type="button" class="btn btn-ink" id="char-regen">重新生成</button>
+        <span class="badge" id="char-active" hidden>桌宠正在用</span>
+        <button type="button" class="btn btn-quiet" id="char-delete">删除角色</button>
+      </div>
+      <ol class="states" id="char-states"></ol>
+    </div>
+
+    <div id="view-gen" hidden>
+      <button type="button" class="btn btn-quiet" id="gen-back">返回角色</button>
+      <div class="gen-head">
+        <h3 id="gen-title">重新生成</h3>
+        <span class="badge">功能预览</span>
+      </div>
+      <p class="gen-notice">生成服务还在接入中。这一页用演示数据走一遍完整流程，不会修改角色，也不会上传任何文件。</p>
+
+      <ol class="gen-steps">
+        <li class="gen-step" id="gen-step-image">
+   <div class="gen-step-head"><span class="gen-no">1</span><h4>角色形象</h4><span class="gen-state" id="gen-image-state"></span></div>
+   <p class="muted">上传一张清楚的角色全身图，背景越干净越好。默认用这个角色现在"忙碌中"动画的第一帧。</p>
+   <div class="gen-image">
+            <div class="gen-ref" id="gen-ref">没有图片</div>
+     <div class="gen-image-side">
+       <div class="row">
+         <label class="btn file-btn">上传角色图<input type="file" id="gen-image-file" accept=".png,.jpg,.jpeg,.webp,.gif"></label>
+       </div>
+       <ul class="gen-traits" id="gen-traits"></ul>
+     </div>
+   </div>
+        </li>
+
+        <li class="gen-step" id="gen-step-describe">
+   <div class="gen-step-head"><span class="gen-no">2</span><h4>动作描述</h4><span class="gen-state" id="gen-describe-state"></span></div>
+          <p class="muted">AI 看图后给三种状态各写一段动作。觉得不对可以直接改字，或者只让它重写某一段。</p>
+          <div class="row"><button type="button" class="btn btn-ink" id="gen-describe">让 AI 看图写描述</button></div>
+   <ol class="gen-descs" id="gen-descs"></ol>
+   <p class="fine">每段描述都会自动附上：镜头固定、角色居中、首尾姿势相同、纯色背景、时长约 4 秒。</p>
+        </li>
+
+ <li class="gen-step" id="gen-step-animate">
+          <div class="gen-step-head"><span class="gen-no">3</span><h4>生成动画</h4><span class="gen-state" id="gen-animate-state"></span></div>
+          <p class="muted">每种状态出 3 个备选，每个都会自动去背景、首尾衔接、压缩成 GIF，再由 AI 检查形象和循环。满意的点"设为主动画"。</p>
+          <div class="row"><button type="button" class="btn btn-ink" id="gen-animate">生成全部动画</button></div>
+          <div id="gen-cands"></div>
+ </li>
+
+        <li class="gen-step" id="gen-step-voice">
+          <div class="gen-step-head"><span class="gen-no">4</span><h4>声音</h4><span class="gen-state" id="gen-voice-state"></span></div>
+   <p class="muted">上传一段 10–30 秒的说话录音，克隆出这个声音，再让它带着情绪说出你写的台词。</p>
+   <div class="gen-voice-ref">
+     <div class="gen-voice-file" id="gen-voice-file">还没有录音</div>
+     <label class="btn file-btn">上传录音<input type="file" id="gen-voice-upload" accept=".wav,.mp3,.m4a,.ogg,.flac"></label>
+          </div>
+   <label class="gen-consent"><input type="checkbox" id="gen-consent"> 这是我自己的声音，或者我已经得到声音主人的同意</label>
+   <div class="row"><button type="button" class="btn btn-ink" id="gen-clone">克隆声音</button></div>
+   <ol class="gen-lines" id="gen-lines"></ol>
+ </li>
+      </ol>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="foot">
+  <span>Duty On 开工啦</span>
+  <a href="https://github.com/marine841023/duty-on" rel="noopener">GitHub</a>
+  <a href="https://gitee.com/megrezsoft/duty-on" rel="noopener">Gitee</a>
+  <span class="muted">MIT 许可证</span>
+</footer>
+
+<p id="status" class="toast" role="status" aria-live="polite" hidden></p>
+</body>
+</html>

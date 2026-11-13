@@ -72,7 +72,7 @@ public:
 
     // ---- 后台任务（worker 线程执行；主线程仅置标志）----
     void startWorker();    // 登录后 / 启动时 token 非空调用；幂等
-    void syncNow();        // 立即执行一次增量上传
+    void syncNow();        // 立即同步一轮；设置冲突时再点一次 = 以本机为准
     void requestRestore(); // 云恢复：下载差异文件 + 配置合并落盘
     void checkUpdate();    // 检查新版本
     void startUpdateDownload();  // 下载升级包（校验 + 解压到 staged）
@@ -100,7 +100,7 @@ private:
     };
 
     void workerLoop();
-    bool doUploadOnce(std::string& err);    // 增量上传（文件 + 配置快照）
+    bool doUploadOnce(std::string& err);    // 一轮双向同步（文件 + 设置）
     bool doRestore(std::string& err);       // 云恢复（文件 + 配置合并）
     void doCheckUpdate();
     void doDownloadUpdate();
@@ -114,6 +114,8 @@ private:
     std::thread worker_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> sync_requested_{false};
+    std::atomic<bool> force_push_{false};       // 下一轮设置以本机为准（不比对云端版本）
+    std::atomic<bool> config_conflict_{false};  // 上一轮发现设置在云端和本机都改过
     std::atomic<bool> restore_requested_{false};
     std::atomic<bool> update_check_requested_{false};
     std::atomic<bool> update_download_requested_{false};

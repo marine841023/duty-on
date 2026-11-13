@@ -190,6 +190,66 @@ struct GifSprite::Impl {
     bool flip = false;
 
     // 应用一帧差分到工作画布并累积脏矩形
+    // ---- 缩小显示：按目标像素尺寸做面积平均重采样 ----
+    // 桌宠在屏幕上比原图小（480px 原图显示成 190~240px）。交给显卡双线性
+    // 缩小时，只有恰好缩 2 倍（125% 缩放的屏）才等于平均 2x2 像素；其他
+    // 比例（100% 屏是 2.5 倍）会跳像素，发丝和轮廓全是锯齿。这里在 CPU 上
+    // 把每个目标像素覆盖到的源像素按面积加权平均，任何缩放比下都平滑，
+    // 再 1:1 贴到屏幕上，不再经过第二次过滤。480x480 一帧不到 1ms。
+    std::vector<uint8_t> scaled;   // 目标尺寸的 BGRA（预乘）
+    std::vector<float> scale_tmp;  // 横向缩小后的中间结果（tw x h x 4）
+    int tex_w = 0, tex_h = 0;      // 纹理当前尺寸
+    struct Span { int first; int count; float wt[8]; };
+    static void BuildSpans(int src, int dst, std::vector<Span>& out) {
+        out.resize((size_t)dst);
+        const double r = (double)src / dst;
+        for (int d = 0; d < dst; d++) {
+            const double a = d * r, b = (d + 1) * r;
+            Span s{};
+            s.first = (int)a;
+            double sum = 0.0;
+            for (int k = s.first; k < src && k < b && s.count < 8; k++) {
+                const double lo = a > k ? a : k, hi = b < k + 1 ? b : k + 1;
+                const double w = hi - lo;
+                if (w <= 0.0) continue;
+                s.wt[s.count++] = (float)w;
+                sum += w;
+            }
+            for (int k = 0; k < s.count; k++) s.wt[k] = (float)(s.wt[k] / sum);
+            out[(size_t)d] = s;
+        }
+    }
+    void Downscale(int tw, int th) {
+        std::vector<Span> sx, sy;
+        BuildSpans(w, tw, sx);
+        BuildSpans(h, th, sy);
+        scale_tmp.resize((size_t)tw * h * 4);
+        for (int y = 0; y < h; y++) {
+            const uint8_t* row = canvas.data() + (size_t)y * w * 4;
+            float* out = scale_tmp.data() + (size_t)y * tw * 4;
+            for (int x = 0; x < tw; x++) {
+                const Span& s = sx[(size_t)x];
+                float c[4] = {0, 0, 0, 0};
+                for (int k = 0; k < s.count; k++) {
+                    const uint8_t* p = row + (size_t)(s.first + k) * 4;
+                    for (int ch = 0; ch < 4; ch++) c[ch] += p[ch] * s.wt[k];
+                }
+                for (int ch = 0; ch < 4; ch++) out[x * 4 + ch] = c[ch];
+            }
+        }
+        scaled.resize((size_t)tw * th * 4);
+        for (int y = 0; y < th; y++) {
+            const Span& s = sy[(size_t)y];
+            uint8_t* out = scaled.data() + (size_t)y * tw * 4;
+            for (int x = 0; x < tw * 4; x++) {
+                float c = 0.0f;
+                for (int k = 0; k < s.count; k++)
+                    c += scale_tmp[(size_t)(s.first + k) * tw * 4 + x] * s.wt[k];
+                out[x] = (uint8_t)(c + 0.5f);
+            }
+        }
+    }
+
     void ApplyDelta(const GifFrameDelta& d) {
         if (d.w <= 0) return;
         const uint8_t* src = d.px.data();
@@ -372,6 +432,16 @@ bool GifSprite::load(const std::string& path_utf8) {
                         if (SUCCEEDED(conv->CopyPixels(
                                 nullptr, fm.width * 4,
                                 (UINT)buf.size(), buf.data()))) {
+                            // 预乘 alpha：透明像素的 RGB 清零（WIC 给透明索引带调色板
+                            // 颜色，常见为绿）。否则缩放时把那层颜色混进边缘，轮廓出现
+                            // 杂色毛边；预乘后的缩放与混合才是正确的。
+                            for (size_t px = 0; px + 3 < buf.size(); px += 4) {
+                                const unsigned a = buf[px + 3];
+                                if (a == 255) continue;
+                                buf[px + 0] = (uint8_t)(buf[px + 0] * a / 255);
+                                buf[px + 1] = (uint8_t)(buf[px + 1] * a / 255);
+                                buf[px + 2] = (uint8_t)(buf[px + 2] * a / 255);
+                            }
                             for (UINT32 y = 0; y < fm.height; y++) {
                                 memcpy(canvas.data() +
                                            ((size_t)(fm.top + y) * w + fm.left) * 4,
@@ -462,7 +532,34 @@ void GifSprite::setFlip(bool flip) { impl_->flip = flip; }
 void GifSprite::render() {
     if (impl_->frames.empty() || impl_->vp_w <= 0 || impl_->vp_h <= 0) return;
 
-    // 纹理：首帧全量上传；此后只上传帧间脏矩形（BGRA 与 WIC 字节序一致）
+    // 适配（contain）：最大占画布 80%（88% 偏大 → 72% 偏小 → 定格 80%）；
+    // 水平居中、垂直贴底（无余量，与 Live2D 内容底边贴画布底边一致）
+    // —— 与下方任务列表的间距由区块 gap 统一控制。
+    // 顶点坐标为视口内相对坐标（glViewport 已负责定位；与 Live2D Draw
+    // 的 window_w/h 语义一致）。
+    const float max_w = impl_->vp_w * 0.80f;
+    const float max_h = impl_->vp_h * 0.80f;
+    float scale = max_w / (float)impl_->w;
+    if ((float)impl_->h * scale > max_h) scale = max_h / (float)impl_->h;
+    float dw = (float)impl_->w * scale;
+    float dh = (float)impl_->h * scale;
+    // 缩小显示：目标取整到像素，纹理按目标尺寸重采样后 1:1 上屏
+    const bool minify = dw < (float)impl_->w - 0.5f;
+    if (minify) {
+        dw = (float)(int)(dw + 0.5f);
+        dh = (float)(int)(dh + 0.5f);
+        if (dw < 1.0f) dw = 1.0f;
+        if (dh < 1.0f) dh = 1.0f;
+    }
+    const float dx = minify ? (float)(int)((impl_->vp_w - dw) * 0.5f + 0.5f)
+              : (impl_->vp_w - dw) * 0.5f;
+    const float dy = impl_->vp_h - dh;
+    impl_->content = Rect{dx, dy, dw, dh};
+
+    // 纹理：缩小时上传重采样结果（整幅）；不缩小时首帧全量上传、此后
+    // 只上传帧间脏矩形（BGRA 与 WIC 字节序一致）
+    const int up_w = minify ? (int)dw : impl_->w;
+    const int up_h = minify ? (int)dh : impl_->h;
     if (!impl_->tex) {
         glGenTextures(1, &impl_->tex);
         glBindTexture(GL_TEXTURE_2D, impl_->tex);
@@ -470,44 +567,39 @@ void GifSprite::render() {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, impl_->w, impl_->h, 0, GL_BGRA_EXT,
-                     GL_UNSIGNED_BYTE, impl_->canvas.data());
-        impl_->tex_valid = true;
-        impl_->has_dirty = false;
+        impl_->tex_valid = false;
     } else {
         glBindTexture(GL_TEXTURE_2D, impl_->tex);
-        if (impl_->tex_valid && impl_->has_dirty) {
-            // 脏行跨度与画布同行 → UNPACK_ROW_LENGTH 设为画布宽，
-            // 指针偏移到脏区起点（上传完恢复默认，避免影响其它上传路径）
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, impl_->w);
-            glTexSubImage2D(GL_TEXTURE_2D, 0, (int)impl_->dirty.x,
-                            (int)impl_->dirty.y, (int)impl_->dirty.w,
-                            (int)impl_->dirty.h, GL_BGRA_EXT, GL_UNSIGNED_BYTE,
-                            impl_->canvas.data() +
-                                ((size_t)(int)impl_->dirty.y * impl_->w +
-                                 (int)impl_->dirty.x) * 4);
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-            impl_->has_dirty = false;
-        }
     }
-
-    // 适配（contain）：最大占画布 80%（88% 偏大 → 72% 偏小 → 定格 80%）；
-    // 水平居中、垂直贴底（无余量，与 Live2D 内容底边贴画布底边一致）
-    // —— 与下方任务列表的间距由区块 gap 统一控制。
-    // 顶点坐标为视口内相对坐标（glViewport 已负责定位；与 Live2D Draw
-    // 的 window_w/h 语义一致）—— 之前误加 vp_x/vp_y 导致偏移两次，
-    // 四边形画到画布下方的面板区（被 ImGui 盖住），画布区全透明。
-    const float max_w = impl_->vp_w * 0.80f;
-    const float max_h = impl_->vp_h * 0.80f;
-    float scale = max_w / (float)impl_->w;
-    if ((float)impl_->h * scale > max_h) scale = max_h / (float)impl_->h;
-    const float dw = (float)impl_->w * scale;
-    const float dh = (float)impl_->h * scale;
-    const float dx = (impl_->vp_w - dw) * 0.5f;
-    const float dy = impl_->vp_h - dh;
-    impl_->content = Rect{dx, dy, dw, dh};
+    const bool resized = up_w != impl_->tex_w || up_h != impl_->tex_h;
+    if (!impl_->tex_valid || resized || (minify && impl_->has_dirty)) {
+        const uint8_t* src = impl_->canvas.data();
+        if (minify) {
+            impl_->Downscale(up_w, up_h);
+            src = impl_->scaled.data();
+        }
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, up_w, up_h, 0, GL_BGRA_EXT,
+              GL_UNSIGNED_BYTE, src);
+        impl_->tex_w = up_w;
+        impl_->tex_h = up_h;
+        impl_->tex_valid = true;
+        impl_->has_dirty = false;
+    } else if (impl_->has_dirty) {
+        // 脏行跨度与画布同行 → UNPACK_ROW_LENGTH 设为画布宽，
+        // 指针偏移到脏区起点（上传完恢复默认，避免影响其它上传路径）
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, impl_->w);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, (int)impl_->dirty.x,
+          (int)impl_->dirty.y, (int)impl_->dirty.w,
+          (int)impl_->dirty.h, GL_BGRA_EXT, GL_UNSIGNED_BYTE,
+                 impl_->canvas.data() +
+              ((size_t)(int)impl_->dirty.y * impl_->w +
+               (int)impl_->dirty.x) * 4);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        impl_->has_dirty = false;
+    }
 
     // 正交投影（Y 向下，与客户区一致）+ 文本四边形
     glViewport(impl_->vp_x, impl_->vp_y, impl_->vp_w, impl_->vp_h);
@@ -520,7 +612,9 @@ void GifSprite::render() {
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // 纹理已预乘 alpha；写进透明窗口帧缓冲的 alpha 也因此正确
+    // （DWM 按预乘合成，半透明边缘不再发暗）
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_TEXTURE_2D);
 
     glBegin(GL_QUADS);

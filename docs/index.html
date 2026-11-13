@@ -3,102 +3,178 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Duty On · 开工啦 — 为中国 Trae 用户量身打造的 AI 编程桌宠</title>
-<meta name="description" content="开工啦 (Duty On)：为中国 Trae 用户量身打造的 Live2D 桌面精灵。实时监控 Trae / Qoder / Cursor / Codex / OpenCode 的 AI 任务状态。v2.0 原生 C++ 单进程，无 WebView，开源免费。">
+<meta name="color-scheme" content="dark">
+<title>Duty On · 开工啦 — AI 任务桌宠 + 硬件陪伴屏</title>
+<meta name="description" content="开工啦 (Duty On)：为中国 Trae 用户打造的 Live2D 桌面精灵与硬件陪伴屏。实时监控 Trae / Qoder / Cursor / Codex / OpenCode / Claude Code 六种工具的 AI 任务状态。原生 C++ 单进程，双向云同步，开源免费。">
 <style>
+  /* 视觉沿用桌宠本体与官网：黑色舞台、纸白文字、琥珀主题色，
+     珊瑚红只留给"需要你"（提醒 / 危险操作）。 */
   :root {
-    --bg: #0f1123; --bg2: #171a35; --card: #1e2244; --line: #2c3160;
-    --fg: #eef0ff; --dim: #9aa0c7; --accent: #7c6cf8; --teal: #39d0c4; --amber: #ffb347;
-    --trae: #00d56b; --qoder: #ff6b35; --cursor: #5a8bff; --codex: #ff8c42; --opencode: #b388ff;
+    --stage: #0b0b0d; --tile-top: #24242a; --tile-bot: #17171b;
+    --hair: rgba(255,255,255,.09);
+    --paper: #f3efe7; --dim: #a29d93; --faint: #6f6b63;
+    --ink: #e0a653; --ink-rgb: 224,166,83; --ink-dark: #15120c;
+    --coral: #ff5f52; --coral-deep: #f2463b; --coral-ink: #2a0906;
+    --idle: #7d8797; --thinking: #ae9fff; --tool: #ff9f45; --working: #ffc94d;
+    --trae: #7ecf86; --qoder: #ff9f45; --cursor: #8ac2e6; --codex: #ffc94d;
+    --opencode: #e897c6; --claude: #f09a7c;
+    --radius: 16px;
+    --sans: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    --round: "Arial Rounded MT Bold", "SF Pro Rounded", ui-rounded, var(--sans);
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: var(--bg); color: var(--fg); font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; }
-  a { color: var(--teal); text-decoration: none; }
-  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  html { scroll-behavior: smooth; }
+  body { background: var(--stage); color: var(--paper); font: 16px/1.7 var(--sans); -webkit-font-smoothing: antialiased; }
+  a { color: var(--ink); text-decoration: none; text-underline-offset: 3px; }
+  a:hover { text-decoration: underline; text-decoration-thickness: 2px; }
+  ul, ol { list-style: none; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 28px; }
+  .muted { color: var(--dim); }
+  .fine { color: var(--faint); font-size: 13.5px; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 6px; }
 
-  /* hero */
-  header.hero { position: relative; overflow: hidden; background: radial-gradient(1200px 500px at 70% 20%, #2a2f63 0%, var(--bg) 60%); }
-  .hero-inner { display: grid; grid-template-columns: 1.1fr 1fr; gap: 40px; align-items: center; padding: 88px 0 72px; }
-  .badge { display: inline-block; font-size: 13px; color: var(--teal); border: 1px solid var(--line); border-radius: 999px; padding: 4px 14px; background: rgba(57,208,196,.08); margin-bottom: 12px; }
-  .badge-cn { border-color: rgba(0,213,107,.5); color: var(--trae); background: rgba(0,213,107,.08); }
-  .badge-ver { border-color: rgba(255,179,71,.5); color: var(--amber); background: rgba(255,179,71,.08); }
-  h1 { font-size: 52px; line-height: 1.15; letter-spacing: -1px; }
-  h1 .zh { display: block; font-size: 26px; color: var(--dim); font-weight: 500; margin-top: 8px; letter-spacing: 2px; }
-  .tagline { margin: 20px 0 30px; color: var(--dim); font-size: 17px; max-width: 48ch; }
-  .cta { display: flex; gap: 14px; flex-wrap: wrap; }
-  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 13px 26px; border-radius: 12px; font-size: 15px; font-weight: 600; transition: transform .15s ease, box-shadow .15s ease; }
-  .btn:hover { transform: translateY(-2px); }
-  .btn-primary { background: linear-gradient(135deg, var(--accent), #5a8bff); color: #fff; box-shadow: 0 8px 24px rgba(124,108,248,.35); }
-  .btn-ghost { border: 1px solid var(--line); color: var(--fg); background: rgba(255,255,255,.03); }
-  .hero-img { position: relative; }
-  .hero-img img { width: 100%; border-radius: 18px; border: 1px solid var(--line); box-shadow: 0 24px 64px rgba(0,0,0,.5); }
+  /* ---- 状态灯：每种状态一个动作，不看颜色也分得清 ---- */
+  .lamp { position: relative; display: inline-block; flex: none; width: 22px; height: 22px; }
+  .lamp::before, .lamp::after { content: ""; position: absolute; border-radius: 50%; }
+  .lamp-idle::before { inset: 5px; border: 2px solid var(--idle); }
+  .lamp-working::before { inset: 6px; background: var(--working); }
+  .lamp-working::after { inset: 6px; border: 1.5px solid var(--working); animation: ripple 1.6s ease-out infinite; }
+  .lamp-alert { width: 24px; height: 24px; border-radius: 50%; background: var(--coral-ink); color: var(--coral); font: 800 15px/24px var(--sans); text-align: center; }
+  @keyframes ripple { from { transform: scale(1); opacity: .7; } to { transform: scale(2.3); opacity: 0; } }
 
-  /* states */
-  .states { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: -6px 0 0; }
-  .state { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 26px 22px; }
-  .state .emoji { font-size: 34px; }
-  .state h3 { margin: 10px 0 6px; font-size: 18px; }
+  /* ---- 按钮 ---- */
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 46px; padding: 0 22px; border-radius: 23px; cursor: pointer; border: 1px solid var(--hair); background: linear-gradient(var(--tile-top), var(--tile-bot)); color: var(--paper); font-size: 15.5px; font-weight: 600; white-space: nowrap; transition: border-color .15s ease; }
+  .btn:hover { border-color: rgba(255,255,255,.22); text-decoration: none; }
+  .btn-ink { background: var(--ink); border-color: var(--ink); color: var(--ink-dark); }
+  .btn-ink:hover { border-color: var(--ink); filter: brightness(1.07); }
+
+  /* ---- 首屏 ---- */
+  header.hero { position: relative; overflow: hidden; }
+  header.hero::before { content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(56% 46% at 72% 30%, rgba(var(--ink-rgb), .10), transparent 100%); }
+  .hero-inner { position: relative; display: grid; grid-template-columns: 1.1fr 1fr; gap: 48px; align-items: center; padding: 72px 0 64px; }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+  .badge { display: inline-block; font-size: 12.5px; color: var(--ink); border: 1px solid rgba(var(--ink-rgb), .45); border-radius: 999px; padding: 3px 13px; background: rgba(var(--ink-rgb), .07); }
+  .badge-cn { color: var(--trae); border-color: rgba(126,207,134,.45); background: rgba(126,207,134,.07); }
+  h1 { font: 800 54px/1.12 var(--round); letter-spacing: -.5px; }
+  h1 .zh { display: block; font: 500 22px/1.5 var(--sans); color: var(--dim); margin-top: 10px; letter-spacing: 2px; }
+  .tagline { margin: 20px 0 30px; color: var(--dim); font-size: 16.5px; max-width: 46ch; }
+  .tagline strong { color: var(--paper); }
+  .cta { display: flex; gap: 12px; flex-wrap: wrap; }
+  .hero-img img { width: 100%; border-radius: 18px; border: 1px solid var(--hair); box-shadow: 0 30px 80px -30px rgba(var(--ink-rgb), .35); }
+
+  section { padding: 64px 0; border-top: 1px solid var(--hair); }
+  .section-title { font-size: 30px; font-weight: 800; margin-bottom: 8px; }
+  .section-sub { color: var(--dim); margin-bottom: 36px; max-width: 60em; }
+
+  /* ---- 三种状态 ---- */
+  .states { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .state { background: linear-gradient(var(--tile-top), var(--tile-bot)); border: 1px solid var(--hair); border-radius: var(--radius); padding: 24px 22px; }
+  .state .lamp { transform: scale(1.25); margin: 4px 0 14px 4px; }
+  .state h3 { font-size: 18px; margin-bottom: 6px; }
   .state p { color: var(--dim); font-size: 14px; }
-  .state.alert { border-color: rgba(255,179,71,.5); box-shadow: 0 0 0 1px rgba(255,179,71,.15), 0 12px 32px rgba(255,179,71,.08); }
+  .state.alert { border-color: rgba(255,95,82,.55); box-shadow: 0 0 24px -6px rgba(255,95,82,.35); }
+  .state.alert h3 { color: var(--coral); }
 
-  section { padding: 72px 0; }
-  .section-title { text-align: center; font-size: 32px; margin-bottom: 8px; }
-  .section-sub { text-align: center; color: var(--dim); margin-bottom: 44px; }
-
-  /* IDE support */
-  .ide-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
-  .ide-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 24px 16px; text-align: center; transition: transform .15s ease, border-color .15s ease; }
-  .ide-card:hover { transform: translateY(-4px); }
+  /* ---- 工具卡片 ---- */
+  .ide-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .ide-card { background: linear-gradient(var(--tile-top), var(--tile-bot)); border: 1px solid var(--hair); border-radius: 14px; padding: 22px 18px; transition: border-color .15s ease; }
+  .ide-card:hover { border-color: rgba(var(--ink-rgb), .5); }
   .ide-card .ide-name { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
-  .ide-card .ide-badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px; margin-top: 6px; font-weight: 600; }
-  .ide-card .ide-desc { color: var(--dim); font-size: 12.5px; margin-top: 8px; line-height: 1.5; }
-  .ide-card.trae { border-color: rgba(0,213,107,.4); box-shadow: 0 0 0 1px rgba(0,213,107,.1); }
+  .ide-card .ide-badge { display: inline-block; font-size: 11px; padding: 2px 9px; border-radius: 999px; margin-top: 6px; font-weight: 600; border: 1px solid currentColor; }
+  .ide-card .ide-desc { color: var(--dim); font-size: 12.5px; margin-top: 10px; line-height: 1.6; }
+  .ide-card.trae { border-color: rgba(126,207,134,.4); }
   .ide-card.trae .ide-name { color: var(--trae); }
-  .ide-card.trae .ide-badge { background: rgba(0,213,107,.15); color: var(--trae); }
   .ide-card.trae::before { content: "⭐ 首选支持"; display: block; font-size: 11px; color: var(--trae); margin-bottom: 8px; font-weight: 600; }
+  .ide-card.claude { border-color: rgba(240,154,124,.4); }
+  .ide-card.claude .ide-name { color: var(--claude); }
+  .ide-card.claude::before { content: "🆕 2.0.17 新增"; display: block; font-size: 11px; color: var(--claude); margin-bottom: 8px; font-weight: 600; }
 
-  /* features */
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
-  .feat { background: var(--bg2); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
-  .feat h4 { font-size: 16px; margin-bottom: 6px; }
-  .feat p { color: var(--dim); font-size: 13.5px; }
+  /* ---- 双形态 ---- */
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: stretch; }
+  .form-card { background: linear-gradient(var(--tile-top), var(--tile-bot)); border: 1px solid var(--hair); border-radius: var(--radius); padding: 26px; }
+  .form-card h3 { font-size: 20px; margin-bottom: 4px; }
+  .form-card .sub { color: var(--faint); font-size: 13px; margin-bottom: 14px; }
+  .form-card ul { display: grid; gap: 9px; }
+  .form-card li { color: var(--dim); font-size: 14px; padding-left: 16px; position: relative; }
+  .form-card li::before { content: ""; position: absolute; left: 0; top: .68em; width: 5px; height: 5px; border-radius: 50%; background: var(--ink); }
+  .form-card li b { color: var(--paper); font-weight: 600; }
+  .chars { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-top: 26px; }
+  .chars figure { background: #0f0f12; border: 1px solid var(--hair); border-radius: 14px; overflow: hidden; text-align: center; }
+  .chars img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+  .chars figcaption { font-size: 12.5px; color: var(--dim); padding: 7px 0 9px; }
+
+  /* ---- 云空间 ---- */
+  .cloud-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+  .cloud-card { background: linear-gradient(var(--tile-top), var(--tile-bot)); border: 1px solid var(--hair); border-radius: var(--radius); padding: 24px; }
+  .cloud-card h4 { font-size: 16.5px; margin-bottom: 8px; }
+  .cloud-card p { color: var(--dim); font-size: 14px; }
+  .cloud-card p b { color: var(--paper); font-weight: 600; }
+  .gen { margin-top: 20px; border: 1px solid rgba(var(--ink-rgb), .4); border-radius: var(--radius); padding: 26px; background: rgba(var(--ink-rgb), .04); }
+  .gen-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+  .gen-head h3 { font-size: 20px; }
+  .gen-head .badge { font-size: 11.5px; }
+  .gen > p { color: var(--dim); font-size: 14px; max-width: 62em; }
+  .gen-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+  .gen-step { background: rgba(0,0,0,.22); border: 1px solid var(--hair); border-radius: 13px; padding: 16px 15px; }
+  .gen-no { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; border: 1.5px solid rgba(var(--ink-rgb), .7); color: var(--ink); font: 700 13px/1 var(--round); margin-bottom: 10px; }
+  .gen-step h5 { font-size: 14.5px; margin-bottom: 5px; }
+  .gen-step p { color: var(--dim); font-size: 12.5px; line-height: 1.6; }
+
+  /* ---- 为什么 ---- */
+  .why-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .why-card { background: linear-gradient(var(--tile-top), var(--tile-bot)); border: 1px solid var(--hair); border-radius: var(--radius); padding: 24px; }
+  .why-card h4 { font-size: 16px; margin-bottom: 8px; }
+  .why-card .why-icon { font-size: 26px; margin-bottom: 8px; display: block; }
+  .why-card p { color: var(--dim); font-size: 13.5px; }
+  .why-card .highlight { color: var(--ink); font-weight: 600; }
+  .mem { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+  .mem th, .mem td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--hair); color: var(--dim); }
+  .mem th { color: var(--faint); font-weight: 600; }
+  .mem td b { color: var(--ink); }
+
+  /* ---- 功能 ---- */
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .feat { background: linear-gradient(var(--tile-top), var(--tile-bot)); border: 1px solid var(--hair); border-radius: 14px; padding: 20px 18px; }
+  .feat h4 { font-size: 15px; margin: 8px 0 6px; }
+  .feat p { color: var(--dim); font-size: 13px; }
   .feat .ico { font-size: 22px; }
 
-  /* why */
-  .why-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-  .why-card { background: var(--bg2); border: 1px solid var(--line); border-radius: 14px; padding: 24px; }
-  .why-card h4 { font-size: 16px; margin-bottom: 8px; }
-  .why-card .why-icon { font-size: 28px; margin-bottom: 8px; display: block; }
-  .why-card p { color: var(--dim); font-size: 13.5px; }
-  .why-card .highlight { color: var(--teal); font-weight: 600; }
-
-  /* how */
-  .how { background: var(--bg2); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-  pre.arch { background: #0b0d1e; border: 1px solid var(--line); border-radius: 14px; padding: 24px; overflow-x: auto; font-size: 12.5px; line-height: 1.55; color: #b9c0ee; }
-
-  /* guide */
-  .steps { display: flex; flex-direction: column; gap: 16px; max-width: 780px; margin: 0 auto; }
-  .step { display: flex; gap: 18px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 20px 24px; }
-  .step-num { flex: none; width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 17px; color: #fff; background: linear-gradient(135deg, var(--accent), #5a8bff); }
-  .step h4 { font-size: 17px; margin-bottom: 4px; }
+  /* ---- 指南 ---- */
+  .steps { display: flex; flex-direction: column; gap: 14px; max-width: 820px; }
+  .step { display: flex; gap: 18px; background: linear-gradient(var(--tile-top), var(--tile-bot)); border: 1px solid var(--hair); border-radius: var(--radius); padding: 20px 24px; }
+  .step-num { flex: none; width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; font: 700 16px/1 var(--round); color: var(--ink); border: 1.5px solid rgba(var(--ink-rgb), .7); }
+  .step h4 { font-size: 16.5px; margin-bottom: 4px; }
   .step p { color: var(--dim); font-size: 14px; }
-  .step strong { color: var(--fg); }
-  .guide-tip { max-width: 780px; margin: 26px auto 0; padding: 16px 22px; border: 1px dashed rgba(57,208,196,.45); border-radius: 12px; color: var(--dim); font-size: 13.5px; background: rgba(57,208,196,.05); }
+  .step strong { color: var(--paper); }
+  .step code, .codeblock code { font-family: Consolas, monospace; font-size: .92em; color: var(--ink); background: rgba(var(--ink-rgb), .08); border-radius: 5px; padding: 1px 6px; }
+  .guide-tip { max-width: 820px; margin-top: 22px; padding: 16px 22px; border: 1px dashed rgba(var(--ink-rgb), .45); border-radius: 12px; color: var(--dim); font-size: 13.5px; background: rgba(var(--ink-rgb), .04); }
 
-  /* models */
-  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; }
-  .codeblock { background: #0b0d1e; border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; font-family: Consolas, monospace; font-size: 13px; color: #b9c0ee; }
-  .codeblock .c { color: #5c639a; }
+  /* ---- 原理 / 构建 ---- */
+  pre.arch { background: #0f0f12; border: 1px solid var(--hair); border-radius: 14px; padding: 24px; overflow-x: auto; font: 12.5px/1.6 Consolas, monospace; color: var(--dim); }
+  .codeblock { background: #0f0f12; border: 1px solid var(--hair); border-radius: 12px; padding: 18px 20px; font: 13px/1.8 Consolas, monospace; color: var(--dim); overflow-x: auto; }
+  .codeblock .c { color: var(--faint); }
+  .build-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 
-  footer { border-top: 1px solid var(--line); padding: 36px 0 48px; color: var(--dim); font-size: 13.5px; text-align: center; }
+  footer { border-top: 1px solid var(--hair); padding: 34px 0 52px; color: var(--dim); font-size: 13.5px; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 10px 26px; align-items: baseline; }
+  footer .fine { margin-left: auto; }
 
-  @media (max-width: 860px) {
-    .hero-inner, .split, .why-grid { grid-template-columns: 1fr; }
-    .states, .grid, .ide-grid { grid-template-columns: 1fr; }
-    h1 { font-size: 38px; }
+  @media (max-width: 900px) {
+    .hero-inner, .split, .why-grid, .cloud-grid, .build-grid { grid-template-columns: 1fr; }
+    .states, .ide-grid { grid-template-columns: 1fr; }
+    .grid { grid-template-columns: repeat(2, 1fr); }
+    .gen-steps { grid-template-columns: repeat(2, 1fr); }
+    .chars { grid-template-columns: repeat(3, 1fr); }
+    h1 { font-size: 40px; }
   }
-  @media (max-width: 600px) {
-    .ide-grid { grid-template-columns: repeat(2, 1fr); }
+  @media (max-width: 560px) {
+    .grid, .gen-steps { grid-template-columns: 1fr; }
+    .chars { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { animation: none !important; transition: none !important; }
   }
 </style>
 </head>
@@ -107,20 +183,23 @@
 <header class="hero">
   <div class="wrap hero-inner">
     <div>
-      <span class="badge badge-cn">🇨🇳 为中国 Trae 用户量身打造</span>
-      <span class="badge">开源 · 原生 C++ 单进程 · 无 WebView · 实测 ~116MB</span>
-      <span class="badge badge-ver">🚀 v2.0.5 原生 C++ 重写 · 可与 1.x 交替安装</span>
-      <h1>Duty On<span class="zh">开工啦 · 你的 AI 打工监督员</span></h1>
+      <div class="badges">
+        <span class="badge badge-cn">🇨🇳 为中国 Trae 用户量身打造</span>
+        <span class="badge">开源 · 原生 C++ 单进程 · 无 WebView · 实测 ~116MB</span>
+        <span class="badge">🚀 最新版 v2.0.16 · 官网下载与私有云空间</span>
+      </div>
+      <h1>Duty On<span class="zh">开工啦 · AI 在干活，她替你盯着</span></h1>
       <p class="tagline">
-        专为 <strong>Trae</strong> 设计的 Live2D 桌面精灵——同时监控
-        <strong>Trae / Qoder / Cursor / Codex / OpenCode</strong>
-        的 AI 任务状态。干活、干完、还是卡在等你确认，看一眼桌宠就知道，再也不用 Alt-Tab 挨个查。
+        同时开着好几个 AI 任务，不用再来回切窗口看进度。Duty On 把
+        <strong>Trae / Qoder / Cursor / Codex / OpenCode / Claude Code</strong>
+        六种工具的会话状态交给一个角色：没事就睡，有活就忙，要你点头时她会叫你。
+        桌面精灵之外，还有一块<strong>硬件陪伴屏</strong>和<strong>双向同步的云空间</strong>。
       </p>
       <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/marine841023/duty-on/releases/tag/v2.0.5">⬇ GitHub 下载 v2.0.5</a>
-          <a class="btn btn-primary" href="https://gitee.com/megrezsoft/duty-on/releases/v2.0.5">⬇ Gitee 下载</a>
-        <a class="btn btn-ghost" href="#guide">📖 使用指南</a>
-        <a class="btn btn-ghost" href="https://github.com/marine841023/duty-on">★ GitHub 仓库</a>
+        <a class="btn btn-ink" href="https://dutyon.megrezsoft.com">⬇ 官网下载 v2.0.16</a>
+        <a class="btn" href="https://github.com/marine841023/duty-on/releases">GitHub Releases</a>
+        <a class="btn" href="https://gitee.com/megrezsoft/duty-on/releases">Gitee Releases</a>
+        <a class="btn" href="#guide">📖 使用指南</a>
       </div>
     </div>
     <div class="hero-img"><img src="assets/hero.png" alt="Duty On 桌面精灵宣传图"></div>
@@ -129,82 +208,170 @@
 
 <main class="wrap">
 
-  <!-- 支持的 IDE -->
+  <!-- 三种状态 -->
   <section>
-    <h2 class="section-title">五大 IDE / CLI 全覆盖</h2>
-    <p class="section-sub">以 Trae 为核心，一个桌宠盯住所有 AI 编程工具</p>
+    <h2 class="section-title">一个表情，读懂所有会话</h2>
+    <p class="section-sub">聚合优先级：提醒 &gt; 忙碌 &gt; 睡觉。桌面、硬件屏、官网演示用的是同一套状态语言。</p>
+    <div class="states">
+      <div class="state"><span class="lamp lamp-idle" aria-hidden="true"></span><h3>💤 睡觉</h3><p>所有工具都闲着。她也闭眼打盹，头顶飘 ZZZ——世界安静。</p></div>
+      <div class="state"><span class="lamp lamp-working" aria-hidden="true"></span><h3>⚡ 忙碌</h3><p>有 AI 任务正在跑。她睁眼专注工作——别催，在干了在干了。</p></div>
+      <div class="state alert"><span class="lamp lamp-alert" aria-hidden="true">!</span><h3>🔔 提醒</h3><p>有 agent 卡在等你确认。值班牌整块亮起珊瑚红、屏幕边缘呼吸发光——就等你点一下。</p></div>
+    </div>
+  </section>
+
+  <!-- 支持的工具 -->
+  <section>
+    <h2 class="section-title">六大工具全覆盖</h2>
+    <p class="section-sub">以 Trae 为核心，每个工具都有原生 Hook 集成，事件级实时通知，不是轮询猜测。</p>
     <div class="ide-grid">
       <div class="ide-card trae">
         <div class="ide-name">Trae</div>
-        <div class="ide-badge">Trae CN · TraeCode CN</div>
-        <div class="ide-desc">原生 Hook 集成，自动识别新旧版窗口标题与多根工作区</div>
+        <span class="ide-badge" style="color:var(--trae)">Trae CN · TraeCode CN</span>
+        <p class="ide-desc">原生 Hook 集成，自动识别新旧版窗口标题与多根工作区后缀，简中开箱即用。</p>
       </div>
       <div class="ide-card">
         <div class="ide-name">Qoder</div>
-        <div class="ide-badge" style="background:rgba(255,107,53,.15);color:var(--qoder)">自动检测</div>
-        <div class="ide-desc">~/.qoder/settings.json 合并写入，PostToolUse / PermissionRequest 事件</div>
+        <span class="ide-badge" style="color:var(--qoder)">自动检测</span>
+        <p class="ide-desc">~/.qoder/settings.json 合并写入，PostToolUse / PermissionRequest 事件。</p>
       </div>
       <div class="ide-card">
         <div class="ide-name">Cursor</div>
-        <div class="ide-badge" style="background:rgba(90,139,255,.15);color:var(--cursor)">Flat Schema</div>
-        <div class="ide-desc">~/.cursor/hooks.json 扁平格式，事件名注入 -HookEvent 参数</div>
+        <span class="ide-badge" style="color:var(--cursor)">Flat Schema</span>
+        <p class="ide-desc">~/.cursor/hooks.json 扁平格式，事件名注入 -HookEvent 参数。</p>
       </div>
       <div class="ide-card">
         <div class="ide-name">Codex CLI</div>
-        <div class="ide-badge" style="background:rgba(255,140,66,.15);color:var(--codex)">TUI + Exec</div>
-        <div class="ide-desc">~/.codex/hooks.json，支持 PermissionRequest 待确认提醒</div>
+        <span class="ide-badge" style="color:var(--codex)">TUI + Exec</span>
+        <p class="ide-desc">$CODEX_HOME/hooks.json，PermissionRequest 待确认提醒，/hooks 信任后生效。</p>
       </div>
       <div class="ide-card">
         <div class="ide-name">OpenCode</div>
-        <div class="ide-badge" style="background:rgba(179,136,255,.15);color:var(--opencode)">JS 插件</div>
-        <div class="ide-desc">~/.config/opencode/plugins/ 事件总线，子会话及 permission.asked / question.asked 确认跟踪</div>
+        <span class="ide-badge" style="color:var(--opencode)">JS 插件</span>
+        <p class="ide-desc">~/.config/opencode/plugins/ 事件总线，子会话与 permission.asked / question.asked 确认跟踪。</p>
+      </div>
+      <div class="ide-card claude">
+        <div class="ide-name">Claude Code</div>
+        <span class="ide-badge" style="color:var(--claude)">CLI · 桌面 · IDE 扩展</span>
+        <p class="ide-desc">~/.claude/settings.json 合并写入（尊重 CLAUDE_CONFIG_DIR），14 个事件含子代理与 StopFailure；Esc 中断由约一分钟后的空闲通知兜底。</p>
       </div>
     </div>
   </section>
 
-  <!-- 三种状态 -->
+  <!-- 两种形态 -->
   <section>
-    <div class="states">
-      <div class="state"><div class="emoji">💤</div><h3>睡觉</h3><p>所有 IDE 都闲着。她也闭眼打盹，头顶飘 ZZZ——世界安静。</p></div>
-      <div class="state"><div class="emoji">⚡</div><h3>忙碌</h3><p>有 AI 任务正在跑。她睁眼专注踱步——别催，在干了在干了。</p></div>
-      <div class="state alert"><div class="emoji">🔔</div><h3>提醒</h3><p>有 agent 卡在等你确认。她着急地抖动、弹出感叹号——就等你点一下。</p></div>
+    <h2 class="section-title">两种形态，一份代码</h2>
+    <p class="section-sub">桌面精灵与硬件陪伴屏共用同一套 C++ 核心、角色与配置（~/.dutyon/）。</p>
+    <div class="split">
+      <div class="form-card">
+        <h3>🖥 桌面精灵（Windows）</h3>
+        <p class="sub">GLFW + OpenGL + Dear ImGui · 透明无边框悬浮窗</p>
+        <ul>
+          <li><b>Live2D / GIF 角色</b>：Cubism 4 模型 21 个内置动作，任意 GIF / PNG / JPG / WebP / MP4 / WebM 也能做专属桌宠</li>
+          <li><b>项目状态栏</b>：每个项目一行，工具徽章区分来源，点名字直接跳到对应 IDE 窗口</li>
+          <li><b>真·点击穿透</b>：光标只有落在角色和菜单上才可点，其余直达下层窗口</li>
+          <li><b>迷你模式 / Hi-DPI / 8 语言 / 开机自启 / 托盘控制</b></li>
+          <li><b>全新统一视觉</b>：琥珀主题色菜单与状态灯，和硬件屏、官网同一套语言；登录 / 配对 / 更新弹窗全部重写，危险操作两次点击确认</li>
+        </ul>
+      </div>
+      <div class="form-card">
+        <h3>📟 硬件陪伴屏（ARM Linux）</h3>
+        <p class="sub">DRM/GBM 直渲 GLES3 · 无 X11 · 480×800 竖屏 / 800×480 横屏</p>
+        <ul>
+          <li><b>界面全面重设计</b>：SDF 抗锯齿圆角与光晕、角色身后舞台光、一排"值班牌"任务卡、五种状态灯动画，待确认时整屏珊瑚红边缘呼吸光</li>
+          <li><b>Wi-Fi 配网</b>：无可用网络时开热点 DutyOn-XXXX，手机连上后 captive portal 选网</li>
+          <li><b>六位配对码</b>：PC 右键桌宠 → 设备 → 配对，输入 3+3 分组配对码即连</li>
+          <li><b>角色 / 模型 / 声音自动同步</b>，PC 不在时自动进入相框模式</li>
+          <li><b>HDMI 声音提醒</b>：任务开始 / 结束 / 待确认各有提示音，可按状态自定义</li>
+        </ul>
+      </div>
+    </div>
+    <div class="chars">
+      <figure><img src="assets/cover-nico.png" alt="内置角色 Nico"><figcaption>Nico</figcaption></figure>
+      <figure><img src="assets/cover-nietzsche.png" alt="内置角色 Nietzsche"><figcaption>Nietzsche</figcaption></figure>
+      <figure><img src="assets/cover-nito.png" alt="内置角色 Nito"><figcaption>Nito</figcaption></figure>
+      <figure><img src="assets/cover-ni-j.png" alt="内置角色 Ni-J"><figcaption>Ni-J</figcaption></figure>
+      <figure><img src="assets/cover-nipsilon.png" alt="内置角色 Nipsilon"><figcaption>Nipsilon</figcaption></figure>
+    </div>
+    <p class="fine" style="margin-top:12px">内置角色随时可换；自定义角色三状态动画支持云端管理（见下）。参考硬件：Orange Pi Zero 2W（H616）+ Debian 13 + HDMI 屏。</p>
+  </section>
+
+  <!-- 云空间 -->
+  <section>
+    <h2 class="section-title">官网与云空间</h2>
+    <p class="section-sub"><a href="https://dutyon.megrezsoft.com">dutyon.megrezsoft.com</a> —— 安装包下载、OTA 自动升级、账号与私有内容管理。桌宠每分钟与云端双向对账一次。</p>
+    <div class="cloud-grid">
+      <div class="cloud-card">
+        <h4>☁️ 按角色管理的云空间</h4>
+        <p>网页上直接<b>新建 / 改名 / 删除角色</b>，为空闲、忙碌、待确认三种状态各配一段动画和一个声音，可预览、试听、下载；Live2D 模型按文件夹整体上传，桌宠一分钟内自动跟上。每个账号 <b>500 MiB</b>，内容只有自己可见。</p>
+      </div>
+      <div class="cloud-card">
+        <h4>🔁 双向同步，不再单向覆盖</h4>
+        <p>设置带<b>版本号（rev / If-Match）</b>做三方比较：本机与云端都改过时提示冲突，而不是互相覆盖；文件删除双向传播，本机副本先进 <b>cloud-trash 回收站</b>；正在使用的角色文件有引用保护，云端异常清空不会误删本机。</p>
+      </div>
+      <div class="cloud-card">
+        <h4>🎬 GIF 画质升级</h4>
+        <p>缩小时改用 <b>CPU 面积平均重采样</b>，细节不再糊成锯齿；透明像素<b>预乘 alpha</b> 处理，彻底修掉缩小后的绿边 / 白边。官网角色配图由同一套渲染离屏生成。</p>
+      </div>
+      <div class="cloud-card">
+        <h4>🛠 开发者工具链</h4>
+        <p>设备 UI 可在 Windows 上<b>离屏出图</b>（device/tools/ui-preview），不必每次烧到硬件上看；gif-matte 抠图工具链、官网配图脚本（prep-web-art.ps1）一并开源。后端 / 桥接 / 服务端 / 云同步端到端测试齐全。</p>
+      </div>
+    </div>
+
+    <div class="gen">
+      <div class="gen-head">
+        <h3>✨ 重新生成：一张图 + 一段录音，做出整个角色</h3>
+        <span class="badge">功能预览 · 后台接入中</span>
+      </div>
+      <p>网页云空间已上线完整流程原型（演示数据，不会修改角色）：上传一张角色图，AI 看图写动作描述，每种状态生成 3 个备选动画并自动去背景、首尾衔接、AI 质检；再上传 10–30 秒录音克隆音色，带着情绪说出三种状态的台词。方案详见 <a href="https://github.com/marine841023/duty-on/blob/v2.0-dev/docs/generation-design.md">generation-design.md</a>。</p>
+      <div class="gen-steps">
+        <div class="gen-step"><div class="gen-no">1</div><h5>角色形象</h5><p>上传一张干净背景的角色全身图，默认取当前"忙碌中"动画第一帧。</p></div>
+        <div class="gen-step"><div class="gen-no">2</div><h5>动作描述</h5><p>AI 看图后为三种状态各写一段动作，可直接改字或让 AI 重写某一段。</p></div>
+        <div class="gen-step"><div class="gen-no">3</div><h5>生成动画</h5><p>每种状态 3 个备选：去背景、首尾衔接、压缩 GIF、AI 质检打分，满意的设为主动画。</p></div>
+        <div class="gen-step"><div class="gen-no">4</div><h5>声音</h5><p>克隆你授权的声音，按台词 + 情绪 + 强度合成，选中即绑定到状态。</p></div>
+      </div>
     </div>
   </section>
 
-  <!-- 为什么选 DutyOn -->
+  <!-- 为什么选 -->
   <section>
     <h2 class="section-title">为什么选 Duty On？</h2>
-    <p class="section-sub">同类产品对比——轻量、原生、实时、中国优先</p>
+    <p class="section-sub">轻量、原生、实时、中国优先——还多一块屏和一朵云。</p>
     <div class="why-grid">
       <div class="why-card">
         <span class="why-icon">🪶</span>
         <h4>原生 C++ 单进程，实测 ~116MB</h4>
-        <p>GLFW + OpenGL <span class="highlight">原生渲染</span>，一个 dutyon-pet.exe 内嵌全部逻辑，任务管理器里<span class="highlight">只有一个进程</span>，占用所见即所得——比 1.x（WebView2 架构，全进程合计约 465MB）真实省下一半以上。</p>
+        <p>一个 dutyon-pet.exe 内嵌 HTTP 服务、状态机、IDE 扫描与指标采样，任务管理器里<span class="highlight">只有一个进程</span>，不带浏览器内核。</p>
+        <table class="mem">
+          <tr><th>版本</th><th>进程</th><th>内存合计</th></tr>
+          <tr><td>1.x（WebView）</td><td>主进程 + 6 个 WebView2</td><td>~465 MB</td></tr>
+          <tr><td><b>2.0（原生 C++）</b></td><td><b>仅 dutyon-pet.exe</b></td><td><b>~116 MB</b></td></tr>
+        </table>
       </div>
       <div class="why-card">
         <span class="why-icon">🇨🇳</span>
         <h4>为中国用户量身定制</h4>
-        <p><span class="highlight">Trae CN 优先适配</span>：自动识别 " - Trae CN" 与升级后的 " - TraeCode CN" 窗口标题；剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역）；8 种语言原生支持，简中开箱即用。</p>
+        <p><span class="highlight">Trae CN 优先适配</span>：自动识别 " - Trae CN" 与 " - TraeCode CN" 窗口标题，剥离多根工作区后缀（工作区 / Workspace / ワークスペース / 작업 영역）；8 种语言原生支持，简中开箱即用；官网与下载主站部署在国内可直连。</p>
       </div>
       <div class="why-card">
         <span class="why-icon">⚡</span>
         <h4>Hook 实时驱动，非轮询</h4>
-        <p>通过 IDE 原生 Hook 机制接收<span class="highlight">事件级实时通知</span>（SessionStart / UserPromptSubmit / PreToolUse / Stop / Notification），不是文件轮询或进程猜测——AI 一动，桌宠秒响应。</p>
+        <p>通过各工具原生 Hook 机制接收<span class="highlight">事件级实时通知</span>（SessionStart / UserPromptSubmit / PreToolUse / Stop / Notification…），AI 一动，桌宠秒响应。Claude Code 的子代理、压缩与失败事件同样跟踪。</p>
       </div>
       <div class="why-card">
         <span class="why-icon">🖥️</span>
         <h4>Windows 原生，不只 Mac</h4>
-        <p>大多数同类桌宠产品（如 TRAE Pets）仅支持 macOS。<span class="highlight">Duty On 原生支持 Windows</span>，Win32 点击穿透、注册表开机自启、NSIS 安装包——中国开发者的主力平台。</p>
+        <p>大多数同类桌宠仅支持 macOS。<span class="highlight">Duty On 原生支持 Windows</span>：Win32 点击穿透、注册表开机自启、NSIS 安装包，还能交叉编译出 ARM Linux 硬件屏固件。</p>
       </div>
       <div class="why-card">
         <span class="why-icon">🎭</span>
         <h4>Live2D 精美渲染 + GIF 自定义</h4>
-        <p>不是像素画、不是 LED 灯环——<span class="highlight">Cubism 4 高清 Live2D 角色</span>，21 个内置动作，支持自定义模型。丢进 ~/.dutyon/live2d/ 立刻换皮，超采样 2x 渲染。<strong>v1.3.0 新增：用 GIF / PNG / MP4 创建专属桌宠，无需 Live2D 模型！</strong></p>
+        <p><span class="highlight">Cubism 4 高清 Live2D 角色</span>，2x 超采样渲染；任意 GIF / PNG / MP4 也能创建专属桌宠，三状态分别上传动画。新版缩小重采样 + 预乘 alpha，小尺寸下依旧干净锐利。</p>
       </div>
       <div class="why-card">
-        <span class="why-icon">📡</span>
-        <h4>外接显示屏 + 声音提醒</h4>
-        <p>支持在<span class="highlight">树莓派 / 平板 / 手机</span>等外接设备上实时显示桌宠状态（SSE 推送），每个状态可配独立音效——离开座位也能感知 AI 进度。</p>
+        <span class="why-icon">📟</span>
+        <h4>离开座位也能感知进度</h4>
+        <p>硬件陪伴屏把状态<span class="highlight">演进一块小屏</span>：舞台光、值班牌、状态灯，待确认时珊瑚红边缘光一眼可见；配网、配对、同步全自动，PC 不在时变成相框。</p>
       </div>
     </div>
   </section>
@@ -212,15 +379,16 @@
   <!-- 功能特性 -->
   <section>
     <h2 class="section-title">一眼，而不是十一眼</h2>
-    <p class="section-sub">多 IDE 状态监控该有的样子</p>
+    <p class="section-sub">多工具状态监控该有的样子</p>
     <div class="grid">
-      <div class="feat"><div class="ico">🧭</div><h4>聚合状态</h4><p>提醒 &gt; 忙碌 &gt; 睡觉，一个表情读懂所有 IDE 会话的整体状态。</p></div>
-      <div class="feat"><div class="ico">📋</div><h4>项目状态栏</h4><p>每个 IDE 项目独立列出，T/Q/C/X/O 徽章区分 5 种 IDE，点名字直接跳到对应窗口。</p></div>
-      <div class="feat"><div class="ico">👻</div><h4>真·点击穿透</h4><p>透明无边框悬浮窗，光标只有落在小人儿和菜单上才可点，其余操作直达下层窗口。</p></div>
+      <div class="feat"><div class="ico">🧭</div><h4>聚合状态</h4><p>提醒 &gt; 忙碌 &gt; 睡觉，一个表情读懂所有会话的整体状态。</p></div>
+      <div class="feat"><div class="ico">📋</div><h4>项目状态栏</h4><p>每个项目独立列出，T/Q/C/X/O/A 徽章区分六种工具，点名字跳到对应窗口。</p></div>
+      <div class="feat"><div class="ico">👻</div><h4>真·点击穿透</h4><p>透明无边框悬浮窗，只有角色和菜单可点，其余操作直达下层窗口。</p></div>
       <div class="feat"><div class="ico">🤏</div><h4>迷你模式</h4><p>一键缩成 130×210 的角落小伙伴，随时切回完整尺寸。</p></div>
-      <div class="feat"><div class="ico">🎬</div><h4>自定义 GIF 角色</h4><p>用任意 GIF / PNG / MP4 创建专属桌宠！为睡觉 / 忙碌 / 提醒三个状态分别上传动画，随时可重新上传替换。无需 Live2D 模型。</p></div>
-      <div class="feat"><div class="ico">🎭</div><h4>Live2D 换皮</h4><p>把任意 Cubism 4 模型丢进 ~/.dutyon/live2d/ 就能换形象，21 个内置动作开箱即用。</p></div>
+      <div class="feat"><div class="ico">🎬</div><h4>自定义 GIF 角色</h4><p>三状态分别上传动画，随时替换；云端网页也能直接管理。</p></div>
+      <div class="feat"><div class="ico">🎭</div><h4>Live2D 换皮</h4><p>任意 Cubism 4 模型丢进 ~/.dutyon/live2d/ 即出现在菜单，自动备份到云端。</p></div>
       <div class="feat"><div class="ico">🌍</div><h4>8 种语言</h4><p>简中/繁中/英/日/韩/法/德/西，自动跟随系统语言。</p></div>
+      <div class="feat"><div class="ico">🔔</div><h4>状态音效</h4><p>每个角色每种状态可绑定自定义声音，桌面与硬件屏都生效。</p></div>
     </div>
   </section>
 
@@ -233,84 +401,111 @@
         <div class="step-num">1</div>
         <div>
           <h4>下载安装</h4>
-          <p>到 GitHub <a href="https://github.com/marine841023/duty-on/releases">Releases</a> 或 Gitee <a href="https://gitee.com/megrezsoft/duty-on/releases">Releases</a> 下载最新版 Windows 安装包，一路下一步装完即可。安装时可选择界面语言和开机自启。</p>
+          <p>到 <a href="https://dutyon.megrezsoft.com">官网</a> 或 GitHub / Gitee <a href="https://github.com/marine841023/duty-on/releases">Releases</a> 下载最新 Windows 安装包（当前 v2.0.16），一路下一步装完即可。已安装的桌宠会自动检查 OTA 升级；从 1.x 升级会保留 ~/.dutyon 配置与角色。</p>
         </div>
       </div>
       <div class="step">
         <div class="step-num">2</div>
         <div>
           <h4>启动 Duty On</h4>
-          <p>开始菜单或桌面快捷方式启动，角色会出现在桌面上，默认浮在所有窗口顶层。右键她可以换形象、切迷你模式、调整位置。</p>
+          <p>开始菜单或桌面快捷方式启动，角色出现在桌面上，默认浮在所有窗口顶层。右键她可以换形象、切迷你模式、调整位置、登录云账号。</p>
         </div>
       </div>
       <div class="step">
         <div class="step-num">3</div>
         <div>
           <h4>安装 Hook 集成（必做 ⚠️）</h4>
-          <p><strong>右键角色 → 安装 Hook 集成</strong>。一键写入 Trae / Qoder / Cursor / Codex / OpenCode 五个 IDE 的 hook 配置，没有这一步宠物收不到任何 AI 状态。</p>
+          <p><strong>右键角色 → 安装 Hook 集成</strong>。一键写入 Trae / Qoder / Cursor / Codex / OpenCode / Claude Code 六个工具的 hook 配置（只合并自己的条目，其余设置原样保留），没有这一步宠物收不到任何 AI 状态。弹窗里会逐项列出每个工具的接入情况。</p>
         </div>
       </div>
       <div class="step">
         <div class="step-num">4</div>
         <div>
-          <h4>重启 IDE / 开始新会话</h4>
-          <p>配置写入后，重启正在运行的 IDE（或直接开始一个新的 AI 会话）让 hook 生效。Codex CLI 需要在 TUI 中输入 <code>/hooks</code> 信任配置。</p>
+          <h4>重启工具 / 开始新会话</h4>
+          <p>重启正在运行的 IDE 或开始新的 AI 会话让 hook 生效。Codex CLI 需在 TUI 中输入 <code>/hooks</code> 信任配置；Claude Code 已在运行的会话重启后才会读取新 hook。</p>
         </div>
       </div>
       <div class="step">
         <div class="step-num">5</div>
         <div>
           <h4>看状态</h4>
-          <p>给 AI 发一条消息：她进入<strong>忙碌 ⚡</strong>；AI 干完回到<strong>睡觉 💤</strong>；AI 卡在等你确认时<strong>提醒 🔔</strong>。项目状态栏里也能看到每个项目的实时状态。</p>
+          <p>给 AI 发一条消息：她进入<strong>忙碌 ⚡</strong>；干完回到<strong>睡觉 💤</strong>；卡在等你确认时<strong>提醒 🔔</strong>。项目状态栏里能看到每个项目的实时状态，点击直达窗口。</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">6</div>
+        <div>
+          <h4>可选：云空间与硬件屏</h4>
+          <p>在官网注册账号（与桌宠内云账号通用），网页上按角色管理动画和声音，桌宠每分钟自动双向同步。有硬件屏的话：设备上电 → 手机连 DutyOn-XXXX 热点配网 → 屏幕显示六位配对码 → PC 右键桌宠 → 设备 → 配对。</p>
         </div>
       </div>
     </div>
     <div class="guide-tip">
-      💡 Hook 集成只在你的电脑上把 AI 会话状态发给本地宠物（127.0.0.1），不上传任何数据、不会打断 AI 工作流；卸载时在右键菜单里选择「卸载 Hook 集成」即可还原。
+      💡 Hook 集成只在你的电脑上把 AI 会话状态发给本地宠物（127.0.0.1），不上传任何数据、不会打断 AI 工作流；卸载时在右键菜单里选择「卸载 Hook 集成」即可还原。Claude Code 按 Esc 中断不触发 hook，被中断的回合会保持忙碌，直到约一分钟后 Claude Code 发出空闲通知。
     </div>
   </section>
 
   <!-- 工作原理 -->
-  <section class="how">
-    <div class="wrap">
-      <h2 class="section-title">工作原理</h2>
-      <p class="section-sub">IDE Hook 事件 → 本地 HTTP → 状态机 → Live2D 动画</p>
-      <pre class="arch">┌─────────────────────────────────────────────┐
-│  DutyOn (原生 C++ 单进程 dutyon-pet.exe)     │
-│   原生客户端 GLFW/OpenGL + 内嵌后端状态机     │
-│   HTTP Server: 127.0.0.1:17521              │
-└──────────────────┬──────────────────────────┘
-                   │ HTTP POST /hook (localhost)
-   ┌───────┬───────┼───────┬───────┬───────┐
-┌──┴──┐ ┌──┴──┐ ┌──┴──┐ ┌──┴──┐ ┌──┴────┐
-│Trae │ │Qoder│ │Cursor│ │Codex│ │OpenCode│  ← 5 种 IDE 的 AI 生命周期事件
-└─────┘ └─────┘ └─────┘ └─────┘ └───────┘  (提交/工具调用/通知/停止)</pre>
-    </div>
+  <section>
+    <h2 class="section-title">工作原理</h2>
+    <p class="section-sub">工具 Hook 事件 → 本地 HTTP → 状态机 → Live2D / GIF 动画 → 硬件屏与云端</p>
+    <pre class="arch">┌──────────────────────────────────────────────────────┐
+│  dutyon-pet.exe（原生 C++ 单进程，桌面与设备共用核心） │
+│  ┌────────────────────────────┬─────────────────────┐ │
+│  │ 桌面: GLFW + OpenGL + ImGui│ 设备: DRM/GBM GLES3 │ │
+│  │ Live2D / GIF · 状态 💤⚡🔔 │ 舞台光 · 值班牌     │ │
+│  ├────────────────────────────┴─────────────────────┤ │
+│  │ 内嵌后端: 状态机 · HTTP 服务 · 工具扫描 + Hooks  │ │
+│  └──────────────┬──────────────────┬────────────────┘ │
+└─────────────────┼──────────────────┼──────────────────┘
+                  │ /hook (本机)     │ /api/status 轮询 (Wi-Fi)
+   ┌────┬─────┬───┴──┬─────┬────┬─────┐   ┌──────────┐
+   │Trae│Qoder│Cursor│Codex│ OC │Claude│   │ 📟 硬件屏 │
+   └────┴─────┴──────┴─────┴────┴─────┘   └──────────┘
+                  │ 每分钟双向对账（rev / If-Match）
+        ┌─────────┴──────────┐
+        │ ☁ dutyon.megrezsoft.com │  下载 · OTA · 账号 · 云空间
+        └────────────────────┘</pre>
+    <p class="fine" style="margin-top:14px">关键事件：SessionStart（上线）· UserPromptSubmit / PreToolUse / PostToolUse（忙碌）· Notification / PermissionRequest（提醒）· Stop / StopFailure（回合结束）· SessionEnd（移除）。子代理事件独立跟踪，全部完成才回到空闲。</p>
   </section>
 
   <!-- 从源码构建 -->
   <section>
-    <div class="split">
-      <div>
-        <h2 class="section-title" style="text-align:left">从源码构建</h2>
-        <p style="color:var(--dim)">前端是纯静态文件——没有 npm、没有打包器，clone 下来直接构建。</p>
+    <h2 class="section-title">从源码构建</h2>
+    <p class="section-sub">C++17 + CMake，没有 npm、没有打包器。桌面与硬件屏共用 device/ 目录。</p>
+    <div class="build-grid">
+      <div class="codeblock">
+        <span class="c"># Windows 桌面（需 Cubism Native SDK 与 GLEW 2.2.0，</span><br>
+        <span class="c"># 放置路径见 device/README.md）</span><br>
+        git clone -b v2.0-dev https://github.com/marine841023/duty-on.git<br>
+        cd duty-on/device<br>
+        cmake -B build -DCMAKE_BUILD_TYPE=Release<br>
+        cmake --build build --config Release --target dutyon-pet<br>
+        <span class="c"># NSIS 安装包 / 分发 ZIP / 更新包：</span><br>
+        powershell -File ../tools/build-package.ps1
       </div>
       <div class="codeblock">
-        <span class="c"># 从源码构建（无需 npm）</span><br>
-        git clone https://github.com/marine841023/duty-on.git<br>
-        cd duty-on/src-tauri<br>
-        cargo tauri build
+        <span class="c"># ARM Linux 硬件屏（Windows 上交叉编译，Arm GNU 13.2）</span><br>
+        cmake -G Ninja -S device -B device/build-cross ^<br>
+        &nbsp;&nbsp;-DCMAKE_TOOLCHAIN_FILE=device/cmake/aarch64-toolchain.cmake ^<br>
+        &nbsp;&nbsp;-DCMAKE_BUILD_TYPE=Release -DCPR_ENABLE_SSL=OFF<br>
+        cmake --build device/build-cross -j<br>
+        <span class="c"># 设备 UI 离屏预览（Windows，无需烧录）：</span><br>
+        bash device/tools/ui-preview/run.sh
       </div>
     </div>
+    <p class="fine" style="margin-top:14px">技术栈：C++17 · GLFW · OpenGL · Dear ImGui (FreeType) · DRM/GBM + GLES3 · Live2D Cubism Native SDK · cpp-httplib · nlohmann/json · cpr · Go 云服务（Docker）。测试：device/tests（后端 / 云同步端到端）、hooks/tests（桥接）、server（Go 单测）。</p>
   </section>
 
 </main>
 
 <footer>
   <div class="wrap">
-    <p><strong>Duty On · 开工啦</strong> — 代码 <a href="https://github.com/marine841023/duty-on/blob/master/LICENSE">MIT</a> 开源 ·
-    Live2D 运行时与示例模型 © Live2D Inc.（见 <a href="https://github.com/marine841023/duty-on/blob/master/NOTICE">NOTICE</a>）</p>
-    <p style="margin-top:6px">Windows (v2.0) · ARM Linux 设备 &nbsp;|&nbsp; Made with C++, GLFW, OpenGL, Dear ImGui & Live2D Cubism Native SDK</p>
+    <span><strong>Duty On · 开工啦</strong> — 代码 <a href="https://github.com/marine841023/duty-on/blob/v2.0-dev/LICENSE">MIT</a> 开源 · Live2D 运行时与示例模型 © Live2D Inc.（见 <a href="https://github.com/marine841023/duty-on/blob/v2.0-dev/NOTICE">NOTICE</a>）</span>
+    <a href="https://github.com/marine841023/duty-on">GitHub</a>
+    <a href="https://gitee.com/megrezsoft/duty-on">Gitee</a>
+    <a href="https://dutyon.megrezsoft.com">官网</a>
+    <span class="fine">Windows (v2.0) · ARM Linux 设备 · Made with C++, GLFW, OpenGL, Dear ImGui &amp; Live2D Cubism Native SDK</span>
   </div>
 </footer>
 

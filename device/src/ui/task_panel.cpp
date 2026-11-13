@@ -1,8 +1,14 @@
-#ifndef _WIN32  // 仅设备端（ARM Linux GLES）
+#if !defined(_WIN32) || defined(DUTYON_UI_PREVIEW)
+
+// 设备端界面绘制。设计说明见 task_panel.h。
 
 #include "ui/task_panel.h"
 
+#ifdef DUTYON_UI_PREVIEW
+#include <GL/glew.h>
+#else
 #include <GLES3/gl3.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -17,19 +23,72 @@ namespace dutyon {
 
 namespace {
 
-// 纯色填充（GLES2 语法）：面板底色 / 状态圆点共用
-const char* kVertSrc =
+// ---------------------------------------------------------------------------
+// 着色器（GLES2 语法）。形状在片元里用圆角矩形 SDF 求覆盖率：圆角、描边、
+// 柔光全部抗锯齿，一个四边形一个形状。v_p 是相对形状中心的局部坐标（数值小，
+// mediump 也够精度）。
+// ---------------------------------------------------------------------------
+const char* kShapeVert =
     "attribute vec2 a_pos;\n"
     "uniform vec2 u_screen;\n"
+    "uniform vec2 u_center;\n"
+    "uniform vec2 u_ext;\n"
+    "varying vec2 v_p;\n"
     "void main() {\n"
-    "  vec2 ndc = a_pos / u_screen * 2.0 - 1.0;\n"
+    "  v_p = a_pos * u_ext;\n"
+    "  vec2 ndc = (u_center + v_p) / u_screen * 2.0 - 1.0;\n"
     "  gl_Position = vec4(ndc, 0.0, 1.0);\n"
     "}\n";
 
-const char* kFragSrc =
+const char* kShapeFrag =
+    "#ifdef GL_ES\n"
+    "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+    "precision highp float;\n"
+    "#else\n"
     "precision mediump float;\n"
-    "uniform vec4 u_color;\n"
-    "void main() { gl_FragColor = u_color; }\n";
+    "#endif\n"
+    "#endif\n"
+    "varying vec2 v_p;\n"
+    "uniform vec2 u_half;\n"
+    "uniform float u_radius;\n"
+    "uniform vec4 u_top;\n"
+    "uniform vec4 u_bot;\n"
+    "uniform float u_border;\n"
+    "uniform vec4 u_bcol;\n"
+    "uniform float u_soft;\n"
+    "uniform vec2 u_rot;\n"
+    "void main() {\n"
+    "  vec2 q = vec2(u_rot.x * v_p.x + u_rot.y * v_p.y,\n"
+    "  -u_rot.y * v_p.x + u_rot.x * v_p.y);\n"
+    "  vec2 e = abs(q) - u_half + u_radius;\n"
+    "  float d = length(max(e, 0.0)) + min(max(e.x, e.y), 0.0) - u_radius;\n"
+    "  float t = clamp(q.y / (2.0 * u_half.y) + 0.5, 0.0, 1.0);\n"
+    "  vec4 col = mix(u_bot, u_top, t);\n"
+    "  if (u_border > 0.0)\n"
+    "    col = mix(col, u_bcol, smoothstep(-u_border - 0.75, -u_border + 0.75, d));\n"
+    "  float a = 1.0 - smoothstep(-u_soft, u_soft, d);\n"
+    "  gl_FragColor = vec4(col.rgb, col.a * a);\n"
+    "}\n";
+
+// 舞台光：椭圆径向衰减 + 抖动（8bit 屏上大面积暗渐变不加抖动会出色带）
+const char* kGlowFrag =
+    "#ifdef GL_ES\n"
+    "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+    "precision highp float;\n"
+    "#else\n"
+    "precision mediump float;\n"
+    "#endif\n"
+    "#endif\n"
+    "varying vec2 v_p;\n"
+    "uniform vec2 u_half;\n"
+    "uniform vec4 u_top;\n"
+    "void main() {\n"
+    "  float r = length(v_p / u_half);\n"
+    "  float f = max(1.0 - r, 0.0);\n"
+    "  float n = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);\n"
+    "  float a = u_top.a * f * f + (n - 0.5) * (1.5 / 255.0);\n"
+    "  gl_FragColor = vec4(u_top.rgb, max(a, 0.0));\n"
+    "}\n";
 
 GLuint compileShader(GLenum type, const char* src) {
     GLuint s = glCreateShader(type);
@@ -47,229 +106,225 @@ GLuint compileShader(GLenum type, const char* src) {
     return s;
 }
 
-// 状态行样式（对齐 PC 端 ui_renderer StyleFor：圆点/状态文字/名称强调色/
-// 行背景/左边框；working 等活动状态整行淡色底 + 文字强调色）
-struct RowStyle {
-    float dot[3];       // 圆点颜色
-    float txt[3];       // 状态文字颜色
+GLuint linkProgram(const char* vert, const char* frag) {
+    GLuint vs = compileShader(GL_VERTEX_SHADER, vert);
+    GLuint fs = compileShader(GL_FRAGMENT_SHADER, frag);
+    if (!vs || !fs) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return 0;
+    }
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glBindAttribLocation(prog, 0, "a_pos");
+    glLinkProgram(prog);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[512] = {};
+        glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+        fprintf(stderr, "[TaskPanel] link: %s\n", log);
+        glDeleteProgram(prog);
+        return 0;
+    }
+    return prog;
+}
+
+// ---------------------------------------------------------------------------
+// 色板。整屏只有三类颜色：纸白系文字、主题色（时钟色）、状态色。
+// ---------------------------------------------------------------------------
+struct Color {
+    float r, g, b, a;
+};
+constexpr Color rgb(int hex, float a = 1.0f) {
+    return {((hex >> 16) & 0xFF) / 255.f, ((hex >> 8) & 0xFF) / 255.f, (hex & 0xFF) / 255.f, a};
+}
+constexpr Color withAlpha(Color c, float a) {
+    return {c.r, c.g, c.b, a};
+}
+
+constexpr Color kPaper = rgb(0xF3EFE7);           // 主要文字（暖白）
+constexpr Color kDim = rgb(0xA29D93);             // 次要文字
+constexpr Color kFaint = rgb(0x6B6860);           // 说明、占位
+constexpr Color kTileTop = rgb(0x24242A, 0.90f);  // 牌面（上沿略亮，像受光）
+constexpr Color kTileBot = rgb(0x17171B, 0.90f);
+constexpr Color kHairline = rgb(0xFFFFFF, 0.09f);
+constexpr Color kCoral = rgb(0xFF5F52);  // 需要你：确认 / 断开
+constexpr Color kCoralDeep = rgb(0xF2463B);
+constexpr Color kCoralInk = rgb(0x2A0906);  // 珊瑚底上的深色字
+
+constexpr Color kIdle = rgb(0x7D8797);
+constexpr Color kThinking = rgb(0xAE9FFF);
+constexpr Color kTool = rgb(0xFF9F45);
+constexpr Color kWorking = rgb(0xFFC94D);
+
+struct StatusStyle {
+    Color color;
     const char* i18n_key;
-    float name[3];      // 项目名颜色（活动状态 = 强调色）
-    float bg[4];        // 行背景 RGBA（a=0 无背景）
-    float border[3];    // 左边框颜色
-    bool breathing;     // confirm：红底呼吸（0.05↔0.12，周期 1.5s）
+    int lamp;  // 0 空心环 / 1 脉冲点 / 2 三点 / 3 转圈 / 4 感叹号
 };
-const RowStyle& styleFor(const std::string& status) {
-    static const RowStyle kIdle      = {{0x64 / 255.f, 0x96 / 255.f, 0xFF / 255.f},
-                                        {0x57 / 255.f, 0xD9 / 255.f, 0x7A / 255.f},
-                                        "status.idle",
-                                        {0.93f, 0.94f, 0.96f},
-                                        {0, 0, 0, 0},
-                                        {0x64 / 255.f, 0x96 / 255.f, 0xFF / 255.f},
-                                        false};
-    static const RowStyle kWorking   = {{0xFF / 255.f, 0xC8 / 255.f, 0x32 / 255.f},
-                                        {0xFF / 255.f, 0xC8 / 255.f, 0x32 / 255.f},
-                                        "status.busy",
-                                        {0xFF / 255.f, 0xC8 / 255.f, 0x32 / 255.f},
-                                        {1.0f, 0.78f, 0.20f, 0.10f},
-                                        {0xFF / 255.f, 0xC8 / 255.f, 0x32 / 255.f},
-                                        false};
-    static const RowStyle kThinking  = {{0x9B / 255.f, 0x8C / 255.f, 0xFF / 255.f},
-                                        {0x9B / 255.f, 0x8C / 255.f, 0xFF / 255.f},
-                                        "status.thinking",
-                                        {0x9B / 255.f, 0x8C / 255.f, 0xFF / 255.f},
-                                        {0.61f, 0.55f, 1.0f, 0.10f},
-                                        {0x9B / 255.f, 0x8C / 255.f, 0xFF / 255.f},
-                                        false};
-    static const RowStyle kToolUse   = {{0xFF / 255.f, 0x9B / 255.f, 0x32 / 255.f},
-                                        {0xFF / 255.f, 0x9B / 255.f, 0x32 / 255.f},
-                                        "status.toolUse",
-                                        {0xFF / 255.f, 0x9B / 255.f, 0x32 / 255.f},
-                                        {1.0f, 0.61f, 0.20f, 0.10f},
-                                        {0xFF / 255.f, 0x9B / 255.f, 0x32 / 255.f},
-                                        false};
-    static const RowStyle kConfirm   = {{0xFF / 255.f, 0x44 / 255.f, 0x44 / 255.f},
-                                        {0xFF / 255.f, 0x66 / 255.f, 0x66 / 255.f},
-                                        "status.confirmationNeeded",
-                                        {0xFF / 255.f, 0x66 / 255.f, 0x66 / 255.f},
-                                        {1.0f, 0.27f, 0.27f, 0.08f},
-                                        {0xFF / 255.f, 0x44 / 255.f, 0x44 / 255.f},
-                                        true};
-    if (status == "working") return kWorking;
-    if (status == "thinking") return kThinking;
-    if (status == "tool-use") return kToolUse;
-    if (status == "confirmation-needed") return kConfirm;
-    return kIdle;
+StatusStyle styleFor(const std::string& status) {
+    if (status == "working") return {kWorking, "status.busy", 1};
+    if (status == "thinking") return {kThinking, "status.thinking", 2};
+    if (status == "tool-use") return {kTool, "status.toolUse", 3};
+    if (status == "confirmation-needed") return {kCoral, "status.confirmationNeeded", 4};
+    return {kIdle, "status.idle", 0};
 }
 
-// IDE 徽标（对齐 PC 端 BadgeFor：字母 + 双色调圆角块）
-struct IdeBadge {
+struct IdeTag {
     char letter;
-    float bg[3];
-    float fg[3];
+    Color color;
 };
-IdeBadge badgeFor(const std::string& ide) {
-    if (ide == "qoder")
-        return {'Q', {0xBA / 255.f, 0x8C / 255.f, 0xFF / 255.f},
-                      {0xCF / 255.f, 0xAA / 255.f, 0xFF / 255.f}};
-    if (ide == "cursor")
-        return {'C', {0x50 / 255.f, 0xD2 / 255.f, 0xBE / 255.f},
-                      {0x8F / 255.f, 0xE8 / 255.f, 0xD8 / 255.f}};
-    if (ide == "codex")
-        return {'X', {0xFF / 255.f, 0xAA / 255.f, 0x50 / 255.f},
-                      {0xFF / 255.f, 0xC8 / 255.f, 0x80 / 255.f}};
-    if (ide == "opencode")
-        return {'O', {0xFF / 255.f, 0x78 / 255.f, 0xA0 / 255.f},
-                      {0xFF / 255.f, 0x9F / 255.f, 0xB5 / 255.f}};
-    return {'T', {0x64 / 255.f, 0x96 / 255.f, 0xFF / 255.f},
-                  {0x9D / 255.f, 0xB9 / 255.f, 0xFF / 255.f}};
+IdeTag ideTag(const std::string& ide) {
+    if (ide == "qoder") return {'Q', rgb(0xCFAAFF)};
+    if (ide == "cursor") return {'C', rgb(0x8FE8D8)};
+    if (ide == "codex") return {'X', rgb(0xFFC880)};
+    if (ide == "claude") return {'A', rgb(0xF09A7C)};
+    if (ide == "opencode") return {'O', rgb(0xFF9FB5)};
+    return {'T', rgb(0x9DB9FF)};
 }
 
-// UTF-8 解码（与 text_renderer 同款；前移指针返回码位）
+// UTF-8 解码（前移指针返回码位；非法字节按单字节步进）
 unsigned int decodeUtf8(const char*& p, const char* end) {
     const unsigned char* s = reinterpret_cast<const unsigned char*>(p);
-    if (s[0] < 0x80) { p += 1; return s[0]; }
-    if ((s[0] & 0xE0) == 0xC0 && p + 2 <= end && (s[1] & 0xC0) == 0x80) {
-        p += 2;
-        return ((unsigned int)(s[0] & 0x1F) << 6) | (s[1] & 0x3F);
-    }
-    if ((s[0] & 0xF0) == 0xE0 && p + 3 <= end &&
-        (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
-        p += 3;
-        return ((unsigned int)(s[0] & 0x0F) << 12) |
-               ((unsigned int)(s[1] & 0x3F) << 6) | (s[2] & 0x3F);
-    }
-    if ((s[0] & 0xF8) == 0xF0 && p + 4 <= end &&
-        (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
-        p += 4;
-        return ((unsigned int)(s[0] & 0x07) << 18) |
-               ((unsigned int)(s[1] & 0x3F) << 12) |
-               ((unsigned int)(s[2] & 0x3F) << 6) | (s[3] & 0x3F);
-    }
-    p += 1;
-    return 0xFFFD;
+    int n = s[0] < 0x80             ? 1
+            : (s[0] & 0xE0) == 0xC0 ? 2
+            : (s[0] & 0xF0) == 0xE0 ? 3
+            : (s[0] & 0xF8) == 0xF0 ? 4
+                                    : 1;
+    if (p + n > end) n = 1;
+    p += n;
+    return s[0];
 }
 
-// 布局常量（480x800 竖屏，下半屏 480x400）
-constexpr float kPanelMargin = 12.f;   // 面板左右距屏幕边
-constexpr float kPad = 16.f;           // 行内容左右边距
-constexpr float kRowH = 60.f;          // 行高
-constexpr float kNameSize = 32.f;      // 项目名字号
-constexpr float kStatusSize = 28.f;    // 状态文字字号
-constexpr float kDotR = 8.f;           // 状态圆点半径
-constexpr float kBadgeSize = 26.f;     // IDE 徽标边长
-constexpr float kBadgeFont = 20.f;     // IDE 徽标字母字号
-constexpr float kBorderW = 4.f;        // 行左边框宽
-constexpr int kMaxRows = 6;            // 下半屏最多可容纳行数（6*60=360≤400）
-// 顶部紧凑卡片：行块贴角色区下方堆叠（与角色留一线距离），未占区域保持透明黑
-constexpr float kTopGap = 24.f;        // 卡片顶边距角色区底（半屏线）的空隙
-constexpr float kCardRadius = 16.f;    // 卡片圆角
-constexpr float kCardAlpha = 0.42f;    // 卡片半透明黑浓度
-constexpr float kRowInsetX = 6.f;      // 行底/行内容相对卡片左右内缩
-constexpr float kRowInsetY = 3.f;      // 行底相对行上下内缩
-constexpr float kRowRadius = 10.f;     // 行底圆角
+// 布局（480x800 竖屏 / 800x480 横屏右列 320 宽）
+constexpr float kMargin = 12.f;    // 牌距区域左右边
+constexpr float kRowPitch = 60.f;  // 牌间距（含 8px 空隙）
+constexpr float kTileH = 52.f;
+constexpr float kTileRadius = 16.f;
+constexpr float kListTopGap = 8.f;
+constexpr float kListBottom = 12.f;
+constexpr int kMaxRows = 6;
+constexpr float kNameSize = 30.f;
+constexpr float kStatusSize = 24.f;
+constexpr float kPi = 3.1415927f;
 
-} // namespace
+}  // namespace
 
 struct TaskPanel::Impl {
-    TextRenderer text;        // 任务列表（Noto SC，含 CJK）
-    TextRenderer clock_font;  // 时钟专用（圆润卡通字体，仅数字/冒号）
-    // 时钟颜色主题（setClockColor 设定；glow=光晕色，body=数字主体色）
-    float glow_r = 0.72f, glow_g = 0.48f, glow_b = 0.16f;  // amber 默认
-    float body_r = 0.80f, body_g = 0.55f, body_b = 0.20f;
-    GLuint program = 0;
-    std::vector<float> verts;
+    TextRenderer text;          // 正文（Noto Sans SC）
+    TextRenderer clock_font;    // 时钟数字
+    Color ink = rgb(0xD49E52);  // 主题色（setClockColor）
+    GLuint shape_prog = 0, glow_prog = 0;
+    bool programs_tried = false;
+    int sw = 1, sh = 1;  // 当前帧屏幕尺寸（每个公开入口先 begin()）
 
-    void ensureProgram() {
-        if (program) return;
-        GLuint vs = compileShader(GL_VERTEX_SHADER, kVertSrc);
-        GLuint fs = compileShader(GL_FRAGMENT_SHADER, kFragSrc);
-        if (!vs || !fs) {
-            if (vs) glDeleteShader(vs);
-            if (fs) glDeleteShader(fs);
-            return;
-        }
-        program = glCreateProgram();
-        glAttachShader(program, vs);
-        glAttachShader(program, fs);
-        glBindAttribLocation(program, 0, "a_pos");
-        glLinkProgram(program);
-        glDeleteShader(vs);
-        glDeleteShader(fs);
-        GLint ok = 0;
-        glGetProgramiv(program, GL_LINK_STATUS, &ok);
-        if (!ok) {
-            char log[512] = {};
-            glGetProgramInfoLog(program, sizeof(log), nullptr, log);
-            fprintf(stderr, "[TaskPanel] link: %s\n", log);
-            glDeleteProgram(program);
-            program = 0;
+    TextRenderer& digits() { return clock_font.isLoaded() ? clock_font : text; }
+
+    void begin(int screen_w, int screen_h) {
+        sw = screen_w;
+        sh = screen_h;
+        if (!programs_tried) {
+            programs_tried = true;
+            shape_prog = linkProgram(kShapeVert, kShapeFrag);
+            glow_prog = linkProgram(kShapeVert, kGlowFrag);
         }
     }
 
-    // 顶点列表（xy 对）以 TRIANGLE_FAN 填充
-    void fillFan(const std::vector<float>& fan, float r, float g, float b,
-                 float a, int screen_w, int screen_h) {
-        ensureProgram();
-        if (!program || fan.size() < 6) return;
-        glUseProgram(program);
-        glUniform2f(glGetUniformLocation(program, "u_screen"),
-                    (float)screen_w, (float)screen_h);
-        glUniform4f(glGetUniformLocation(program, "u_color"), r, g, b, a);
+    float now() const {
+        static const auto t0 = std::chrono::steady_clock::now();
+        return std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count();
+    }
+
+    void quad(GLuint prog, float cx, float cy, float ex, float ey) {
+        static const float kCorners[8] = {-1, -1, 1, -1, -1, 1, 1, 1};
+        glUniform2f(glGetUniformLocation(prog, "u_screen"), (float)sw, (float)sh);
+        glUniform2f(glGetUniformLocation(prog, "u_center"), cx, cy);
+        glUniform2f(glGetUniformLocation(prog, "u_ext"), ex, ey);
         glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float),
-                              fan.data());
-        glDrawArrays(GL_TRIANGLE_FAN, 0, (GLsizei)(fan.size() / 2));
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, kCorners);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         glDisableVertexAttribArray(0);
         glUseProgram(0);
     }
 
-    void fillRect(float x0, float y0, float x1, float y1, float r, float g,
-                  float b, float a, int sw, int sh) {
-        fillFan({x0, y0, x1, y0, x1, y1, x0, y1}, r, g, b, a, sw, sh);
+    // 通用形状：圆角矩形 [x0,x1]x[y0,y1]，上下渐变，可选描边、柔边、旋转
+    void shape(float x0, float y0, float x1, float y1, float radius, Color top, Color bot,
+               float border = 0.f, Color bcol = {0, 0, 0, 0}, float soft = 0.75f,
+               float angle = 0.f) {
+        if (!shape_prog || x1 <= x0 || y1 <= y0) return;
+        const float hx = (x1 - x0) * 0.5f, hy = (y1 - y0) * 0.5f;
+        radius = std::min(radius, std::min(hx, hy));
+        glUseProgram(shape_prog);
+        glUniform2f(glGetUniformLocation(shape_prog, "u_half"), hx, hy);
+        glUniform1f(glGetUniformLocation(shape_prog, "u_radius"), radius);
+        glUniform4f(glGetUniformLocation(shape_prog, "u_top"), top.r, top.g, top.b, top.a);
+        glUniform4f(glGetUniformLocation(shape_prog, "u_bot"), bot.r, bot.g, bot.b, bot.a);
+        glUniform1f(glGetUniformLocation(shape_prog, "u_border"), border);
+        glUniform4f(glGetUniformLocation(shape_prog, "u_bcol"), bcol.r, bcol.g, bcol.b, bcol.a);
+        glUniform1f(glGetUniformLocation(shape_prog, "u_soft"), soft);
+        glUniform2f(glGetUniformLocation(shape_prog, "u_rot"), std::cos(angle), std::sin(angle));
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        // 旋转后的形状用外接圆大小的四边形覆盖
+        const float pad = soft + 1.f;
+        const float ex = angle != 0.f ? std::sqrt(hx * hx + hy * hy) + pad : hx + pad;
+        const float ey = angle != 0.f ? ex : hy + pad;
+        quad(shape_prog, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, ex, ey);
+    }
+    void fill(float x0, float y0, float x1, float y1, float radius, Color c) {
+        shape(x0, y0, x1, y1, radius, c, c);
+    }
+    void circle(float cx, float cy, float r, Color c) {
+        shape(cx - r, cy - r, cx + r, cy + r, r, c, c);
+    }
+    void ring(float cx, float cy, float r, float width, Color c) {
+        const Color none = withAlpha(c, 0.f);
+        shape(cx - r, cy - r, cx + r, cy + r, r, none, none, width, c);
+    }
+    // 柔光团（叠加混合，画在黑底上像打了一盏灯）
+    void glow(float cx, float cy, float rx, float ry, Color c) {
+        if (!glow_prog || c.a <= 0.f) return;
+        glUseProgram(glow_prog);
+        glUniform2f(glGetUniformLocation(glow_prog, "u_half"), rx, ry);
+        glUniform4f(glGetUniformLocation(glow_prog, "u_top"), c.r, c.g, c.b, c.a);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        quad(glow_prog, cx, cy, rx, ry);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     }
 
-    void fillCircle(float cx, float cy, float radius, float r, float g,
-                    float b, float a, int sw, int sh) {
-        std::vector<float> fan = {cx, cy};
-        const int seg = 24;
-        for (int i = 0; i <= seg; ++i) {
-            const float t = 6.2831853f * i / seg;
-            fan.push_back(cx + radius * std::cos(t));
-            fan.push_back(cy + radius * std::sin(t));
-        }
-        fillFan(fan, r, g, b, a, sw, sh);
+    // ---- 文字 ----
+    void put(TextRenderer& f, const std::string& s, float x, float y_top, float size, Color c,
+             bool bold = false) {
+        if (!f.isLoaded() || s.empty()) return;
+        if (bold)
+            f.drawBold(s, x, y_top, size, c.r, c.g, c.b, c.a, sw, sh, size * 0.022f);
+        else
+            f.draw(s, x, y_top, size, c.r, c.g, c.b, c.a, sw, sh);
     }
-
-    // 圆角矩形（TRIANGLE_FAN：中心 + 四角圆弧；凸多边形，fan 即可）
-    void fillRoundedRect(float x0, float y0, float x1, float y1, float rad,
-                         float r, float g, float b, float a, int sw, int sh) {
-        if (x1 - x0 <= rad * 2 || y1 - y0 <= rad * 2)
-            return fillRect(x0, y0, x1, y1, r, g, b, a, sw, sh);
-        std::vector<float> fan = {(x0 + x1) * 0.5f, (y0 + y1) * 0.5f};
-        // 四角圆心：左上→右上→右下→左下；角度从 π 起连续递减走一圈
-        const float cx[4] = {x0 + rad, x1 - rad, x1 - rad, x0 + rad};
-        const float cy[4] = {y1 - rad, y1 - rad, y0 + rad, y0 + rad};
-        const float start[4] = {3.1415927f, 1.5707963f, 0.f, -1.5707963f};
-        const int seg = 6;  // 每角 6 段
-        for (int c = 0; c < 4; ++c)
-            for (int i = 0; i <= seg; ++i) {
-                const float t = start[c] - (1.5707963f * i / seg);
-                fan.push_back(cx[c] + rad * std::cos(t));
-                fan.push_back(cy[c] + rad * std::sin(t));
-            }
-        // 闭合扇形：首边界点是左上角（角度 π），末点是左下角（-π），
-        // 左边缘两点间不闭合会在左侧留一个缺口三角（中心-左上-左下）
-        fan.push_back(cx[0] + rad * std::cos(3.1415927f));
-        fan.push_back(cy[0] + rad * std::sin(3.1415927f));
-        fillFan(fan, r, g, b, a, sw, sh);
+    // 垂直居中于 cy
+    void putMid(TextRenderer& f, const std::string& s, float x, float cy, float size, Color c,
+                bool bold = false) {
+        put(f, s, x, cy + f.lineHeight(size) * 0.5f, size, c, bold);
     }
-
-    // 超宽截断（码位边界 + 省略号），防项目名压掉状态文字
+    // 水平居中于 [x0,x1]，过宽缩字号
+    float putCentered(TextRenderer& f, const std::string& s, float x0, float x1, float y_top,
+                      float size, Color c, bool bold = false) {
+        size = fit(f, s, x1 - x0, size);
+        put(f, s, (x0 + x1) * 0.5f - f.measureWidth(s, size) * 0.5f, y_top, size, c, bold);
+        return size;
+    }
+    float fit(TextRenderer& f, const std::string& s, float max_w, float size) {
+        while (size > 12.f && f.measureWidth(s, size) > max_w) size -= 1.f;
+        return size;
+    }
+    // 超宽截断（码位边界 + 省略号）
     std::string truncate(const std::string& s, float max_w, float size) {
         if (text.measureWidth(s, size) <= max_w) return s;
-        static const char* kEll = "\xE2\x80\xA6";  // …
+        static const char* kEll = "\xE2\x80\xA6";
         const float ew = text.measureWidth(kEll, size);
         std::string out;
         const char* p = s.data();
@@ -282,457 +337,598 @@ struct TaskPanel::Impl {
         }
         return out + kEll;
     }
+
+    // ---- 状态灯：每种状态一个不同的动作，不看颜色也分得清 ----
+    void lamp(float cx, float cy, const StatusStyle& st, float t) {
+        const Color c = st.color;
+        switch (st.lamp) {
+            case 0:  // 空闲：静止的空心环
+                ring(cx, cy, 7.f, 2.f, withAlpha(c, 0.9f));
+                break;
+            case 1: {  // 忙碌：实心点 + 向外扩散的波纹
+                const float k = std::fmod(t / 1.6f, 1.f);
+                ring(cx, cy, 6.f + 9.f * k, 1.6f, withAlpha(c, 0.55f * (1.f - k)));
+                circle(cx, cy, 6.f, c);
+                break;
+            }
+            case 2:  // 思考：三点依次起伏
+                for (int i = 0; i < 3; ++i) {
+                    const float w = 0.5f + 0.5f * std::sin(t * 4.2f - i * 0.9f);
+                    circle(cx + (i - 1) * 9.f, cy + (w - 0.5f) * 5.f, 3.2f,
+                           withAlpha(c, 0.45f + 0.55f * w));
+                }
+                break;
+            case 3:  // 执行：转圈
+                for (int i = 0; i < 8; ++i) {
+                    const float ang = 2.f * kPi * i / 8.f;
+                    float k = std::fmod(i / 8.f + t * 1.1f, 1.f);
+                    circle(cx + 9.f * std::cos(-ang), cy + 9.f * std::sin(-ang), 2.3f,
+                           withAlpha(c, 0.18f + 0.82f * k * k));
+                }
+                break;
+            default: {  // 需要确认：深色圆里一个感叹号（画在珊瑚底上）
+                circle(cx, cy, 13.f, kCoralInk);
+                fill(cx - 1.8f, cy - 2.f, cx + 1.8f, cy + 7.5f, 1.8f, kCoral);
+                circle(cx, cy - 6.5f, 2.1f, kCoral);
+                break;
+            }
+        }
+    }
+
+    // ---- 一张值班牌 ----
+    void tile(const SessionInfo& s, float x0, float x1, float y_top, float t) {
+        const StatusStyle st = styleFor(s.status);
+        const bool alert = st.lamp == 4;
+        const bool idle = st.lamp == 0;
+        const float y0 = y_top - kTileH, cy = y_top - kTileH * 0.5f;
+
+        if (alert) {
+            // 整块反色 + 呼吸的外发光：隔着桌子也看得见
+            const float k = 0.5f + 0.5f * std::sin(t * 2.f * kPi / 1.4f);
+            shape(x0 - 2.f, y0 - 2.f, x1 + 2.f, y_top + 2.f, kTileRadius + 2.f,
+                  withAlpha(kCoral, 0.20f + 0.30f * k), withAlpha(kCoral, 0.20f + 0.30f * k), 0.f,
+                  {0, 0, 0, 0}, 9.f);
+            shape(x0, y0, x1, y_top, kTileRadius, kCoral, kCoralDeep);
+        } else {
+            shape(x0, y0, x1, y_top, kTileRadius, kTileTop, kTileBot, 1.f, kHairline);
+        }
+
+        lamp(x0 + 30.f, cy, st, t);
+        if (!text.isLoaded()) return;
+
+        // 状态词（右对齐）
+        const char* label = I18n::t(st.i18n_key);
+        const float lw = text.measureWidth(label, kStatusSize);
+        const float lx = x1 - 18.f - lw;
+        putMid(text, label, lx, cy, kStatusSize,
+               alert  ? kCoralInk
+               : idle ? kFaint
+                      : st.color,
+               alert);
+
+        // 项目名 + 紧跟其后的 IDE 小标
+        const float nx = x0 + 56.f;
+        const float tag_w = 22.f, tag_gap = 8.f;
+        const float name_max = lx - 14.f - nx - tag_w - tag_gap;
+        if (name_max < 24.f) return;
+        const std::string name = truncate(s.project_name, name_max, kNameSize);
+        putMid(text, name, nx, cy, kNameSize, alert ? kCoralInk : idle ? kDim : kPaper, alert);
+
+        const IdeTag tag = ideTag(s.ide);
+        const float tx = nx + text.measureWidth(name, kNameSize) + tag_gap;
+        const Color tc = alert ? kCoralInk : withAlpha(tag.color, idle ? 0.55f : 0.9f);
+        const Color none = withAlpha(tc, 0.f);
+        shape(tx, cy - 11.f, tx + tag_w, cy + 11.f, 6.f, none, none, 1.2f, withAlpha(tc, 0.5f));
+        const char letter[2] = {tag.letter, 0};
+        putMid(text, letter, tx + (tag_w - text.measureWidth(letter, 16.f)) * 0.5f, cy, 16.f, tc);
+    }
+
+    // 最要紧的一个会话：待确认 > 进行中；全空闲返回 -1
+    static int focusIndex(const PetStatus& status) {
+        int best = -1, best_rank = 0;
+        for (int i = 0; i < (int)status.sessions.size(); ++i) {
+            const std::string& s = status.sessions[i].status;
+            const int rank = s == "confirmation-needed" ? 2 : s == "idle" ? 0 : 1;
+            if (rank > best_rank) {
+                best = i;
+                best_rank = rank;
+            }
+        }
+        return best;
+    }
+
+    // ---- 引导画面的小部件 ----
+    // 步骤：圆圈序号 + 主文 + 可选说明；返回占用高度
+    float step(int n, const std::string& main, const std::string& sub, float x0, float x1,
+               float y_top) {
+        const float cy = y_top - 17.f;
+        ring(x0 + 17.f, cy, 16.f, 1.5f, withAlpha(ink, 0.8f));
+        const std::string num = std::to_string(n);
+        putMid(digits(), num, x0 + 17.f - digits().measureWidth(num, 20.f) * 0.5f, cy, 20.f, ink);
+        const float tx = x0 + 48.f;
+        float size = fit(text, main, x1 - tx, 26.f);
+        putMid(text, main, tx, cy, size, kPaper);
+        if (sub.empty()) return 50.f;
+        size = fit(text, sub, x1 - tx, 21.f);
+        put(text, sub, tx, y_top - 38.f, size, kDim);
+        return 78.f;
+    }
+    void spinner(float cx, float cy, float radius, float t) {
+        for (int i = 0; i < 12; ++i) {
+            const float ang = 2.f * kPi * i / 12.f;
+            const float k = std::fmod(i / 12.f + t * 0.9f, 1.f);
+            circle(cx + radius * std::cos(-ang), cy + radius * std::sin(-ang), radius * 0.11f,
+                   withAlpha(ink, 0.12f + 0.88f * k * k));
+        }
+    }
 };
 
 TaskPanel::TaskPanel() : impl_(new Impl) {}
 TaskPanel::~TaskPanel() {
-    if (impl_->program) glDeleteProgram(impl_->program);
+    if (impl_->shape_prog) glDeleteProgram(impl_->shape_prog);
+    if (impl_->glow_prog) glDeleteProgram(impl_->glow_prog);
     delete impl_;
 }
 
-// multi 模式动态分屏：面板高 = 行数×kRowH + kTopGap（与 render 的布局
-// 常量一致，卡片底贴屏幕底边）。行数截到 [1, kMaxRows]
-float TaskPanel::heightForSessions(int session_count) {
-    const int rows = std::max(1, std::min(session_count, kMaxRows));
-    return (float)(rows * kRowH + kTopGap);
-}
-
-void TaskPanel::setClockColor(const std::string& name) {
-    // glow 略暗于 body，保持柔光在主体外围的层次；未知名字回退 amber。
-    // 基础色整体偏亮一档（+15% 向白）：100% 亮度下文字更醒目，
-    // 夜间场景交给亮度调节（渲染层压暗）覆盖，动态范围更大
-    struct Preset { const char* name; float gr, gg, gb, br, bg, bb; };
-    static const Preset kPresets[] = {
-        {"amber", 0.76f, 0.56f, 0.29f, 0.83f, 0.62f, 0.32f},  // 琥珀橙(默认)
-        {"ice",   0.45f, 0.62f, 0.74f, 0.53f, 0.73f, 0.85f},  // 冰晶蓝
-        {"white", 0.66f, 0.62f, 0.53f, 0.81f, 0.78f, 0.71f},  // 暖白
-        {"green", 0.39f, 0.64f, 0.41f, 0.47f, 0.76f, 0.49f},  // 翠竹绿
-        {"pink",  0.71f, 0.47f, 0.63f, 0.81f, 0.56f, 0.73f},  // 樱花粉
-    };
-    const Preset* p = &kPresets[0];
-    for (const auto& k : kPresets)
-        if (name == k.name) { p = &k; break; }
-    impl_->glow_r = p->gr; impl_->glow_g = p->gg; impl_->glow_b = p->gb;
-    impl_->body_r = p->br; impl_->body_g = p->bg; impl_->body_b = p->bb;
-}
-
-bool TaskPanel::init(const std::string& font_path) {
-    // 时钟专用圆润卡通字体（与任务列表的 Noto SC 独立；缺失则回退主字体）
-    impl_->clock_font.load("/opt/dutyon/assets/font-clock.ttf");
+bool TaskPanel::init(const std::string& font_path, const std::string& clock_font_path) {
+    impl_->clock_font.load(clock_font_path);
     if (!impl_->clock_font.isLoaded())
         printf("[TaskPanel] clock font missing, fallback to main font\n");
     return impl_->text.load(font_path);
 }
 
-void TaskPanel::render(const PetStatus& status, int screen_w, int screen_h,
-                       float area_top, int region_x, int region_w) {
+void TaskPanel::setClockColor(const std::string& name) {
+    struct Preset {
+        const char* name;
+        Color c;
+    };
+    static const Preset kPresets[] = {
+        {"amber", rgb(0xE0A653)},  // 琥珀（默认）
+        {"ice", rgb(0x8AC2E6)},    // 冰蓝
+        {"white", rgb(0xE2DCCB)},  // 暖白
+        {"green", rgb(0x7ECF86)},  // 竹绿
+        {"pink", rgb(0xE897C6)},   // 樱粉
+    };
+    impl_->ink = kPresets[0].c;
+    for (const auto& k : kPresets)
+        if (name == k.name) impl_->ink = k.c;
+}
+
+// ---------------------------------------------------------------------------
+// 舞台光
+// ---------------------------------------------------------------------------
+void TaskPanel::renderBackdrop(const std::string& overall_state, int screen_w, int screen_h, int vx,
+                               int vy, int vw, int vh) {
+    auto* p = impl_;
+    if (screen_w <= 0 || screen_h <= 0 || vw <= 0 || vh <= 0) return;
+    p->begin(screen_w, screen_h);
+    glViewport(0, 0, screen_w, screen_h);
+    const float t = p->now();
+    Color c = p->ink;
+    float level, period;
+    if (overall_state == "alert") {
+        c = kCoral;
+        level = 0.34f;
+        period = 1.4f;  // 与待确认牌同步呼吸
+    } else if (overall_state == "working") {
+        level = 0.26f;
+        period = 3.2f;
+    } else {
+        level = 0.10f;  // 睡着：只留一点余光
+        period = 6.0f;
+    }
+    const float k = 0.82f + 0.18f * std::sin(t * 2.f * kPi / period);
+    const float cx = vx + vw * 0.5f;
+    // 身后的大光团 + 脚下的一摊光
+    p->glow(cx, vy + vh * 0.52f, vw * 0.62f, vh * 0.56f, withAlpha(c, level * k * 0.62f));
+    p->glow(cx, vy + vh * 0.09f, vw * 0.46f, vh * 0.085f, withAlpha(c, level * k * 1.5f));
+}
+
+// ---------------------------------------------------------------------------
+// 时间栏
+// ---------------------------------------------------------------------------
+float TaskPanel::headerHeight(bool large, bool landscape) const {
+    if (!landscape) return large ? 150.f : 104.f;
+    const float size = large ? 80.f : 60.f;
+    return 40.f + impl_->digits().lineHeight(size) + 44.f;
+}
+
+void TaskPanel::renderHeader(const std::string& hms, const std::string& date,
+                             const std::string& weekday, bool large, bool landscape, int screen_w,
+                             int screen_h, int region_x, int region_w) {
+    auto* p = impl_;
+    if (screen_w <= 0 || screen_h <= 0 || hms.size() < 5) return;
+    p->begin(screen_w, screen_h);
+    if (region_w < 0) region_w = screen_w;
+    TextRenderer& df = p->digits();
+    if (!df.isLoaded()) return;
+
+    const std::string hm = hms.substr(0, 5);
+    const std::string ss = hms.size() >= 8 ? hms.substr(6, 2) : std::string();
+    const float rx0 = (float)region_x, rx1 = (float)(region_x + region_w);
+
+    // 时:分 大字 + 秒小字（同一基线）。秒是"它还活着"的信号，但不该抢眼
+    auto drawTime = [&](float x, float y_top, float size) {
+        const float ss_size = size * 0.42f;
+        p->put(df, hm, x, y_top, size, p->ink, true);
+        const float sx = x + df.measureWidth(hm, size) + size * 0.12f;
+        p->put(df, ss, sx, y_top - df.ascent(size) + df.ascent(ss_size), ss_size,
+               withAlpha(p->ink, 0.55f));
+        return sx + df.measureWidth(ss, ss_size);
+    };
+    auto timeWidth = [&](float size) {
+        return df.measureWidth(hm, size) + size * 0.12f + df.measureWidth(ss, size * 0.42f);
+    };
+
+    if (landscape) {
+        // 右列：时间左对齐，日期一行在下
+        float size = large ? 80.f : 60.f;
+        while (size > 28.f && timeWidth(size) > region_w - 32.f) size -= 2.f;
+        const float top = (float)screen_h - 40.f;
+        drawTime(rx0 + 16.f, top, size);
+        const std::string line = date.empty()      ? weekday
+                                 : weekday.empty() ? date
+                                                   : date + "  " + weekday;
+        const float dsize = p->fit(p->text, line, region_w - 32.f, 24.f);
+        p->put(p->text, line, rx0 + 18.f, top - df.lineHeight(size) - 4.f, dsize, kDim);
+    } else if (large) {
+        // 单任务/相框：时间居中置顶，日期贴屏幕底（角色占满中间）
+        float size = 100.f;
+        while (size > 40.f && timeWidth(size) > region_w - 48.f) size -= 2.f;
+        drawTime((rx0 + rx1) * 0.5f - timeWidth(size) * 0.5f, (float)screen_h - 42.f, size);
+        const std::string line = date.empty()      ? weekday
+                                 : weekday.empty() ? date
+                                                   : date + "  " + weekday;
+        p->putCentered(p->text, line, rx0 + 20.f, rx1 - 20.f, 52.f, 26.f, kDim);
+    } else {
+        // 多任务：时间在左，星期/日期两行在右（连接图标正下方）
+        const float size = 64.f;
+        const float end_x = drawTime(rx0 + 20.f, (float)screen_h - 18.f, size);
+        const float right = rx1 - 18.f;
+        float wsize = 26.f, dsize = 22.f;
+        const float room = right - end_x - 16.f;
+        wsize = p->fit(p->text, weekday, room, wsize);
+        dsize = p->fit(p->text, date, room, dsize);
+        p->put(p->text, weekday, right - p->text.measureWidth(weekday, wsize),
+               (float)screen_h - 40.f, wsize, kPaper);
+        p->put(p->text, date, right - p->text.measureWidth(date, dsize), (float)screen_h - 72.f,
+               dsize, kDim);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 任务牌
+// ---------------------------------------------------------------------------
+float TaskPanel::heightForSessions(int session_count) {
+    const int rows = std::max(1, std::min(session_count, kMaxRows));
+    return rows * kRowPitch - (kRowPitch - kTileH) + kListTopGap + kListBottom;
+}
+
+void TaskPanel::render(const PetStatus& status, int screen_w, int screen_h, float area_top,
+                       int region_x, int region_w) {
     auto* p = impl_;
     if (screen_w <= 0 || screen_h <= 0 || area_top <= 0) return;
-    if (region_w < 0) region_w = screen_w;  // 默认整屏宽（竖屏）
+    p->begin(screen_w, screen_h);
+    if (region_w < 0) region_w = screen_w;
+    const float x0 = region_x + kMargin, x1 = region_x + region_w - kMargin;
+    const float top = area_top - kListTopGap;
+    const float t = p->now();
 
     const int total = (int)status.sessions.size();
-    const int shown = std::min(total, kMaxRows);
-
-    // 卡片不再铺满下半屏：行块贴屏幕底堆叠，未占区域保持透明黑（无底栏）
-    const float x0 = region_x + kPanelMargin;
-    const float x1 = region_x + region_w - kPanelMargin;
-    const float rx0 = x0 + kRowInsetX;  // 行底/行内容相对卡片内缩
-    const float rx1 = x1 - kRowInsetX;
-
-    const float block_top = area_top - kTopGap;  // 角色区下方留一线距离
-    float block_bottom = block_top - (shown > 0 ? shown : 1) * kRowH;
-    if (block_bottom < 0.f) block_bottom = 0.f;
-
-    // 卡片底：半透明黑圆角，仅包裹行块（任务少时是紧凑小卡片，非整屏底栏）
-    p->fillRoundedRect(x0, block_bottom, x1, block_top, kCardRadius, 0.f, 0.f,
-                       0.f, kCardAlpha, screen_w, screen_h);
-
-    if (shown == 0) {
-        if (p->text.isLoaded()) {
-            const std::string empty = "暂无任务";
-            const float w = p->text.measureWidth(empty, kNameSize);
-            const float lh = p->text.lineHeight(kNameSize);
-            const float cy = (block_top + block_bottom) * 0.5f;
-            p->text.draw(empty, (x0 + x1) * 0.5f - w * 0.5f, cy + lh * 0.5f,
-                         kNameSize, 0.62f, 0.64f, 0.70f, 1.0f,
-                         screen_w, screen_h);
-        }
+    if (total == 0) {
+        // 空状态：一张只有轮廓的空牌
+        const Color none = {0, 0, 0, 0};
+        p->shape(x0, top - kTileH, x1, top, kTileRadius, none, none, 1.f, kHairline);
+        p->putCentered(p->text, "现在没有任务", x0, x1,
+                       top - kTileH * 0.5f + p->text.lineHeight(24.f) * 0.5f, 24.f, kFaint);
         return;
     }
 
-    const float text_lh = p->text.lineHeight(kNameSize);
-    const float badge_lh = p->text.lineHeight(kBadgeFont);
-    // confirm 行红底呼吸动画（对齐 PC 端 item-glow：0.05↔0.12，周期 1.5s）
-    static const auto t0 = std::chrono::steady_clock::now();
-    const float now_s = std::chrono::duration<float>(
-                            std::chrono::steady_clock::now() - t0)
-                            .count();
-    const float breathe =
-        0.05f + 0.07f * (0.5f + 0.5f * std::sin(now_s * 6.2831853f / 1.5f));
+    // 能放下几张：受区域高度限制（横屏右列较矮）
+    int fit_rows = (int)((top - kListBottom + (kRowPitch - kTileH)) / kRowPitch);
+    fit_rows = std::max(1, std::min(fit_rows, kMaxRows));
+    const bool overflow = total > fit_rows;
+    const int shown = overflow ? fit_rows - 1 : total;
 
-    for (int i = 0; i < shown; ++i) {
-        const SessionInfo& s = status.sessions[i];
-        const RowStyle& st = styleFor(s.status);
-
-        const float row_top = block_top - i * kRowH;
-        const float row_bottom = row_top - kRowH;
-        const float cy = row_top - kRowH * 0.5f;  // 行中心（GL y）
-
-        // 行底（活动状态圆角淡色；confirm 呼吸红），内缩避免压卡片圆角
-        if (st.breathing)
-            p->fillRoundedRect(rx0, row_bottom + kRowInsetY, rx1,
-                               row_top - kRowInsetY, kRowRadius, st.bg[0],
-                               st.bg[1], st.bg[2], breathe, screen_w,
-                               screen_h);
-        else if (st.bg[3] > 0.f)
-            p->fillRoundedRect(rx0, row_bottom + kRowInsetY, rx1,
-                               row_top - kRowInsetY, kRowRadius, st.bg[0],
-                               st.bg[1], st.bg[2], st.bg[3], screen_w,
-                               screen_h);
-
-        // 左边框（状态色圆角竖条）
-        p->fillRoundedRect(rx0, row_bottom + 8.f, rx0 + kBorderW, row_top - 8.f,
-                           2.f, st.border[0], st.border[1], st.border[2], 1.0f,
-                           screen_w, screen_h);
-
-        // 状态圆点
-        const float dot_x = rx0 + kPad + kDotR;
-        p->fillCircle(dot_x, cy, kDotR, st.dot[0], st.dot[1], st.dot[2], 1.0f,
-                      screen_w, screen_h);
-
-        // IDE 徽标（圆角块 + 首字母，颜色对齐 PC 端 BadgeFor）
-        const float badge_x = dot_x + kDotR + 12.f;
-        const IdeBadge b = badgeFor(s.ide);
-        p->fillRoundedRect(badge_x, cy - kBadgeSize * 0.5f,
-                           badge_x + kBadgeSize, cy + kBadgeSize * 0.5f, 5.f,
-                           b.bg[0], b.bg[1], b.bg[2], 0.22f, screen_w,
-                           screen_h);
-        if (p->text.isLoaded()) {
-            const char letter[2] = {b.letter, 0};
-            const float lw = p->text.measureWidth(letter, kBadgeFont);
-            p->text.draw(letter, badge_x + (kBadgeSize - lw) * 0.5f,
-                         cy + badge_lh * 0.5f, kBadgeFont, b.fg[0], b.fg[1],
-                         b.fg[2], 1.0f, screen_w, screen_h);
+    // 放不下时待确认的任务优先占位（警报不能被折叠掉），其余保持原顺序
+    std::vector<int> order;
+    for (int i = 0; i < shown; ++i) order.push_back(i);
+    for (int i = shown; i < total; ++i) {
+        if (status.sessions[i].status != "confirmation-needed") continue;
+        for (int k = (int)order.size() - 1; k >= 0; --k) {
+            if (status.sessions[order[k]].status == "confirmation-needed") continue;
+            order.erase(order.begin() + k);
+            order.push_back(i);
+            break;
         }
+    }
+    std::sort(order.begin(), order.end());
+    for (int row = 0; row < (int)order.size(); ++row)
+        p->tile(status.sessions[order[row]], x0, x1, top - row * kRowPitch, t);
 
-        // 状态文字（右对齐）
-        const char* st_txt = I18n::t(st.i18n_key);
-        const float st_w = p->text.measureWidth(st_txt, kStatusSize);
-        const float st_lh = p->text.lineHeight(kStatusSize);
-        const float st_x = rx1 - kPad - st_w;
-        if (p->text.isLoaded())
-            p->text.draw(st_txt, st_x, cy + st_lh * 0.5f, kStatusSize,
-                         st.txt[0], st.txt[1], st.txt[2], 1.0f,
-                         screen_w, screen_h);
-
-        // 项目名（左侧，超宽截断；活动状态用强调色）
-        if (p->text.isLoaded()) {
-            const float name_x = badge_x + kBadgeSize + 12.f;
-            const float name_max = st_x - name_x - 16.f;
-            const std::string name =
-                name_max > 20.f ? p->truncate(s.project_name, name_max, kNameSize)
-                                : std::string();
-            p->text.draw(name, name_x, cy + text_lh * 0.5f, kNameSize,
-                         st.name[0], st.name[1], st.name[2], 1.0f,
-                         screen_w, screen_h);
-        }
+    if (overflow) {
+        int hidden_alerts = 0;
+        for (int i = 0; i < total; ++i)
+            if (status.sessions[i].status == "confirmation-needed" &&
+                std::find(order.begin(), order.end(), i) == order.end())
+                ++hidden_alerts;
+        const float y_top = top - shown * kRowPitch;
+        std::string more = "还有 " + std::to_string(total - shown) + " 个任务";
+        if (hidden_alerts > 0) more += "，" + std::to_string(hidden_alerts) + " 个等你确认";
+        p->putCentered(p->text, more, x0, x1,
+                       y_top - kTileH * 0.5f + p->text.lineHeight(22.f) * 0.5f, 22.f,
+                       hidden_alerts > 0 ? kCoral : kFaint);
     }
 }
 
-void TaskPanel::renderClock(const std::string& text, float y_top, float size,
-                            int screen_w, int screen_h,
+void TaskPanel::renderFocus(const PetStatus& status, int screen_w, int screen_h, float area_top,
                             int region_x, int region_w) {
     auto* p = impl_;
-    // 时钟用圆润卡通字体（加载失败回退主字体）；字体缺失时静默回退
-    TextRenderer& font =
-        p->clock_font.isLoaded() ? p->clock_font : p->text;
-    if (!font.isLoaded() || text.empty() || screen_w <= 0) return;
-    if (region_w < 0) region_w = screen_w;  // 默认整屏宽（竖屏）
-    // 区域内过宽自动缩字号（横屏窄右列防溢出；竖屏整屏宽不触发）
-    while (size > 24.f && font.measureWidth(text, size) > (float)region_w - 12.f)
-        size -= 4.f;
-
-    // ===== 柔光橙黄时钟（无背板、无描边）=====
-    // 主体：柔和橙黄（不刺眼的暖色）+ 同色多层柔和光晕，加粗卡通字形
-    const float lh = font.lineHeight(size);
-    const float w = font.measureWidth(text, size);
-    const float x = region_x + ((float)region_w - w) * 0.5f;  // 区域内水平居中
-    const float ty = y_top;  // 文字顶边（GL y 向上）
-
-    // 柔和光晕：setClockColor 设定的主题色（柔光衬托，不刺眼）
-    const float glow_r = p->glow_r, glow_g = p->glow_g, glow_b = p->glow_b;
-    struct Glow { float dx, dy, a; };
-    const Glow glows[] = {
-        // 外圈（半径大、最淡）
-        {-6.f,0,0.07f},{6.f,0,0.07f},{0,-6.f,0.07f},{0,6.f,0.07f},
-        {-4.f,-4.f,0.06f},{4.f,-4.f,0.06f},{-4.f,4.f,0.06f},{4.f,4.f,0.06f},
-        // 中圈
-        {-4.f,0,0.12f},{4.f,0,0.12f},{0,-4.f,0.12f},{0,4.f,0.12f},
-        {-3.f,-3.f,0.11f},{3.f,-3.f,0.11f},{-3.f,3.f,0.11f},{3.f,3.f,0.11f},
-        // 内圈（贴字形）
-        {-2.f,0,0.18f},{2.f,0,0.18f},{0,-2.f,0.18f},{0,2.f,0.18f},
-        {-1.5f,-1.5f,0.15f},{1.5f,-1.5f,0.15f},{-1.5f,1.5f,0.15f},{1.5f,1.5f,0.15f},
-    };
-    for (const auto& g : glows)
-        font.draw(text, x + g.dx, ty + g.dy, size, glow_r, glow_g, glow_b,
-                  g.a, screen_w, screen_h);
-
-    // 主体数字：setClockColor 设定的主题色，加粗卡通字形
-    font.drawBold(text, x, ty, size, p->body_r, p->body_g, p->body_b, 1.0f,
-                  screen_w, screen_h, size * 0.022f);
+    if (screen_w <= 0 || screen_h <= 0) return;
+    const int i = Impl::focusIndex(status);
+    if (i < 0) return;
+    p->begin(screen_w, screen_h);
+    if (region_w < 0) region_w = screen_w;
+    p->tile(status.sessions[i], region_x + kMargin, region_x + region_w - kMargin, area_top,
+            p->now());
 }
 
-void TaskPanel::renderDate(const std::string& text, float y_top, float size,
-                           int screen_w, int screen_h,
-                           int region_x, int region_w) {
-    auto* p = impl_;
-    // 日期含中文（年月日/星期），卡通字体无中文字形，必须用主字体渲染
-    TextRenderer& font = p->text;
-    if (!font.isLoaded() || text.empty() || screen_w <= 0) return;
-    if (region_w < 0) region_w = screen_w;  // 默认整屏宽（竖屏）
+// ---------------------------------------------------------------------------
+// 语音指令区
+// ---------------------------------------------------------------------------
+namespace {
+constexpr float kPillGap = 8.f;
+constexpr float kPillH = 46.f;
+constexpr float kHintSize = 28.f;
+constexpr float kHintGap = 10.f;
+constexpr float kVoiceBottom = 12.f;
+}  // namespace
 
-    // 一行内放不下则自动缩小字号（区域内宽度留 20px 边距）
-    const float max_w = (float)region_w - 20.f;
-    while (size > 12.f && font.measureWidth(text, size) > max_w) size -= 2.f;
-
-    const float w = font.measureWidth(text, size);
-    const float x = region_x + ((float)region_w - w) * 0.5f;  // 区域内水平居中
-    const float ty = y_top;
-
-    // 同款主题色柔光（缩小版光晕：层数/半径随字号减小）
-    const float glow_r = p->glow_r, glow_g = p->glow_g, glow_b = p->glow_b;
-    const float g1 = size * 0.05f, g2 = size * 0.09f;
-    struct Glow { float dx, dy, a; };
-    const Glow glows[] = {
-        {-g2,0,0.07f},{g2,0,0.07f},{0,-g2,0.07f},{0,g2,0.07f},
-        {-g1,0,0.13f},{g1,0,0.13f},{0,-g1,0.13f},{0,g1,0.13f},
-        {-g1,-g1,0.10f},{g1,-g1,0.10f},{-g1,g1,0.10f},{g1,g1,0.10f},
-    };
-    for (const auto& g : glows)
-        font.draw(text, x + g.dx, ty + g.dy, size, glow_r, glow_g, glow_b,
-                  g.a, screen_w, screen_h);
-    // 主体（同色主题色）
-    font.drawBold(text, x, ty, size, p->body_r, p->body_g, p->body_b, 1.0f,
-                  screen_w, screen_h, size * 0.020f);
-}
-
-float TaskPanel::clockLineHeight(float pixel_size) const {
-    TextRenderer& f =
-        impl_->clock_font.isLoaded() ? impl_->clock_font : impl_->text;
-    return f.isLoaded() ? f.lineHeight(pixel_size) : pixel_size;
-}
-
-// 语音会话动作区（布局见 task_panel.h 注释）。pill 网格自适应列数：
-// 竖屏整屏宽 5 列，横屏右列窄时收缩；每 pill 文字超宽自动缩字号
 float TaskPanel::voicePanelHeight(int command_count) {
     auto* p = impl_;
-    if (!p->text.isLoaded() && !p->clock_font.isLoaded()) return 0.f;
-    constexpr float kPillGap = 8.f;
-    constexpr float kPillH = 46.f;
-    constexpr float kHintGap = 8.f;
-    constexpr float kHintSize = 32.f;  // 待机提示行（"说在吗扣扣唤醒"）
-    // 空列表（角色不支持）只画提示行；有指令按 ≤2 行 × 每行 5 个
+    if (!p->text.isLoaded()) return 0.f;
     const int rows = command_count > 0 ? (command_count + 4) / 5 : 0;
-    const float hint_h = p->text.lineHeight(kHintSize);
-    return hint_h + kHintGap + rows * kPillH + (rows > 1 ? kPillGap : 0.f);
+    return p->text.lineHeight(kHintSize) + kHintGap + rows * kPillH +
+           (rows > 1 ? (rows - 1) * kPillGap : 0.f) + kVoiceBottom;
 }
 
-float TaskPanel::renderVoicePanel(const std::vector<std::string>& commands,
-                                  int highlight, const std::string& hint,
-                                  int screen_w, int screen_h, float area_top,
-                                  int region_x, int region_w) {
+float TaskPanel::renderVoicePanel(const std::vector<std::string>& commands, int highlight,
+                                  const std::string& hint, int screen_w, int screen_h,
+                                  float area_top, int region_x, int region_w) {
     auto* p = impl_;
-    if (screen_w <= 0 || screen_h <= 0 || area_top <= 0.f) return 0.f;
+    if (screen_w <= 0 || screen_h <= 0 || area_top <= 0.f || !p->text.isLoaded()) return 0.f;
+    p->begin(screen_w, screen_h);
     if (region_w < 0) region_w = screen_w;
-    if (!p->text.isLoaded() && !p->clock_font.isLoaded()) return 0.f;
-    TextRenderer& font = p->text;
-
-    // 布局常量（与任务卡片同风格）
-    constexpr float kMargin = 12.f;      // 区左右边距
-    constexpr float kPillGap = 8.f;      // pill 间距
-    constexpr float kPillH = 46.f;       // pill 高
-    constexpr float kPillRadius = 14.f;  // pill 圆角
-    constexpr float kHintSize = 32.f;    // 提示行字号（醒目，待机即引导语）
-    constexpr float kHintGap = 8.f;      // 提示行与 pill 网格间距
-    constexpr float kPillFont = 26.f;    // pill 名字号（超宽自动缩）
-
-    // ---- 高度计算：提示行 + pill 两行 ----
     const int n = (int)commands.size();
-    const int rows = n > 0 ? (n + 4) / 5 : 0;  // ≤2 行（每行最多 5）
+    const int rows = n > 0 ? (n + 4) / 5 : 0;
+    const float panel_h = std::min(voicePanelHeight(n), area_top);
+    const float x0 = region_x + kMargin, x1 = region_x + region_w - kMargin;
+    const float t = p->now();
+
+    // 提示行：居中，前面一个跟着声音起伏的小麦克风点
     const float hint_h = p->text.lineHeight(kHintSize);
-    float panel_h = hint_h + kHintGap + rows * kPillH + (rows > 1 ? kPillGap : 0.f);
-    if (area_top - panel_h < 0.f) panel_h = area_top;  // 防越界（极端小屏）
-    const float panel_bottom = area_top - panel_h;
-
-    // ---- 半透明黑底卡片（与任务列表同款）----
-    const float x0 = region_x + kMargin;
-    const float x1 = region_x + region_w - kMargin;
-    p->fillRoundedRect(x0, panel_bottom, x1, area_top, kCardRadius, 0.f, 0.f,
-                       0.f, kCardAlpha, screen_w, screen_h);
-
-    // ---- 提示行（灰色小字，居中）----
-    if (!hint.empty() && font.isLoaded()) {
-        const float w = font.measureWidth(hint, kHintSize);
-        const float hx = (x0 + x1) * 0.5f - w * 0.5f;
-        font.draw(hint, hx, area_top - 4.f, kHintSize, 0.72f, 0.74f, 0.80f,
-                  0.95f, screen_w, screen_h);
-    }
-
+    const float hsize = p->fit(p->text, hint, x1 - x0 - 40.f, kHintSize);
+    const float hw = p->text.measureWidth(hint, hsize);
+    const float hx = (x0 + x1) * 0.5f - hw * 0.5f + 12.f;
+    const float hcy = area_top - hint_h * 0.5f;
+    const float beat = 0.5f + 0.5f * std::sin(t * 3.2f);
+    p->circle(hx - 22.f, hcy, 4.f + 2.5f * beat, withAlpha(p->ink, 0.35f));
+    p->circle(hx - 22.f, hcy, 4.f, p->ink);
+    p->putMid(p->text, hint, hx, hcy, hsize, kPaper);
     if (rows == 0) return panel_h;
 
-    // ---- pill 网格 ----
-    // 每行列数 = min(5, 剩余个数)；pill 宽 = (可用宽 - 间距) / 列数
     const float usable = x1 - x0;
-    // 高亮闪烁（主题色 alpha 呼吸，周期 1.2s）
-    static const auto t0 = std::chrono::steady_clock::now();
-    const float now_s = std::chrono::duration<float>(
-                            std::chrono::steady_clock::now() - t0)
-                            .count();
-    const float blink =
-        0.55f + 0.45f * (0.5f + 0.5f * std::sin(now_s * 6.2831853f / 1.2f));
-
-    float top = area_top - hint_h - kHintGap;  // 第 1 行 pill 顶边
+    const float top = area_top - hint_h - kHintGap;
     for (int r = 0; r < rows; ++r) {
         const int cols = std::min(5, n - r * 5);
         const float pill_w = (usable - kPillGap * (cols - 1)) / (float)cols;
         for (int c = 0; c < cols; ++c) {
             const int idx = r * 5 + c;
-            const float px0 = x0 + c * (pill_w + kPillGap);
-            const float px1 = px0 + pill_w;
-            const float py1 = top - r * (kPillH + kPillGap);  // 行顶（GL y）
-            const float py0 = py1 - kPillH;
-            const bool hi = (idx == highlight);
-
+            const float px0 = x0 + c * (pill_w + kPillGap), px1 = px0 + pill_w;
+            const float py1 = top - r * (kPillH + kPillGap), py0 = py1 - kPillH;
+            const bool hi = idx == highlight;
             if (hi) {
-                // 高亮：主题色描边（呼吸闪烁）+ 深色内底 + 白色粗体字
-                p->fillRoundedRect(px0, py0, px1, py1, kPillRadius, p->body_r,
-                                   p->body_g, p->body_b, blink, screen_w,
-                                   screen_h);
-                p->fillRoundedRect(px0 + 1.5f, py0 + 1.5f, px1 - 1.5f,
-                                   py1 - 1.5f, kPillRadius - 1.5f, 0.f, 0.f,
-                                   0.f, 0.45f, screen_w, screen_h);
+                // 命中的指令：主题色实底 + 深色字，外圈一闪
+                const float k = 0.5f + 0.5f * std::sin(t * 2.f * kPi / 1.2f);
+                p->shape(px0 - 2.f, py0 - 2.f, px1 + 2.f, py1 + 2.f, kPillH * 0.5f + 2.f,
+                         withAlpha(p->ink, 0.25f + 0.3f * k), withAlpha(p->ink, 0.25f + 0.3f * k),
+                         0.f, {0, 0, 0, 0}, 8.f);
+                p->fill(px0, py0, px1, py1, kPillH * 0.5f, p->ink);
             } else {
-                // 常态：灰白淡底 + 浅灰文字
-                p->fillRoundedRect(px0, py0, px1, py1, kPillRadius, 0.85f,
-                                   0.87f, 0.92f, 0.10f, screen_w, screen_h);
+                p->shape(px0, py0, px1, py1, kPillH * 0.5f, kTileTop, kTileBot, 1.f, kHairline);
             }
-
-            if (!font.isLoaded()) continue;
-            // pill 文字：超宽自动缩字号，垂直居中
-            float size = kPillFont;
-            const float max_text = pill_w - 10.f;
-            while (size > 14.f && font.measureWidth(commands[idx], size) > max_text)
-                size -= 2.f;
-            const float tw = font.measureWidth(commands[idx], size);
-            const float lh = font.lineHeight(size);
-            const float cy = (py0 + py1) * 0.5f;
-            if (hi)
-                font.drawBold(commands[idx], (px0 + px1) * 0.5f - tw * 0.5f,
-                              cy + lh * 0.5f, size, 1.0f, 1.0f, 1.0f, 1.0f,
-                              screen_w, screen_h, size * 0.03f);
-            else
-                font.draw(commands[idx], (px0 + px1) * 0.5f - tw * 0.5f,
-                          cy + lh * 0.5f, size, 0.86f, 0.88f, 0.92f, 0.95f,
-                          screen_w, screen_h);
+            const float size = p->fit(p->text, commands[idx], pill_w - 14.f, 24.f);
+            const float tw = p->text.measureWidth(commands[idx], size);
+            p->putMid(p->text, commands[idx], (px0 + px1) * 0.5f - tw * 0.5f, (py0 + py1) * 0.5f,
+                      size, hi ? rgb(0x15120C) : kPaper, hi);
         }
     }
     return panel_h;
 }
 
-void TaskPanel::setSpacing(float scale) {
-    impl_->text.setSpacing(scale);
-    impl_->clock_font.setSpacing(scale);
+// ---------------------------------------------------------------------------
+// 引导画面
+// ---------------------------------------------------------------------------
+void TaskPanel::renderProvision(const std::string& ssid, const std::string& pass,
+                                const std::string& failure, int screen_w, int screen_h) {
+    auto* p = impl_;
+    if (screen_w <= 0 || screen_h <= 0) return;
+    p->begin(screen_w, screen_h);
+    const bool landscape = screen_w >= screen_h;
+    const float H = (float)screen_h;
+    // 竖屏单列；横屏左列热点信息、右列步骤
+    const float ax0 = 28.f, ax1 = landscape ? screen_w * 0.5f - 14.f : screen_w - 28.f;
+    const float bx0 = landscape ? screen_w * 0.5f + 14.f : 28.f;
+    const float bx1 = screen_w - 28.f;
+
+    // 标题：上次失败就直说原因
+    float y = H - 44.f;
+    const bool failed = !failure.empty();
+    p->put(p->text, failed ? failure : "给设备连上 Wi-Fi", ax0, y,
+           p->fit(p->text, failed ? failure : "给设备连上 Wi-Fi", ax1 - ax0, 38.f),
+           failed ? kCoral : kPaper, true);
+    y -= 56.f;
+    p->put(p->text, "先用手机连接这个设备热点", ax0, y,
+           p->fit(p->text, "先用手机连接这个设备热点", ax1 - ax0, 24.f), kDim);
+    y -= 46.f;
+
+    // 热点牌：名称与密码是要照着输入的，给最大的字
+    const float card_h = 212.f;
+    p->shape(ax0 - 8.f, y - card_h, ax1 + 8.f, y, 22.f, kTileTop, kTileBot, 1.f, kHairline);
+    const float cx0 = ax0 + 14.f, cx1 = ax1 - 14.f;
+    p->put(p->text, "热点名称", cx0, y - 18.f, 20.f, kFaint);
+    p->put(p->text, ssid, cx0, y - 44.f, p->fit(p->text, ssid, cx1 - cx0, 44.f), p->ink, true);
+    p->fill(cx0, y - 108.f, cx1, y - 107.f, 0.f, kHairline);
+    p->put(p->text, "密码", cx0, y - 122.f, 20.f, kFaint);
+    p->put(p->text, pass, cx0, y - 148.f, p->fit(p->text, pass, cx1 - cx0, 44.f), kPaper, true);
+    y -= card_h;
+
+    // 步骤
+    float sy = landscape ? H - 48.f : y - 34.f;
+    sy -= p->step(1, "连上后点「登录到网络」通知", "没有弹出就用浏览器打开 192.168.4.1", bx0, bx1,
+                  sy);
+    sy -= p->step(2, "选择家里的 Wi-Fi 并输入密码", "", bx0, bx1, sy);
+    sy -= p->step(3, "手机提示无互联网时", "选择继续使用此网络", bx0, bx1, sy);
+    sy -= p->step(4, "联网后这里会显示配对码", "", bx0, bx1, sy);
+
+    // 电脑端还没装的人需要知道去哪下载
+    const std::string foot = "电脑端下载  gitee.com/megrezsoft/duty-on";
+    p->put(p->text, foot, bx0, 46.f, p->fit(p->text, foot, bx1 - bx0, 20.f), kFaint);
+}
+
+void TaskPanel::renderJoining(const std::string& progress, int screen_w, int screen_h) {
+    auto* p = impl_;
+    if (screen_w <= 0 || screen_h <= 0) return;
+    p->begin(screen_w, screen_h);
+    const float H = (float)screen_h, x0 = 28.f, x1 = screen_w - 28.f;
+    const float cy = H * 0.62f;
+    p->glow(screen_w * 0.5f, cy, 150.f, 150.f, withAlpha(p->ink, 0.16f));
+    p->spinner(screen_w * 0.5f, cy, 46.f, p->now());
+    p->putCentered(p->text, "正在连接 Wi-Fi", x0, x1, cy - 96.f, 38.f, kPaper, true);
+    p->putCentered(p->text, progress, x0, x1, cy - 156.f, 26.f, p->ink);
+    p->putCentered(p->text, "连不上会自动回到设备热点", x0, x1, cy - 204.f, 22.f, kFaint);
+}
+
+void TaskPanel::renderPairing(const std::string& code, bool waiting, bool wifi_just_ok,
+                              int screen_w, int screen_h) {
+    auto* p = impl_;
+    if (screen_w <= 0 || screen_h <= 0) return;
+    p->begin(screen_w, screen_h);
+    const bool landscape = screen_w >= screen_h;
+    const float H = (float)screen_h, x0 = 28.f, x1 = screen_w - 28.f;
+    const float mid = screen_w * 0.5f;
+    const float t = p->now();
+
+    if (wifi_just_ok) {
+        const std::string ok = "Wi-Fi 已连接";
+        const float w = p->text.measureWidth(ok, 22.f) + 52.f;
+        const float py1 = H - 30.f, py0 = py1 - 40.f;
+        const Color none = {0, 0, 0, 0};
+        p->shape(mid - w * 0.5f, py0, mid + w * 0.5f, py1, 20.f, none, none, 1.2f,
+                 withAlpha(p->ink, 0.7f));
+        p->circle(mid - w * 0.5f + 22.f, (py0 + py1) * 0.5f, 5.f, p->ink);
+        p->putMid(p->text, ok, mid - w * 0.5f + 38.f, (py0 + py1) * 0.5f, 22.f, p->ink);
+    }
+
+    const float label_top = landscape ? H - 96.f : H * 0.5f + 200.f;
+    p->putCentered(p->text, "配对码", x0, x1, label_top, 26.f, kDim);
+
+    // 六位码：每位一格，三位一组（念和抄都按 3+3）
+    const float cell_w = 62.f, cell_h = 88.f, gap = 8.f, group_gap = 22.f;
+    const float total = cell_w * 6.f + gap * 4.f + group_gap;
+    const float top = label_top - 52.f;
+    p->glow(mid, top - cell_h * 0.5f, total * 0.62f, cell_h * 1.5f, withAlpha(p->ink, 0.14f));
+    TextRenderer& df = p->digits();
+    float cx = mid - total * 0.5f;
+    for (int i = 0; i < 6; ++i) {
+        p->shape(cx, top - cell_h, cx + cell_w, top, 16.f, kTileTop, kTileBot, 1.f, kHairline);
+        if (i < (int)code.size()) {
+            const std::string d(1, code[i]);
+            p->putMid(df, d, cx + (cell_w - df.measureWidth(d, 64.f)) * 0.5f, top - cell_h * 0.5f,
+                      64.f, p->ink, true);
+        }
+        cx += cell_w + (i == 2 ? group_gap : gap);
+    }
+
+    // 当前状态：一句话 + 状态灯
+    float y = top - cell_h - (landscape ? 44.f : 64.f);
+    const std::string head = waiting ? "等电脑上线" : "还没有电脑连接";
+    const float hw = p->text.measureWidth(head, 34.f);
+    const float hx = mid - hw * 0.5f + 16.f;
+    p->lamp(hx - 26.f, y - p->text.lineHeight(34.f) * 0.5f,
+            waiting ? StatusStyle{p->ink, "", 2} : StatusStyle{kIdle, "", 0}, t);
+    p->put(p->text, head, hx, y, 34.f, kPaper, true);
+    y -= landscape ? 58.f : 70.f;
+    if (waiting) {
+        p->putCentered(p->text, "电脑上的 Duty On 启动后会自动连接", x0, x1, y, 24.f, kDim);
+    } else {
+        p->putCentered(p->text, "在电脑上右键桌宠", x0, x1, y, 24.f, kDim);
+        p->putCentered(p->text, "选 设备 → 配对设备，输入上面的配对码", x0, x1, y - 38.f, 24.f,
+                       kDim);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 常驻叠加
+// ---------------------------------------------------------------------------
+void TaskPanel::renderNetStatus(bool wifi_online, bool pc_online, int screen_w, int screen_h) {
+    auto* p = impl_;
+    if (screen_w <= 0 || screen_h <= 0) return;
+    p->begin(screen_w, screen_h);
+    const float top = (float)screen_h - 14.f, bottom = top - 18.f;
+    const Color off = withAlpha(kFaint, 0.9f);
+
+    // 断开标记：珊瑚色斜杠（下垫一条黑边，压在图标上也清楚）
+    auto slash = [&](float x0, float x1) {
+        const float cx = (x0 + x1) * 0.5f, cy = (top + bottom) * 0.5f;
+        p->shape(cx - 14.f, cy - 3.f, cx + 14.f, cy + 3.f, 3.f, rgb(0x000000, 0.85f),
+                 rgb(0x000000, 0.85f), 0.f, {0, 0, 0, 0}, 0.75f, -0.72f);
+        p->shape(cx - 13.f, cy - 1.4f, cx + 13.f, cy + 1.4f, 1.4f, kCoral, kCoral, 0.f,
+                 {0, 0, 0, 0}, 0.75f, -0.72f);
+    };
+
+    // Wi-Fi：四根递增的圆头信号条
+    const float bar_w = 3.5f, bar_gap = 2.5f;
+    const float wx1 = (float)screen_w - 18.f;
+    const float wx0 = wx1 - (bar_w * 4.f + bar_gap * 3.f);
+    static const float kBarH[4] = {6.f, 10.f, 14.f, 18.f};
+    for (int i = 0; i < 4; ++i) {
+        const float bx = wx0 + i * (bar_w + bar_gap);
+        p->fill(bx, bottom, bx + bar_w, bottom + kBarH[i], bar_w * 0.5f,
+                wifi_online ? p->ink : off);
+    }
+    if (!wifi_online) slash(wx0, wx1);
+
+    // 电脑：圆角屏框 + 底座
+    const float px1 = wx0 - 12.f, px0 = px1 - 22.f;
+    const Color pc = pc_online ? p->ink : off;
+    const Color none = withAlpha(pc, 0.f);
+    p->shape(px0, bottom + 4.f, px1, top, 3.5f, none, none, 2.f, pc);
+    p->fill(px0 + 5.f, bottom, px1 - 5.f, bottom + 2.f, 1.f, pc);
+    if (!pc_online) slash(px0, px1);
+}
+
+void TaskPanel::renderAlertEdge(int screen_w, int screen_h) {
+    auto* p = impl_;
+    if (screen_w <= 0 || screen_h <= 0) return;
+    p->begin(screen_w, screen_h);
+    const float W = (float)screen_w, H = (float)screen_h;
+    const float k = 0.5f + 0.5f * std::sin(p->now() * 2.f * kPi / 1.4f);
+    const Color c = withAlpha(kCoral, 0.16f + 0.26f * k);
+    p->glow(W * 0.5f, H, W * 0.75f, 64.f, c);
+    p->glow(W * 0.5f, 0.f, W * 0.75f, 64.f, c);
+    p->glow(0.f, H * 0.5f, 56.f, H * 0.75f, c);
+    p->glow(W, H * 0.5f, 56.f, H * 0.75f, c);
 }
 
 void TaskPanel::renderDim(int brightness, int screen_w, int screen_h) {
-    // 整屏叠黑色矩形压暗：alpha = 1 - 亮度/100（SRC_ALPHA 混合 =
-    // 各像素乘以亮度系数），100% 时直接跳过
     if (brightness >= 100 || screen_w <= 0 || screen_h <= 0) return;
+    impl_->begin(screen_w, screen_h);
     const int b = brightness < 10 ? 10 : brightness;
-    impl_->fillRect(0.f, 0.f, (float)screen_w, (float)screen_h, 0.f, 0.f, 0.f,
-                    1.0f - (float)b / 100.0f, screen_w, screen_h);
+    impl_->fill(-2.f, -2.f, screen_w + 2.f, screen_h + 2.f, 0.f,
+                rgb(0x000000, 1.0f - (float)b / 100.0f));
 }
 
-void TaskPanel::renderNetStatus(bool wifi_online, bool pc_online,
-                                int screen_w, int screen_h) {
-    auto* p = impl_;
-    if (screen_w <= 0 || screen_h <= 0) return;
+}  // namespace dutyon
 
-    // 右上角两块连接状态图标（纯色几何，无贴图），分别表示两段链路：
-    //   最右 = Wi-Fi 信号条（4 根递增）：设备是否已入网（入网=时钟主题色/未入网=灰+红叉）；
-    //   其左 = 显示器图标（镂空屏框+支架）：是否已连上 PC（连上=时钟主题色/未连=灰+红叉）。
-    const float top = (float)screen_h - 12.f;            // 顶边距 12
-    const float box_h = 20.f;                            // 图标高
-    const float bottom = top - box_h;
-    const float bar_w = 3.f, bar_gap = 2.f;              // 条宽 / 条间距
-    const float x1 = (float)screen_w - 12.f;             // 右边距 12
-    const float x0 = x1 - (bar_w * 4.f + bar_gap * 3.f);  // 信号条左缘（宽 18）
-
-    // 红叉标记：两条对角细长四边形（fillFan 凸四边形）跨整个图标区域。
-    // 系统文字本就是多种主题色，仅靠"图标颜色"区分通断不够醒目 →
-    // 断链一律：图标灰底 + 叠加红叉（状态语义不依赖颜色也能读懂）。
-    const float xr = 0.95f, xg = 0.22f, xb = 0.22f, xa = 0.95f;
-    auto drawX = [&](float bx0, float by0, float bx1, float by1) {
-        const float t = 1.8f;  // 半线宽（整条线宽 3.6px）
-        const float diag[2][4] = {{bx0, by0, bx1, by1},   // 左下 -> 右上
-                                  {bx0, by1, bx1, by0}};  // 左上 -> 右下
-        for (const auto& d : diag) {
-            const float dx = d[2] - d[0], dy = d[3] - d[1];
-            const float len = std::sqrt(dx * dx + dy * dy);
-            if (len < 1.f) continue;
-            const float nx = -dy / len * t, ny = dx / len * t;  // 法向偏移
-            p->fillFan({d[0] + nx, d[1] + ny, d[2] + nx, d[3] + ny,
-                        d[2] - nx, d[3] - ny, d[0] - nx, d[1] - ny},
-                       xr, xg, xb, xa, screen_w, screen_h);
-        }
-    };
-
-    // ---- Wi-Fi 信号条：入网=时钟主题色（与时钟/日期统一）；未入网=灰底 + 红叉 ----
-    {
-        const bool off = !wifi_online;
-        const float r = off ? 0.55f : p->body_r;
-        const float g = off ? 0.55f : p->body_g;
-        const float b = off ? 0.58f : p->body_b;
-        const float a = off ? 0.75f : 0.95f;
-        static const float kBarH[4] = {6.f, 10.f, 14.f, 18.f};
-        for (int i = 0; i < 4; ++i) {
-            const float bx0 = x0 + (float)i * (bar_w + bar_gap);
-            p->fillRect(bx0, bottom, bx0 + bar_w, bottom + kBarH[i], r, g, b, a,
-                        screen_w, screen_h);
-        }
-        if (off) drawX(x0, bottom, x1, bottom + box_h);
-    }
-
-    // ---- PC 显示器图标（信号条左侧，间距 7；镂空屏框 + 支架 + 底座）----
-    {
-        const float gap = 7.f;
-        const float iw = 16.f;                 // 显示器宽
-        const float px1 = x0 - gap;            // 右缘
-        const float px0 = px1 - iw;            // 左缘
-        const float scr_top = bottom + 14.f;   // 屏幕上沿
-        const float scr_bot = bottom + 4.f;    // 屏幕下沿
-        const float t = 2.f;                   // 屏框线宽
-        const bool off = !pc_online;
-        const float r = off ? 0.55f : p->body_r;
-        const float g = off ? 0.55f : p->body_g;
-        const float b = off ? 0.58f : p->body_b;
-        const float a = off ? 0.75f : 0.95f;
-        // 屏框四边（镂空，中间透出背景）
-        p->fillRect(px0, scr_top - t, px1, scr_top, r, g, b, a, screen_w, screen_h);
-        p->fillRect(px0, scr_bot, px1, scr_bot + t, r, g, b, a, screen_w, screen_h);
-        p->fillRect(px0, scr_bot, px0 + t, scr_top, r, g, b, a, screen_w, screen_h);
-        p->fillRect(px1 - t, scr_bot, px1, scr_top, r, g, b, a, screen_w, screen_h);
-        // 支架 + 底座
-        const float cx = px0 + iw * 0.5f;
-        p->fillRect(cx - 1.5f, bottom + 1.f, cx + 1.5f, scr_bot, r, g, b, a,
-                    screen_w, screen_h);
-        p->fillRect(px0 + 3.f, bottom, px1 - 3.f, bottom + 1.f, r, g, b, a,
-                    screen_w, screen_h);
-        if (off) drawX(px0, bottom, px1, bottom + box_h);
-    }
-}
-
-
-} // namespace dutyon
-
-#endif // !_WIN32
+#endif  // !_WIN32 || DUTYON_UI_PREVIEW

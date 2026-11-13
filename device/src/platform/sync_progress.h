@@ -1,117 +1,79 @@
 #pragma once
 // ---------------------------------------------------------------------------
-// 设备程序同步进度窗口（仅 Windows PC 端）—— header-only，被 main.cpp 的
-// 自动更新工作线程使用。独立于宠物 GLFW 窗口：WS_EX_TOPMOST 置顶弹出。
+// 设备程序更新进度窗口（仅 Windows PC 端）。外观来自 dialog_kit.h。
+// 被 main.cpp 的自动更新工作线程使用，独立于桌宠窗口，置顶显示，不抢焦点。
 //
-// 线程约定：create/update/pump/destroy 必须都在同一个工作线程调用（窗口
-// 归属该线程，pump() 自持非阻塞消息泵），无跨线程 marshaling。
+// 线程约定：create / update / pump / destroy 必须在同一个工作线程调用（窗口
+// 归属该线程，pump() 自持非阻塞消息泵）。
 //
 // 用法：
 //   SyncProgressDialog dlg;
 //   dlg.create();
-//   while (proc_running) { dlg.pump(); dlg.update(pct, L"阶段名 45%"); }
+//   while (proc_running) { dlg.pump(); dlg.update(pct, L"阶段名"); }
 //   dlg.update(100, L"更新完成"); Sleep(2000); dlg.destroy();
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
 
-#include <windows.h>
-#include <commctrl.h>
+#include <string>
 
-#pragma comment(lib, "comctl32.lib")
+#include "platform/dialog_kit.h"
 
 namespace dutyon {
 
-class SyncProgressDialog {
+class SyncProgressDialog : public dk::Dialog {
 public:
-    ~SyncProgressDialog() { destroy(); }
+    ~SyncProgressDialog() override { destroy(); }
 
-    // 创建置顶进度窗口（居中，约 400x150）。成功返回 true。
-    bool create(const wchar_t* title = L"Duty On \u2014 \u8bbe\u5907\u7a0b\u5e8f\u66f4\u65b0") {
-        if (hwnd_) return true;
-        HINSTANCE hi = GetModuleHandleW(nullptr);
-        static bool cls_ready = false;
-        static const wchar_t* kCls = L"DutyOnSyncProgress";
-        if (!cls_ready) {
-            INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_PROGRESS_CLASS};
-            InitCommonControlsEx(&icc);
-            WNDCLASSEXW wc{};
-            wc.cbSize = sizeof(wc);
-            wc.lpfnWndProc = &SyncProgressDialog::wndProc;
-            wc.hInstance = hi;
-            // IDC_ARROW = MAKEINTRESOURCEA(32512)（非 UNICODE 构建）；资源 ID 只是
-            // 低 16 位整数，A/W 同值，转 LPCWSTR 以匹配显式 W 版 API。
-            wc.hCursor = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
-            wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-            wc.lpszClassName = kCls;
-            RegisterClassExW(&wc);
-            cls_ready = true;
-        }
-        const int w = 400, h = 150;
-        const int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
-        const int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
-        hwnd_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kCls, title,
-                                WS_POPUP | WS_BORDER, x, y, w, h,
-                                nullptr, nullptr, hi, nullptr);
-        if (!hwnd_) return false;
-
-        const int mx = 20;                 // 左右边距
-        const int cw = w - mx * 2 - 4;     // 控件宽（预留边框）
-        HFONT f = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        hwnd_title_ = CreateWindowExW(0, L"STATIC", title,
-                                      WS_CHILD | WS_VISIBLE | SS_CENTER,
-                                      mx, 16, cw, 22, hwnd_, nullptr, hi, nullptr);
-        hwnd_stage_ = CreateWindowExW(0, L"STATIC",
-                                      L"\u51c6\u5907\u4e2d\u2026",
-                                      WS_CHILD | WS_VISIBLE | SS_CENTER,
-                                      mx, 48, cw, 40, hwnd_, nullptr, hi, nullptr);
-        hwnd_bar_ = CreateWindowExW(0, PROGRESS_CLASSW, nullptr,
-                                    WS_CHILD | WS_VISIBLE,
-                                    mx, 100, cw, 20, hwnd_, nullptr, hi, nullptr);
-        SendMessageW(hwnd_bar_, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-        SendMessageW(hwnd_bar_, PBM_SETPOS, 0, 0);
-        if (f) {
-            SendMessageW(hwnd_title_, WM_SETFONT, (WPARAM)f, TRUE);
-            SendMessageW(hwnd_stage_, WM_SETFONT, (WPARAM)f, TRUE);
-        }
-        ShowWindow(hwnd_, SW_SHOW);
-        UpdateWindow(hwnd_);
+    bool create(const wchar_t* title = L"设备程序更新") {
+        if (hwnd()) return true;
+        if (!createWindow(nullptr, title, 400, 156, /*topmost=*/true)) return false;
+        // 进度窗口不能关（更新在后台进行）：收起关闭按钮
+ if (HWND x = GetDlgItem(hwnd(), IDCANCEL)) ShowWindow(x, SW_HIDE);
+ stage_ = L"准备中…";
+ show(/*take_focus=*/false);
         return true;
     }
 
-    // 更新进度条位置（0-100）与阶段文字（stage 可为空表示只改进度）
+    // 更新进度（0-100）与阶段文字（stage 为空表示只改进度）
     void update(int pct, const wchar_t* stage) {
-        if (!hwnd_) return;
-        if (pct < 0) pct = 0;
-        if (pct > 100) pct = 100;
-        if (stage) SetWindowTextW(hwnd_stage_, stage);
-        SendMessageW(hwnd_bar_, PBM_SETPOS, (WPARAM)pct, 0);
+        if (!hwnd()) return;
+ pct_ = pct < 0 ? 0 : pct > 100 ? 100 : pct;
+        if (stage) stage_ = stage;
+ repaint();
     }
 
-    // 非阻塞抽取并派发本线程消息（在等待子进程的轮询里周期调用）
-    void pump() {
-        MSG m;
-        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&m);
-            DispatchMessageW(&m);
+    void pump() { pumpOnce(); }
+    void destroy() { destroyWindow(); }
+
+protected:
+    void paintContent(HDC dc, Gdiplus::Graphics& g) override {
+        RECT rc;
+ GetClientRect(hwnd(), &rc);
+        const int x0 = S(kPad), x1 = rc.right - S(kPad);
+        // 阶段文字在左，百分比在右
+        RECT sr = {x0, S(60), x1 - S(56), S(60) + S(24)};
+        dk::drawText(dc, stage_, sr, f_text_, dk::kPaper, DT_LEFT | DT_VCENTER | DT_SINGLELINE |
+       DT_END_ELLIPSIS);
+        RECT pr = {x1 - S(56), S(60), x1, S(60) + S(24)};
+        dk::drawText(dc, std::to_wstring(pct_) + L"%", pr, f_text_, dk::kInk,
+       DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        // 进度条：深色槽 + 主题色
+ RECT track = {x0, S(98), x1, S(98) + S(8)};
+        dk::roundRect(g, track, (float)S(4), dk::kTileTop, dk::kTileTop, false);
+        const int fill_w = (x1 - x0) * pct_ / 100;
+        if (fill_w > S(8)) {
+     RECT fill = {x0, track.top, x0 + fill_w, track.bottom};
+     dk::roundRect(g, fill, (float)S(4), dk::kInk, dk::kInk, false);
         }
-    }
-
-    void destroy() {
-        if (hwnd_) { DestroyWindow(hwnd_); hwnd_ = nullptr; }
-        hwnd_title_ = hwnd_stage_ = hwnd_bar_ = nullptr;
+        RECT nr = {x0, S(116), x1, S(116) + S(20)};
+ dk::drawText(dc, L"更新期间硬件屏会短暂重启，请不要断电。", nr, f_small_, dk::kFaint);
     }
 
 private:
-    static LRESULT CALLBACK wndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-        return DefWindowProcW(h, m, w, l);
-    }
-
-    HWND hwnd_ = nullptr;
-    HWND hwnd_title_ = nullptr;
-    HWND hwnd_stage_ = nullptr;
-    HWND hwnd_bar_ = nullptr;
+    std::wstring stage_;
+    int pct_ = 0;
 };
 
-} // namespace dutyon
+}  // namespace dutyon
 
-#endif // _WIN32
+#endif  // _WIN32

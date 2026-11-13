@@ -12,7 +12,7 @@
     Diagnostic log is written to ~/.dutyon/hooks/bridge.log so we can confirm
     whether the IDE is actually invoking the hook.
 
-    The -Ide argument ("trae" / "qoder" / "cursor" / "codex") is passed by the
+    The -Ide argument ("trae" / "qoder" / "cursor" / "codex" / "claude") is passed by the
 installed hook command so the pet can badge each session with its source
     IDE. Cursor's stdin payload carries no event name, so its installed
     commands also pass -HookEvent (normalized to the canonical
@@ -146,6 +146,9 @@ if ($Ide -eq 'cursor' -and [string]::IsNullOrWhiteSpace($event.tool_name)) {
 # Payload is authoritative. Other IDEs' inherited environment must not steal
 # a Codex session's project. Only consult this IDE's environment as a fallback.
 $projectDir = $event.project_path
+# Claude Code's cwd follows the agent (cd, worktrees); CLAUDE_PROJECT_DIR is
+# the project root its own hook runner exports and stays put for the session.
+if ($Ide -eq 'claude' -and [string]::IsNullOrWhiteSpace($projectDir)) { $projectDir = $env:CLAUDE_PROJECT_DIR }
 if ([string]::IsNullOrWhiteSpace($projectDir)) { $projectDir = $event.cwd }
 if ([string]::IsNullOrEmpty($projectDir)) {
   # Cursor payloads may expose the workspace as workspace_roots instead of cwd.
@@ -163,6 +166,12 @@ if ([string]::IsNullOrWhiteSpace($projectDir)) {
       elseif (-not $Ide) { $env:QODER_PROJECT_DIR }
     }
   }
+}
+
+# Claude Code worktree sessions and agents run in <project>/.claude/worktrees/<name>;
+# report them under the project they belong to, not as a row of their own.
+if ($Ide -eq 'claude' -and $projectDir -match '^(.+?)[\\/]\.claude[\\/]worktrees[\\/][^\\/]+[\\/]?$') {
+  $projectDir = $Matches[1]
 }
 
 $projectName = ''

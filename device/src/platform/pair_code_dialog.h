@@ -1,35 +1,31 @@
 #pragma once
 // ---------------------------------------------------------------------------
-// 配对弹窗（仅 Windows PC 端）—— 深色卡片风，双状态：
-//   未配对：验证码（OTP）风格 6 格输码 + [确定][取消]
-//   已配对：「✓ 已配对成功」+ 设备列表 + 每台 [解除配对][清除 Wi-Fi] + [关闭]
+// 配对设备弹窗（仅 Windows PC 端）。外观来自 dialog_kit.h。两个页面：
+//   输码：六格配对码（三位一组，和硬件屏上的排法一致）+ [取消] [配对]
+//   已配对：每台设备一张牌 + [解除配对] [清除 Wi-Fi] + [完成]
 //
-// 视觉对齐程序整体深色风格（背景 #1A1D24 / 输入框 #12151A / 主按钮
-// #4C8DFF / 次按钮 #2A2F37，标题栏 DWM 深色），不再用系统灰底。
+// 输码交互（对齐常见验证码控件）：数字填入当前格自动跳下一格（重输覆盖）；
+// Backspace 在空格上回退上一格；←/→ 移动；Enter = 配对；Esc = 取消；粘贴
+// 一串数字会依次填满后面的格。没填满或配对码不对时，状态行用珊瑚色说明，
+// 不再另弹提示框。
 //
-// 交互（输码态，对齐常见验证码控件）：
-//   数字键填入当前格自动跳下一格（重输覆盖）；Backspace 空格回退上一格；
-//   ←/→ 移动；Enter=确定；Esc/关闭=取消；粘贴取剪贴板第一个数字；
-//   未填满点“确定”：蜂鸣并定位第一个空格。
+// 解除配对、清除 Wi-Fi 都要点两次：第一次按钮变成珊瑚色的"确认…"，三秒内
+// 再点才执行（清除 Wi-Fi 会让硬件屏回到配网热点，误点代价大）。
 //
-// 动作与数据经 Host 回调注入（main.cpp 用 lambda 组装），确认成功后
-// 弹窗内部直接切到已配对态。线程约定：仅 UI 线程，run() 自持模态泵。
+// 动作与数据经 Host 回调注入（main.cpp 用 lambda 组装）。仅 UI 线程，run()
+// 自持模态消息泵。
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
-
-#include <windows.h>
-#include <windowsx.h>  // GET_X_LPARAM / GET_Y_LPARAM
-#include <dwmapi.h>
 
 #include <functional>
 #include <string>
 #include <vector>
 
-#pragma comment(lib, "dwmapi.lib")
+#include "platform/dialog_kit.h"
 
 namespace dutyon {
 
-class PairDialog {
+class PairDialog : public dk::Dialog {
 public:
     struct Device {
         std::string id, label;
@@ -37,575 +33,293 @@ public:
 
     // 宿主动作集（全部可选；为空时对应按钮不生效）
     struct Host {
-        std::function<bool(const std::string&)> confirm;     // 输码 → 是否成功
+ std::function<bool(const std::string&)> confirm;     // 输码 → 是否成功
         std::function<void(const std::string&)> unpair;      // 解除配对
         std::function<void(const std::string&)> reset_wifi;  // 清除设备 Wi-Fi
-        std::function<std::vector<Device>()> paired;         // 当前已配对列表
+        std::function<std::vector<Device>()> paired;  // 当前已配对列表
     };
 
     // 模态运行：点「配对设备」直接调用；关闭窗口才返回
     void run(HWND owner, const Host& host) {
         host_ = &host;
-        devices_ = host.paired ? host.paired() : std::vector<Device>();
-        mode_ = devices_.empty() ? Mode::kInput : Mode::kPaired;
-        if (!create(owner)) return;
-        MSG m;
-        while (!done_ && GetMessageW(&m, nullptr, 0, 0) > 0) {
-            if (!IsDialogMessageW(hwnd_, &m)) {
-                TranslateMessage(&m);
-                DispatchMessageW(&m);
-            }
-        }
-        destroy();
+ devices_ = host.paired ? host.paired() : std::vector<Device>();
+        input_mode_ = devices_.empty();
+        if (!createWindow(owner, L"配对设备", kWidth, 300)) return;
+ f_digit_ = dk::makeFont(S(34), FW_BOLD, L"Arial Rounded MT Bold");
+ build();
+        show();
+ if (input_mode_ && edits_[0]) SetFocus(edits_[0]);
+        runModal();
+ KillTimer(hwnd(), kDisarmTimer);
+        if (f_digit_) DeleteObject(f_digit_);
+        f_digit_ = nullptr;
+        destroyWindow();
     }
 
 private:
+    static constexpr int kWidth = 420;
     static constexpr int kBoxes = 6;
-    static constexpr int kEditIdBase = 100;  // 输入框 ID: 100~105
-    static constexpr int kBtnUnpairBase = 200;  // 已配对设备行按钮 ID: 200+2i/201+2i
+    static constexpr int kEditIdBase = 100;     // 输入格 ID: 100~105
+    static constexpr int kBtnDeviceBase = 300;  // 设备行按钮 ID: 300+2i 解除 / 301+2i 清除 Wi-Fi
+    static constexpr int kBtnPair = 201;
+    static constexpr UINT_PTR kDisarmTimer = 1;
+    static constexpr int kRowPitch = 112;  // 已配对页每台设备占的高度
 
-    enum class Mode { kInput, kPaired };
-
-    struct BoxCtx {  // 子类引用数据（须活到控件销毁）
+    struct BoxCtx {  // 输入格子类过程的引用数据（须活到控件销毁）
         PairDialog* dlg;
-        int idx;
+ int idx;
     };
 
-    // ---- 深色配色（与 ImGui 菜单/portal 一致）----
-    static constexpr COLORREF kBg = RGB(0x1A, 0x1D, 0x24);
-    static constexpr COLORREF kEditBg = RGB(0x12, 0x15, 0x1A);
-    static constexpr COLORREF kEditBorder = RGB(0x33, 0x38, 0x3F);
-    static constexpr COLORREF kText = RGB(0xE8, 0xEA, 0xED);
-    static constexpr COLORREF kTextDim = RGB(0x9A, 0xA0, 0xA6);
-    static constexpr COLORREF kGreen = RGB(0x34, 0xC7, 0x59);
-    static constexpr COLORREF kPrimary = RGB(0x4C, 0x8D, 0xFF);
-    static constexpr COLORREF kPrimaryDown = RGB(0x3A, 0x76, 0xE0);
-    static constexpr COLORREF kBtnBg = RGB(0x2A, 0x2F, 0x37);
-    static constexpr COLORREF kBtnBorder = RGB(0x3A, 0x41, 0x50);
-    static constexpr COLORREF kBtnDown = RGB(0x23, 0x27, 0x2E);
-    static constexpr COLORREF kAccent = RGB(0x8A, 0xB4, 0xFF);
-
-    bool create(HWND owner) {
-        HINSTANCE hi = GetModuleHandleW(nullptr);
-        static const wchar_t* kCls = L"DutyOnPairDialog";
-        static bool cls_ready = false;
-        if (!cls_ready) {
-            WNDCLASSEXW wc{};
-            wc.cbSize = sizeof(wc);
-            wc.lpfnWndProc = &PairDialog::wndProc;
-            wc.hInstance = hi;
-            // IDC_ARROW = MAKEINTRESOURCEA(32512)（非 UNICODE 构建）；资源 ID
-            // 只是低 16 位整数，A/W 同值，转 LPCWSTR 以匹配显式 W 版 API
-            wc.hCursor = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
-            wc.hbrBackground = nullptr;  // 深色自绘（WM_ERASEBKGND）
-            wc.lpszClassName = kCls;
-            RegisterClassExW(&wc);
-            cls_ready = true;
-        }
-        UINT dpi = owner ? GetDpiForWindow(owner) : GetDpiForSystem();
-        if (!dpi) dpi = 96;
-        s_ = dpi / 96.0f;
-        const int W = (int)(392 * s_);
-        const int x = (GetSystemMetrics(SM_CXSCREEN) - W) / 2;
-        const int y = (GetSystemMetrics(SM_CYSCREEN) - 460) / 2;
-        hwnd_ = CreateWindowExW(WS_EX_DLGMODALFRAME, kCls,
-                                L"Duty On — 配对设备",
-                                WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, W,
-                                (int)(100 * s_),  // 高度 build() 里按内容定
-                                owner, nullptr, hi, this);
-        if (!hwnd_) return false;
-        // Win10 1903+ 深色标题栏（失败静默，仅影响标题栏颜色）
-        BOOL dark = TRUE;
-        if (FAILED(DwmSetWindowAttribute(hwnd_, 20, &dark, sizeof(dark))))
-            DwmSetWindowAttribute(hwnd_, 19, &dark, sizeof(dark));
-
-        font_title_ = makeFont(17, FW_SEMIBOLD);
-        font_text_ = makeFont(14, FW_NORMAL);
-        font_digit_ = makeFont(34, FW_SEMIBOLD);
-        font_btn_ = makeFont(14, FW_NORMAL);
-        bg_brush_ = CreateSolidBrush(kBg);
-        edit_brush_ = CreateSolidBrush(kEditBg);
-
-        build();
-        ShowWindow(hwnd_, SW_SHOW);
-        UpdateWindow(hwnd_);
-        // 抢前台焦点：owner（桌宠窗口）是 WS_EX_NOACTIVATE，从不激活，弹窗
-        // 不会自动成为前台——用户点菜单时本进程即前台，SetForegroundWindow
-        // 允许同进程调用；否则得先点一下窗口键盘才生效
-        SetForegroundWindow(hwnd_);
-        SetActiveWindow(hwnd_);
-        if (mode_ == Mode::kInput && edits_[0]) SetFocus(edits_[0]);
-        return true;
-    }
-
-    void destroy() {
-        if (hwnd_) {
-            DestroyWindow(hwnd_);
-            hwnd_ = nullptr;
-        }
-        for (int i = 0; i < kBoxes; ++i) {
-            delete ctx_[i];
-            ctx_[i] = nullptr;
-            edits_[i] = nullptr;
-        }
-        if (font_title_) { DeleteObject(font_title_); font_title_ = nullptr; }
-        if (font_text_) { DeleteObject(font_text_); font_text_ = nullptr; }
-        if (font_digit_) { DeleteObject(font_digit_); font_digit_ = nullptr; }
-        if (font_btn_) { DeleteObject(font_btn_); font_btn_ = nullptr; }
-        if (bg_brush_) { DeleteObject(bg_brush_); bg_brush_ = nullptr; }
-        if (edit_brush_) { DeleteObject(edit_brush_); edit_brush_ = nullptr; }
-        done_ = false;
-    }
-
-    // 销毁全部子控件并按当前 mode_ 重建布局/调整窗口高度
     void build() {
-        HWND child = GetWindow(hwnd_, GW_CHILD);
-        while (child) {
-            const HWND next = GetWindow(child, GW_HWNDNEXT);
-            DestroyWindow(child);
-            child = next;
+        clearControls();
+        for (int i = 0; i < kBoxes; ++i) edits_[i] = nullptr;
+        armed_id_ = 0;
+ status_.clear();
+        setTone(dk::Tone::Info);
+        if (input_mode_) buildInput(); else buildPaired();
+ repaint();
+    }
+
+    void buildInput() {
+        setClientHeight(296);
+        RECT rc;
+ GetClientRect(hwnd(), &rc);
+ const int cw = S(48), ch = S(60), gap = S(8), group = S(20);
+ const int total = cw * kBoxes + gap * 4 + group;
+        int x = (rc.right - total) / 2;
+        const int top = S(104);
+ for (int i = 0; i < kBoxes; ++i) {
+     RECT cell = {x, top, x + cw, top + ch};
+     edits_[i] = addEdit(kEditIdBase + i, L"", false, 1, cell, f_digit_, ES_CENTER, 2);
+     ctx_[i].dlg = this;
+     ctx_[i].idx = i;
+     SetWindowSubclass(edits_[i], &PairDialog::editProc, 2, (DWORD_PTR)&ctx_[i]);
+     x += cw + (i == 2 ? group : gap);
         }
-        for (int i = 0; i < kBoxes; ++i) {  // BoxCtx 与 EDIT 同生命周期
-            delete ctx_[i];
-            ctx_[i] = nullptr;
-            edits_[i] = nullptr;
+ const int bh = S(42), by = rc.bottom - S(24) - bh, bw = S(116);
+        addButton(L"取消", IDCANCEL, dk::Btn::Secondary, rc.right - S(kPad) - bw * 2 - S(12), by,
+    bw, bh);
+        addButton(L"配对", kBtnPair, dk::Btn::Primary, rc.right - S(kPad) - bw, by, bw, bh);
+ setDefault(kBtnPair);
+        SetFocus(edits_[0]);
+    }
+
+    void buildPaired() {
+ const int n = (int)devices_.size();
+ setClientHeight(kCaption + 40 + n * kRowPitch + 30 + 42 + 24);
+ RECT rc;
+ GetClientRect(hwnd(), &rc);
+        const int x0 = S(kPad), x1 = rc.right - S(kPad);
+        const int bw = (x1 - x0 - S(10)) / 2, bh = S(38);
+ for (int i = 0; i < n; ++i) {
+     const int by = S((float)(kCaption + 40 + i * kRowPitch + 56));
+     addButton(L"解除配对", kBtnDeviceBase + 2 * i, dk::Btn::Secondary, x0, by, bw, bh);
+     addButton(L"清除 Wi-Fi", kBtnDeviceBase + 2 * i + 1, dk::Btn::Secondary, x1 - bw, by, bw,
+        bh);
         }
-        unpair_btns_.clear();
-        wifi_btns_.clear();
-        HINSTANCE hi = GetModuleHandleW(nullptr);
-        const float s = s_;
-        RECT client{};
-        GetClientRect(hwnd_, &client);
-        const int W = client.right;
+        const int dw = S(116), dh = S(42);
+        HWND done = addButton(L"完成", IDCANCEL, dk::Btn::Primary, x1 - dw, rc.bottom - S(24) - dh,
+  dw, dh);
+        setDefault(IDCANCEL);
+ SetFocus(done);
+    }
 
-        if (mode_ == Mode::kInput) {
-            // 垂直居中布局：内容块 = 提示24 + 隙14 + 格58 + 隙18 + 钮34 = 148，
-            // 窗口高 228（上下各留 40），起始 y 按客户区实测居中
-            setHeight(228);
-            RECT crc;
-            GetClientRect(hwnd_, &crc);
-            const int top = ((crc.bottom - crc.top) - (int)(148 * s)) / 2;
-            label(hi, L"输入设备屏幕上的 6 位配对码", font_text_, kTextDim,
-                  (int)(16 * s), top, W - (int)(32 * s), (int)(24 * s));
-            const int bw = (int)(44 * s), bh = (int)(58 * s),
-                      gap = (int)(12 * s);
-            const int x0 = (W - (kBoxes * bw + (kBoxes - 1) * gap)) / 2,
-                      by = top + (int)(38 * s);
-            // 单行 EDIT 在过高的控件里文字顶部对齐（Win32 固有行为），
-            // 故格框 58px 由 WM_PAINT 自绘，EDIT 内嵌 42px（贴近字号）
-            // 垂直居中放置——文字即视觉居中；整格底色在 WM_PAINT 统一填充
-            const int eh = (int)(42 * s);
-            for (int i = 0; i < kBoxes; ++i) {
-                const int ex = x0 + i * (bw + gap);
-                box_rc_[i] = {ex, by, ex + bw, by + bh};  // 自绘格框（含边线）
-                edits_[i] = CreateWindowExW(
-                    0, L"EDIT", L"",
-                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_CENTER,
-                    ex, by + (bh - eh) / 2, bw, eh, hwnd_,
-                    (HMENU)(INT_PTR)(kEditIdBase + i), hi, nullptr);
-                SendMessageW(edits_[i], WM_SETFONT, (WPARAM)font_digit_, TRUE);
-                SendMessageW(edits_[i], EM_LIMITTEXT, 1, 0);
-                ctx_[i] = new BoxCtx{this, i};
-                SetWindowSubclass(edits_[i], &PairDialog::editProc, 1,
-                                  (DWORD_PTR)ctx_[i]);
-            }
-            const int bwid = (int)(110 * s), bhei = (int)(34 * s),
-                      bgap = (int)(16 * s);
-            const int bx = (W - (bwid * 2 + bgap)) / 2,
-                      bty = top + (int)(114 * s);
-            btn_ok_ = button(hi, L"确定", IDOK, true, bx, bty, bwid, bhei);
-            button(hi, L"取消", IDCANCEL, false, bx + bwid + bgap, bty, bwid,
-                   bhei);
-            SetFocus(edits_[0]);
-        } else {
-            // 设备名称独占一行；操作另起一行，所有坐标统一按 DPI 缩放。
-            const int n = (int)devices_.size();
-            const int H = 76 + n * 94 + 64;
-            setHeight(H);
-            label(hi, L"\x2713  已配对成功", font_title_, kGreen,
-                  (int)(24 * s), (int)(24 * s), W - (int)(48 * s),
-                  (int)(30 * s));
-            const int bwid = (int)(132 * s), bhei = (int)(34 * s),
-                      bgap = (int)(10 * s);
-            const int bx = (W - bwid * 2 - bgap) / 2;
-            for (int i = 0; i < n; ++i) {
-                const int ry = (int)((76 + 94 * i) * s);
-                const auto name = utf8(devices_[i].label.empty()
-                                           ? devices_[i].id : devices_[i].label);
-                HWND name_label = label(hi, name.c_str(), font_text_, kText,
-                      (int)(24 * s), ry, W - (int)(48 * s), (int)(26 * s));
-                SetWindowLongPtrW(name_label, GWL_STYLE,
-                    GetWindowLongPtrW(name_label, GWL_STYLE) | SS_ENDELLIPSIS);
-                const int button_y = ry + (int)(34 * s);
-                HWND b1 = button(hi, L"解除配对", kBtnUnpairBase + 2 * i,
-                                 false, bx, button_y, bwid, bhei);
-                HWND b2 = button(hi, L"清除 Wi-Fi", kBtnUnpairBase + 2 * i + 1,
-                                 false, bx + bwid + bgap, button_y, bwid, bhei);
-                unpair_btns_.push_back(b1);
-                wifi_btns_.push_back(b2);
-            }
-            const int cx = (W - bwid) / 2;
-            HWND close = button(hi, L"关闭", IDCANCEL, true, cx,
-                                (int)((H - 58) * s), bwid, bhei);
-            SetFocus(close);
+    void paintContent(HDC dc, Gdiplus::Graphics& g) override {
+ RECT rc;
+        GetClientRect(hwnd(), &rc);
+ const int x0 = S(kPad), x1 = rc.right - S(kPad);
+ if (input_mode_) {
+     RECT lede = {x0, S(56), x1, S(56) + S(24)};
+     dk::drawText(dc, L"输入硬件屏上显示的 6 位配对码。", lede, f_text_, dk::kDim);
+     if (!status_.empty()) {
+  RECT sr = {x0, S(176), x1, S(176) + S(40)};
+  dk::drawText(dc, status_, sr, f_small_, dk::kCoral, DT_LEFT | DT_WORDBREAK);
+     }
+     return;
         }
-        InvalidateRect(hwnd_, nullptr, TRUE);
+ RECT lede = {x0, S(56), x1, S(56) + S(24)};
+        dk::drawText(dc, L"这些硬件屏已经连上这台电脑。", lede, f_text_, dk::kDim);
+ for (int i = 0; i < (int)devices_.size(); ++i) {
+     const int top = S((float)(kCaption + 40 + i * kRowPitch));
+     RECT tile = {x0, top, x1, top + S(48)};
+     dk::roundRect(g, tile, (float)S(14), dk::kTileTop, dk::kTileBot, true);
+     // 状态灯：实心点 + 外圈（与设备屏"忙碌"的灯同形，表示连着）
+     const float cx = (float)(x0 + S(22)), cy = (float)(top + S(24));
+     dk::ring(g, cx, cy, (float)S(8), (float)S(1.4f), dk::kInk, 110);
+     dk::circle(g, cx, cy, (float)S(4.5f), dk::kInk);
+     const std::string& name = devices_[i].label.empty() ? devices_[i].id : devices_[i].label;
+     RECT nr = {x0 + S(42), top, x1 - S(14), top + S(48)};
+     dk::drawText(dc, dk::widen(name), nr, f_text_, dk::kPaper,
+    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+ }
+        const int note_top = S((float)(kCaption + 40 + (int)devices_.size() * kRowPitch));
+        RECT note = {x0, note_top, x1, note_top + S(22)};
+ dk::drawText(dc, L"清除 Wi-Fi 后，硬件屏会回到配网热点，需要重新联网。", note, f_small_,
+       dk::kFaint);
     }
 
-    // 调整客户区高度后，在当前显示器工作区居中。
-    void setHeight(int h) {
-        RECT rc, crc;
-        GetWindowRect(hwnd_, &rc);
-        GetClientRect(hwnd_, &crc);
-        const int nc = (rc.bottom - rc.top) - (crc.bottom - crc.top);
-        const int width = rc.right - rc.left, height = (int)(h * s_) + nc;
-        MONITORINFO mi{sizeof(mi)};
-        GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &mi);
-        SetWindowPos(hwnd_, nullptr,
-                     mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - width) / 2,
-                     mi.rcWork.top + ((mi.rcWork.bottom - mi.rcWork.top) - height) / 2,
-                     width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    COLORREF editColor(HWND) override { return dk::kInk; }
+
+    void setStatus(const wchar_t* text) {
+        status_ = text;
+ setTone(status_.empty() ? dk::Tone::Info : dk::Tone::Alert);
+ repaint();
     }
 
-    HWND label(HINSTANCE hi, const wchar_t* text, HFONT f, COLORREF col,
-               int x, int y, int w, int h) {
-        HWND s = CreateWindowExW(0, L"STATIC", text,
-                                 WS_CHILD | WS_VISIBLE | SS_CENTER, x, y, w, h,
-                                 hwnd_, nullptr, hi, nullptr);
-        SendMessageW(s, WM_SETFONT, (WPARAM)f, TRUE);
-        SetWindowLongPtrW(s, GWLP_USERDATA, (LONG_PTR)col);  // 文字色（CTLCCOLOR 取）
-        return s;
-    }
-
-    HWND button(HINSTANCE hi, const wchar_t* text, int id, bool primary,
-                int x, int y, int w, int h) {
-        HWND b = CreateWindowExW(
-            0, L"BUTTON", text,
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, x, y, w, h,
-            hwnd_, (HMENU)(INT_PTR)id, hi, nullptr);
-        SendMessageW(b, WM_SETFONT, (WPARAM)font_btn_, TRUE);
-        SetWindowLongPtrW(b, GWLP_USERDATA, primary ? 1 : 0);  // 样式标记
-        return b;
-    }
-
-    void onOk() {  // 输码态确定
+    void onPair() {
         std::string code;
-        int first_empty = -1;
+ int first_empty = -1;
         for (int i = 0; i < kBoxes; ++i) {
-            wchar_t buf[4] = {};
-            GetWindowTextW(edits_[i], buf, 4);
-            if (!buf[0]) {
-                if (first_empty < 0) first_empty = i;
-            } else {
-                code += (char)buf[0];
-            }
+     const std::wstring t = textOf(edits_[i]);
+     if (t.empty()) { if (first_empty < 0) first_empty = i; }
+     else code += (char)t[0];
+ }
+        if (first_empty >= 0) {
+     setStatus(L"配对码是 6 位数字，还没有填完。");
+     SetFocus(edits_[first_empty]);
+     return;
         }
-        if (code.size() != kBoxes || first_empty >= 0) {
-            MessageBeep(MB_ICONWARNING);  // 未填满：蜂鸣 + 定位第一个空格
-            SetFocus(edits_[first_empty >= 0 ? first_empty : 0]);
-            return;
-        }
-        bool ok = host_->confirm ? host_->confirm(code) : false;
+ const bool ok = host_->confirm ? host_->confirm(code) : false;
         if (!ok) {
-            MessageBoxW(hwnd_, L"配对码不匹配，请核对设备屏幕上的配对码",
-                        L"Duty On", MB_OK | MB_ICONWARNING);
-            for (int i = 0; i < kBoxes; ++i) SetWindowTextW(edits_[i], L"");
-            SetFocus(edits_[0]);
-            return;
+     for (int i = 0; i < kBoxes; ++i) SetWindowTextW(edits_[i], L"");
+     setStatus(L"配对码不对。请对照硬件屏上的数字再输一次；硬件屏和电脑要在同一个 Wi-Fi 下。");
+     SetFocus(edits_[0]);
+     return;
         }
-        // 成功：刷新已配对列表并切换到已配对态
         devices_ = host_->paired ? host_->paired() : std::vector<Device>();
-        mode_ = Mode::kPaired;
+        input_mode_ = devices_.empty();
         build();
     }
 
-    void onUnpair(int idx) {  // 解除配对（行按钮）
+    // 设备行按钮：第一次点只"上膛"，三秒内再点才执行
+    void onDeviceButton(int id, HWND ctrl) {
+        const int idx = (id - kBtnDeviceBase) / 2;
+ const bool wifi = (id - kBtnDeviceBase) % 2 == 1;
         if (idx < 0 || idx >= (int)devices_.size()) return;
-        if (host_->unpair) host_->unpair(devices_[idx].id);
+        if (armed_id_ != id) {
+     disarm();
+     armed_id_ = id;
+     SetWindowLongPtrW(ctrl, GWLP_USERDATA, (LONG_PTR)dk::Btn::Danger);
+     SetWindowTextW(ctrl, wifi ? L"确认清除" : L"确认解除");
+     InvalidateRect(ctrl, nullptr, FALSE);
+     SetTimer(hwnd(), kDisarmTimer, 3000, nullptr);
+     return;
+        }
+ KillTimer(hwnd(), kDisarmTimer);
+        armed_id_ = 0;
+        const std::string dev = devices_[idx].id;
+ if (wifi) { if (host_->reset_wifi) host_->reset_wifi(dev); }
+ else if (host_->unpair) host_->unpair(dev);
         devices_ = host_->paired ? host_->paired() : std::vector<Device>();
-        if (devices_.empty()) mode_ = Mode::kInput;  // 全解除 → 回输码态
-        build();
+        input_mode_ = devices_.empty();  // 全部解除 → 回到输码页
+ build();
+    }
+    void disarm() {
+        if (!armed_id_) return;
+ if (HWND b = GetDlgItem(hwnd(), armed_id_)) {
+     SetWindowLongPtrW(b, GWLP_USERDATA, (LONG_PTR)dk::Btn::Secondary);
+     SetWindowTextW(b, (armed_id_ - kBtnDeviceBase) % 2 == 1 ? L"清除 Wi-Fi" : L"解除配对");
+     InvalidateRect(b, nullptr, FALSE);
+        }
+ armed_id_ = 0;
     }
 
-    void onResetWifi(int idx) {  // 清除设备 Wi-Fi（重新配网）
-        if (idx < 0 || idx >= (int)devices_.size()) return;
-        if (host_->reset_wifi) host_->reset_wifi(devices_[idx].id);
-        devices_ = host_->paired ? host_->paired() : std::vector<Device>();
-        build();
+    void onTimer(UINT_PTR id) override {
+        if (id != kDisarmTimer) return;
+        KillTimer(hwnd(), kDisarmTimer);
+ disarm();
     }
 
-    void finish() { done_ = true; }
-
-    HFONT makeFont(int h, int weight) const {
-        return CreateFontW(-(int)(h * s_), 0, 0, 0, weight, FALSE, FALSE, FALSE,
-                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                           CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                           DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+    void onCommand(int id, int code, HWND ctrl) override {
+        if (code == EN_CHANGE && id >= kEditIdBase && id < kEditIdBase + kBoxes) {
+     // 填入一位 → 跳下一格；开始重输就撤掉错误提示
+     if (!status_.empty()) setStatus(L"");
+     if (!textOf(edits_[id - kEditIdBase]).empty() && id < kEditIdBase + kBoxes - 1)
+  SetFocus(edits_[id - kEditIdBase + 1]);
+     return;
+ }
+        if (code != BN_CLICKED) return;
+        if (id == IDCANCEL) close();
+        else if (id == kBtnPair && input_mode_) onPair();
+ else if (id >= kBtnDeviceBase && !input_mode_) onDeviceButton(id, ctrl);
     }
 
-    // UTF-8 → UTF-16（设备 label）
-    static std::wstring utf8(const std::string& u8) {
-        if (u8.empty()) return std::wstring();
-        const int n = MultiByteToWideChar(CP_UTF8, 0, u8.data(), (int)u8.size(), nullptr,
-                                          0);
-        std::wstring w((size_t)n, L'\0');
-        if (n) MultiByteToWideChar(CP_UTF8, 0, u8.data(), (int)u8.size(), w.data(), n);
-        return w;
+    // 点格子的边缘（EDIT 之外的部分）也聚焦对应格
+    void onClick(POINT pt) override {
+        if (!input_mode_) return;
+        for (int i = 0; i < kBoxes; ++i) {
+     if (!edits_[i]) continue;
+     RECT r;
+     GetWindowRect(edits_[i], &r);
+     MapWindowPoints(nullptr, hwnd(), (LPPOINT)&r, 2);
+     InflateRect(&r, S(4), S(12));
+     if (PtInRect(&r, pt)) { SetFocus(edits_[i]); break; }
+        }
     }
 
-    // ---- 输入框子类过程：数字填充/跳格导航/粘贴取数字 ----
-    static LRESULT CALLBACK editProc(HWND h, UINT m, WPARAM w, LPARAM l,
-                                     UINT_PTR, DWORD_PTR dw) {
+    // ---- 输入格子类过程：只收数字 / 跳格 / 粘贴整串 ----
+    static LRESULT CALLBACK editProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR dw) {
         BoxCtx* c = (BoxCtx*)dw;
         PairDialog* d = c->dlg;
-        switch (m) {
-        case WM_GETDLGCODE:  // 接管全部按键：IsDialogMessage 不代吃 Enter/Esc/方向键
-            return DLGC_WANTALLKEYS | DLGC_WANTCHARS | DLGC_WANTARROWS |
-                   DLGC_WANTTAB;
-        case WM_CHAR: {
-            const wchar_t ch = (wchar_t)w;
-            if (ch >= L'0' && ch <= L'9') {
-                wchar_t one[2] = {ch, 0};
-                SetWindowTextW(h, one);  // 覆盖式填入；跳格由 EN_CHANGE 处理
-                return 0;
-            }
-            if (ch == VK_BACK) {
-                wchar_t buf[4] = {};
-                GetWindowTextW(h, buf, 4);
-                if (!buf[0] && c->idx > 0) {  // 当前格已空：回退上一格并清空
-                    SetWindowTextW(d->edits_[c->idx - 1], L"");
-                    SetFocus(d->edits_[c->idx - 1]);
-                    return 0;
-                }
-                break;  // 当前格有字：默认处理（删除）
-            }
-            if (ch == L'\r') {
-                SendMessageW(d->hwnd_, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED),
-                             0);
-                return 0;
-            }
-            if (ch == VK_ESCAPE) {
-                SendMessageW(d->hwnd_, WM_COMMAND,
-                             MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
-                return 0;
-            }
-            return 0;  // 其余字符全部吞掉，只收数字
+ switch (m) {
+     case WM_GETDLGCODE:  // 方向键、Tab 由本格处理；Enter/Esc 交回对话框
+  return DLGC_WANTCHARS | DLGC_WANTARROWS;
+     case WM_CHAR: {
+  const wchar_t ch = (wchar_t)w;
+  if (ch >= L'0' && ch <= L'9') {
+      const wchar_t one[2] = {ch, 0};
+      SetWindowTextW(h, one);  // 覆盖式填入；跳格由 EN_CHANGE 处理
+      return 0;
+  }
+  if (ch == VK_BACK) {
+      if (d->textOf(h).empty() && c->idx > 0) {  // 空格上退格：回上一格并清空
+   SetWindowTextW(d->edits_[c->idx - 1], L"");
+          SetFocus(d->edits_[c->idx - 1]);
+   return 0;
+      }
+      break;
+  }
+  return 0;  // 其余字符不收
+     }
+     case WM_KEYDOWN:
+  if (w == VK_LEFT && c->idx > 0) { SetFocus(d->edits_[c->idx - 1]); return 0; }
+  if (w == VK_RIGHT && c->idx < kBoxes - 1) { SetFocus(d->edits_[c->idx + 1]); return 0; }
+         break;
+     case WM_SETFOCUS:  // 聚焦即全选：直接输入就是覆盖
+  PostMessageW(h, EM_SETSEL, 0, -1);
+         break;
+     case WM_PASTE: {  // 粘贴：剪贴板里的数字从当前格起依次填入
+  std::wstring digits;
+  if (OpenClipboard(h)) {
+      if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
+   if (const wchar_t* t = (const wchar_t*)GlobalLock(data)) {
+       for (; *t; ++t)
+    if (*t >= L'0' && *t <= L'9') digits += *t;
+       GlobalUnlock(data);
+   }
+      }
+      CloseClipboard();
+  }
+  for (size_t k = 0; k < digits.size() && c->idx + (int)k < kBoxes; ++k) {
+      const wchar_t one[2] = {digits[k], 0};
+      SetWindowTextW(d->edits_[c->idx + (int)k], one);
+  }
+         return 0;
+     }
         }
-        case WM_KEYDOWN:
-            if (w == VK_TAB) {  // Shift+Tab 反向；末格→确定
-                const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-                if (!shift && c->idx < kBoxes - 1)
-                    SetFocus(d->edits_[c->idx + 1]);
-                else if (!shift && d->btn_ok_)
-                    SetFocus(d->btn_ok_);
-                else if (c->idx > 0)
-                    SetFocus(d->edits_[c->idx - 1]);
-                return 0;
-            }
-            if (w == VK_LEFT && c->idx > 0) {
-                SetFocus(d->edits_[c->idx - 1]);
-                return 0;
-            }
-            if (w == VK_RIGHT && c->idx < kBoxes - 1) {
-                SetFocus(d->edits_[c->idx + 1]);
-                return 0;
-            }
-            break;
-        case WM_PASTE: {  // 粘贴：取剪贴板文本里的第一个数字填入当前格
-            wchar_t digit = 0;
-            if (OpenClipboard(h)) {
-                HANDLE data = GetClipboardData(CF_UNICODETEXT);
-                if (data) {
-                    const wchar_t* t = (const wchar_t*)GlobalLock(data);
-                    if (t) {
-                        for (; *t; ++t)
-                            if (*t >= L'0' && *t <= L'9') { digit = *t; break; }
-                        GlobalUnlock(data);
-                    }
-                }
-                CloseClipboard();
-            }
-            if (digit) {
-                wchar_t one[2] = {digit, 0};
-                SetWindowTextW(h, one);
-            }
-            return 0;
-        }
-        }
-        return DefSubclassProc(h, m, w, l);
+ return DefSubclassProc(h, m, w, l);
     }
 
-    // ---- owner-draw 按钮绘制：圆角 8px，主/次两档配色 ----
-    void drawButton(const DRAWITEMSTRUCT* d) {
-        const bool primary = GetWindowLongPtrW(d->hwndItem, GWLP_USERDATA) == 1;
-        const bool down = (d->itemState & ODS_SELECTED) != 0;
-        RECT r = d->rcItem;
-        HDC dc = d->hDC;
-        // Owner-draw still receives the system button background at the corners.
-        // Paint the full rectangle before drawing the rounded button.
-        FillRect(dc, &r, bg_brush_);
-        // 底色
-        HBRUSH bg = CreateSolidBrush(down ? (primary ? kPrimaryDown : kBtnDown)
-                                          : (primary ? kPrimary : kBtnBg));
-        HPEN pen = CreatePen(PS_SOLID, 1, primary ? (down ? kPrimaryDown : kPrimary)
-                                                 : kBtnBorder);
-        HGDIOBJ ob = SelectObject(dc, bg);
-        HGDIOBJ op = SelectObject(dc, pen);
-        const int rad = (int)(8 * s_);
-        RoundRect(dc, r.left, r.top, r.right, r.bottom, rad * 2, rad * 2);
-        SelectObject(dc, op);
-        SelectObject(dc, ob);
-        DeleteObject(pen);
-        DeleteObject(bg);
-        // 文字
-        wchar_t text[64] = {};
-        GetWindowTextW(d->hwndItem, text, 64);
-        SetTextColor(dc, primary ? RGB(255, 255, 255) : kAccent);
-        SetBkMode(dc, TRANSPARENT);
-        HGDIOBJ of = SelectObject(dc, font_btn_);
-        RECT tr = r;
-        DrawTextW(dc, text, -1, &tr,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        SelectObject(dc, of);
-        // 焦点框（键盘导航可见性）
-        if (d->itemState & ODS_FOCUS) {
-            RECT fr = r;
-            InflateRect(&fr, -3, -3);
-            DrawFocusRect(dc, &fr);
-        }
-    }
-
-    // ---- 主窗口过程 ----
-    static LRESULT CALLBACK wndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-        PairDialog* self = nullptr;
-        if (m == WM_CREATE) {
-            auto* cs = (LPCREATESTRUCTW)l;
-            SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
-        } else {
-            self = (PairDialog*)GetWindowLongPtrW(h, GWLP_USERDATA);
-        }
-        switch (m) {
-        case WM_ERASEBKGND: {  // 深色底
-            HDC dc = (HDC)w;
-            RECT rc;
-            GetClientRect(h, &rc);
-            HBRUSH bg = CreateSolidBrush(kBg);
-            FillRect(dc, &rc, bg);
-            DeleteObject(bg);
-            return 1;
-        }
-        case WM_PAINT: {  // 输码态：画 6 格框（底色 + 边线，EDIT 内嵌其中）
-            PAINTSTRUCT ps;
-            HDC dc = BeginPaint(h, &ps);
-            if (self && self->mode_ == Mode::kInput) {
-                HBRUSH fill = CreateSolidBrush(kEditBg);
-                for (int i = 0; i < kBoxes; ++i) {
-                    if (!self->edits_[i]) continue;
-                    FillRect(dc, &self->box_rc_[i], fill);
-                }
-                DeleteObject(fill);
-                HPEN pen = CreatePen(PS_SOLID, 1, kEditBorder);
-                HGDIOBJ op = SelectObject(dc, pen);
-                HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
-                for (int i = 0; i < kBoxes; ++i) {
-                    if (!self->edits_[i]) continue;
-                    Rectangle(dc, self->box_rc_[i].left, self->box_rc_[i].top,
-                              self->box_rc_[i].right, self->box_rc_[i].bottom);
-                }
-                SelectObject(dc, ob);
-                SelectObject(dc, op);
-                DeleteObject(pen);
-            }
-            EndPaint(h, &ps);
-            return 0;
-        }
-        case WM_LBUTTONDOWN: {  // 点击格框（含 EDIT 外的 8px 上下边）聚焦对应格
-            if (self && self->mode_ == Mode::kInput) {
-                const POINT pt{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
-                for (int i = 0; i < kBoxes; ++i) {
-                    if (self->edits_[i] && PtInRect(&self->box_rc_[i], pt)) {
-                        SetFocus(self->edits_[i]);
-                        break;
-                    }
-                }
-            }
-            break;
-        }
-        case WM_CTLCOLORSTATIC: {  // STATIC 深底 + 各自文字色（GWLP_USERDATA）
-            HDC dc = (HDC)w;
-            HWND ctrl = (HWND)l;
-            SetTextColor(dc, (COLORREF)GetWindowLongPtrW(ctrl, GWLP_USERDATA));
-            SetBkColor(dc, kBg);
-            return (LRESULT)self->bg_brush_;
-        }
-        case WM_CTLCOLOREDIT: {  // EDIT 深底白字
-            HDC dc = (HDC)w;
-            SetTextColor(dc, kText);
-            SetBkColor(dc, kEditBg);
-            return (LRESULT)self->edit_brush_;
-        }
-        case WM_DRAWITEM: {
-            if (self) self->drawButton((const DRAWITEMSTRUCT*)l);
-            return TRUE;
-        }
-        case WM_COMMAND: {
-            const int id = LOWORD(w), code = HIWORD(w);
-            if (code == BN_CLICKED) {
-                if (id == IDOK && self && self->mode_ == Mode::kInput) {
-                    self->onOk();
-                    return 0;
-                }
-                if (id == IDCANCEL) {  // 取消/关闭
-                    if (self) self->finish();
-                    return 0;
-                }
-                if (self && id >= kBtnUnpairBase) {  // 已配对设备行按钮
-                    const int idx = (id - kBtnUnpairBase) / 2;
-                    if ((id - kBtnUnpairBase) % 2 == 0)
-                        self->onUnpair(idx);
-                    else
-                        self->onResetWifi(idx);
-                    return 0;
-                }
-            }
-            // 输码格填入 1 位 → 自动跳下一格
-            if (code == EN_CHANGE && id >= kEditIdBase &&
-                id < kEditIdBase + kBoxes && self) {
-                wchar_t buf[4] = {};
-                GetWindowTextW(self->edits_[id - kEditIdBase], buf, 4);
-                if (buf[0] && id < kEditIdBase + kBoxes - 1)
-                    SetFocus(self->edits_[id - kEditIdBase + 1]);
-                return 0;
-            }
-            break;
-        }
-        case WM_CLOSE:  // 标题栏 X / Alt+F4 = 关闭
-            if (self) self->finish();
-            return 0;
-        }
-        return DefWindowProcW(h, m, w, l);
-    }
-
-    HWND hwnd_ = nullptr;
-    HWND edits_[kBoxes] = {};
-    HWND btn_ok_ = nullptr;
-    RECT box_rc_[kBoxes] = {};  // 输码格自绘框（EDIT 内嵌其中）
-    std::vector<HWND> unpair_btns_;
-    std::vector<HWND> wifi_btns_;
-    HFONT font_title_ = nullptr;
-    HFONT font_text_ = nullptr;
-    HFONT font_digit_ = nullptr;
-    HFONT font_btn_ = nullptr;
-    HBRUSH bg_brush_ = nullptr;
-    HBRUSH edit_brush_ = nullptr;
-    BoxCtx* ctx_[kBoxes] = {};
+    HWND edits_[kBoxes] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    BoxCtx ctx_[kBoxes];
+    HFONT f_digit_ = nullptr;
     const Host* host_ = nullptr;
     std::vector<Device> devices_;
-    Mode mode_ = Mode::kInput;
-    float s_ = 1.0f;    // DPI 缩放
-    bool done_ = false;
+    std::wstring status_;
+    int armed_id_ = 0;
+    bool input_mode_ = true;
 };
 
-} // namespace dutyon
+}  // namespace dutyon
 
-#endif // _WIN32
+#endif  // _WIN32

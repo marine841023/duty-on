@@ -85,6 +85,17 @@ inline const char* const kCodexHookEvents[] = {
 };
 constexpr int kCodexHookEventsCount = sizeof(kCodexHookEvents) / sizeof(kCodexHookEvents[0]);
 
+// 写入 Claude Code settings.json（~/.claude 或 $CLAUDE_CONFIG_DIR）的事件。
+// 与 Trae 同为 Claude 风格 schema，无需归一化。StopFailure = 回合因 API 错误
+// 结束（按 Stop 处理）；子代理内的工具事件带 agent_id，与 SubagentStart/Stop
+// 配对。用户按 Esc 中断不触发任何 hook，由 idle_prompt 通知或超时兜底。
+inline const char* const kClaudeHookEvents[] = {
+    "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+    "PermissionRequest", "Notification", "SubagentStart", "SubagentStop", "PreCompact",
+    "PostCompact", "Stop", "StopFailure", "SessionEnd",
+};
+constexpr int kClaudeHookEventsCount = sizeof(kClaudeHookEvents) / sizeof(kClaudeHookEvents[0]);
+
 // OpenCode 插件目录（~/.config/opencode/plugins，无配置式 hook）
 constexpr const char* kOpencodePluginSubdir = ".config/opencode/plugins";
 constexpr const char* kOpencodePluginFilename = "dutyon-bridge.js";
@@ -123,6 +134,8 @@ constexpr int kNotificationCompleteTypesCount = sizeof(kNotificationCompleteType
 inline const char* const kNotificationConfirmTypes[] = {
     "permission_request", "permission_prompt", "confirmation", "input_needed",
     "document_review", "ask_user_question", "browser_interaction",
+    // Claude Code：MCP 服务器请求用户输入 / 后台代理等待输入
+    "elicitation_dialog", "agent_needs_input",
 };
 constexpr int kNotificationConfirmTypesCount = sizeof(kNotificationConfirmTypes) / sizeof(kNotificationConfirmTypes[0]);
 

@@ -39,6 +39,33 @@ std::string asciiLower(const std::string& s) {
 // Notification 消息里的 shell 命令模式：AI 请求授权运行命令时，消息里通常
 // 带命令名（PowerShell Verb-Noun 形如 "Remove-Item"，或 .exe 调用）。
 // 对应 Rust: (?i)\b[A-Z][a-z]+-[A-Z]\w+\b|\b\w+\.exe\b
+// 目录名是随机 ID（Qoder 无工作区对话的临时目录形如 Documents/Qoder/<日期>/
+// b8f041b1）：纯十六进制的 8/16/32 位串或完整 UUID。这种名字对人没有意义。
+bool looksLikeRandomId(const std::string& name) {
+    const size_t n = name.size();
+    if (n != 8 && n != 16 && n != 32 && n != 36) return false;
+    bool digit = false;
+    for (size_t i = 0; i < n; ++i) {
+        const char c = name[i];
+        const bool dash = n == 36 && (i == 8 || i == 13 || i == 18 || i == 23);
+        if (dash ? c != '-' : !isxdigit((unsigned char)c)) return false;
+        if (c >= '0' && c <= '9') digit = true;
+    }
+    return digit;
+}
+
+const char* ideDisplayName(IdeKind k) {
+    switch (k) {
+        case IdeKind::Trae: return "Trae";
+        case IdeKind::Qoder: return "Qoder";
+        case IdeKind::Cursor: return "Cursor";
+        case IdeKind::Codex: return "Codex";
+        case IdeKind::OpenCode: return "OpenCode";
+        case IdeKind::Claude: return "Claude";
+    }
+    return "AI";
+}
+
 bool matchesCmdPattern(const std::string& msg) {
     static const std::regex pattern(R"(\b[A-Z][a-z]+-[A-Z]\w+\b|\b\w+\.exe\b)",
                                     std::regex::icase);
@@ -82,6 +109,7 @@ std::optional<HookEvent> HookEvent::fromJson(const nlohmann::json& j) {
     if (!containsStr(bc::kHookEvents, bc::kHookEventsCount, name) &&
         !containsStr(bc::kQoderHookEvents, bc::kQoderHookEventsCount, name) &&
         !containsStr(bc::kCodexHookEvents, bc::kCodexHookEventsCount, name) &&
+        !containsStr(bc::kClaudeHookEvents, bc::kClaudeHookEventsCount, name) &&
         name != "PermissionResolved") return std::nullopt;
     ev.project_path = read_str("project_path");
     ev.project_name = read_str("project_name");
@@ -172,6 +200,11 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
     const bool codex = ev.ide.value_or(session.ide.value_or(IdeKind::Trae)) == IdeKind::Codex;
     if (codex && !restart && !child_lifecycle && ev.turn_id && actor.turn_id &&
         ev.turn_id != actor.turn_id) return;
+    // Claude Code runs hooks synchronously and in order, so a tool call after
+    // Stop is not a late event: background agents, scheduled wake-ups and
+    // asyncRewake hooks start a new turn without a UserPromptSubmit.
+    const bool claude = ev.ide.value_or(session.ide.value_or(IdeKind::Trae)) == IdeKind::Claude;
+    if (claude && actor.finished && name == "PreToolUse") actor = Actor{};
     if (actor.finished && !restart &&
         (actor.confirmations.empty() || (name != "PermissionResolved" && name != "PostToolUseFailure" &&
                                         name != "Interrupt" && name != "SessionEnd"))) return;
@@ -187,6 +220,9 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
         session.project_name = path.substr(path.find_last_of('/') + 1);
     }
     if (ev.ide) session.ide = ev.ide;
+    // 随机 ID 目录不是项目：显示成"<工具> 对话"（去重仍按完整路径，互不合并）
+    if (looksLikeRandomId(session.project_name))
+        session.project_name = std::string(ideDisplayName(session.ide.value_or(IdeKind::Trae))) + " 对话";
     session.last_event = name;
     session.last_event_time = now;
     last_event_at_ = now;
@@ -209,6 +245,15 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
         containsStr(bc::kConfirmTools, bc::kConfirmToolsCount, *ev.tool_name);
     auto add_confirmation = [&]() {
         if (ev.request_id && actor.resolved_requests.count(*ev.request_id)) return;
+        // Claude Code reports one prompt up to three times (ask-user PreToolUse,
+        // PermissionRequest, permission_prompt Notification) and not all carry
+        // tool_use_id. Do not count the same dialog as a new request.
+        if (claude && !ev.tool_use_id && !ev.request_id) {
+            if (name == "Notification" && !actor.confirmations.empty()) return;
+            if (ev.tool_name)
+                for (const auto& [key, c] : actor.confirmations)
+                    if (c.message == "需要确认: " + *ev.tool_name) return;
+        }
         std::optional<std::string> bound_tool;
         if (ev.tool_use_id || ev.tool_name) bound_tool = tool_key;
         else if (!ev.request_id && actor.pending_tools.size() == 1)
@@ -222,6 +267,11 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
             last_alert_time_ = now;
         }
     };
+    // Claude prompts without a call ID are bound by tool name or not at all;
+    // the tool finishing is the only answer signal Claude Code sends.
+    auto claude_unpaired = [&](const Confirmation& c) {
+        return claude && (!c.tool_key || (ev.tool_name && *c.tool_key == "name:" + *ev.tool_name));
+    };
     auto finish_tool = [&]() {
         auto pending = actor.pending_tools.find(tool_key);
         if (pending != actor.pending_tools.end()) actor.pending_tools.erase(pending);
@@ -231,7 +281,7 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
             actor.completed_tools.insert(tool_key);
         }
         for (auto c = actor.confirmations.begin(); c != actor.confirmations.end();) {
-            if (c->second.tool_key == tool_key &&
+            if ((c->second.tool_key == tool_key || claude_unpaired(c->second)) &&
                 (!c->second.asynchronous || name == "PostToolUseFailure")) c = actor.confirmations.erase(c);
             else ++c;
         }
@@ -272,6 +322,13 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
         // exact call completing makes it stale; an empty ledger is not evidence.
         if (needs_confirmation && !(identified_tool && actor.completed_tools.count(tool_key))) {
             add_confirmation();
+        } else if (complete && claude && actor_id.empty() &&
+                   ev.notification_type == std::string("idle_prompt")) {
+            // Claude Code: the prompt has sat idle for a minute, so the main
+            // turn is over. This is the only signal after an Esc interrupt or a
+            // dismissed permission dialog, neither of which fires Stop.
+            actor = Actor{};
+            actor.finished = true;
         } else if (complete) {
             // Completion notices must not clear a concurrent permission request.
             if (actor.pending_tools.empty() && actor.confirmations.empty()) actor.status = SessionStatus::Idle;
@@ -290,7 +347,7 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
             }
         }
         actor.status = SessionStatus::Thinking;
-    } else if (name == "Stop" || name == "Interrupt" || name == "SessionEnd" ||
+    } else if (name == "Stop" || name == "StopFailure" || name == "Interrupt" || name == "SessionEnd" ||
                (name == "SubagentStop" && !actor_id.empty())) {
         // Ending an assistant turn does not answer an asynchronous question.
         // Explicit cancellation/session end still clears the entire actor.
@@ -619,16 +676,23 @@ void StateManager::syncDetectedWindows(const std::vector<DetectedProject>& detec
             if (it == sessions_.end()) continue;
             const std::string pname = it->second.project_name;
             if (detected_names.count(pname)) {
+                it->second.window_seen = true;
                 window_miss_counts_.erase(id);  // 窗口又可见了，重置宽限计数
                 continue;
             }
             // Codex/OpenCode 是 CLI/TUI，没有 GUI 窗口可扫 —— 跳过窗口级
             // 清理，交给 SESSION_TIMEOUT / 进程存活同步
             const std::optional<IdeKind> session_ide = it->second.ide;
-            if (session_ide == IdeKind::Codex || session_ide == IdeKind::OpenCode) {
+            // Claude Code 同样跳过，但不做进程判活（npm 版跑在 node.exe 里，
+            // 桌面应用也叫 Claude.exe），靠 SessionEnd 与超时清理。
+            if (session_ide == IdeKind::Codex || session_ide == IdeKind::OpenCode ||
+                session_ide == IdeKind::Claude) {
                 window_miss_counts_.erase(id);
                 continue;
             }
+            // 从没出现过同名窗口的 hook 会话：窗口扫描对它没有发言权，交给
+            // Stop/SessionEnd 与静默超时。
+            if (id.rfind(kWindowPrefix, 0) != 0 && !it->second.window_seen) continue;
             if (id.rfind(kWindowPrefix, 0) == 0) {
                 // 占位会话 1:1 跟随窗口 —— 立即删除
                 sessions_.erase(it);

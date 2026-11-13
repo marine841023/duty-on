@@ -242,6 +242,87 @@ void actorTests() {
     check(status(sm) == "thinking", "informational notification must not finish active work");
 }
 
+void claudeTests() {
+    uint64_t now = 100000;
+    StateManager sm([&] { return now; });
+    auto send = [&](const std::string& name, const std::string& tool = "", const std::string& call = "",
+                const std::string& agent = "", const std::string& type = "") {
+        auto e = event(name, "claude", tool, call);
+        e.ide = IdeKind::Claude;
+        if (!agent.empty()) e.agent_id = agent;
+        if (!type.empty()) e.notification_type = type;
+        sm.handleHookEvent(e);
+    };
+    auto seq = [&] { return sm.petStatus().alert_seq; };
+    check(ideKindFromStr("claude") == IdeKind::Claude, "claude must be a known IDE kind");
+    send("SessionStart");
+    send("UserPromptSubmit");
+    check(sm.snapshotJson()["sessions"][0]["ide"] == "claude", "session must be badged as Claude Code");
+    send("PreToolUse", "Bash", "t1");
+    const auto before = seq();
+    send("PermissionRequest", "Bash"); // Claude Code sends no tool_use_id here
+    check(status(sm) == "confirmation-needed", "Claude permission dialog must alert");
+    send("Notification", "", "", "", "permission_prompt");
+    check(seq() == before + 1, "permission notification for the same dialog must not alert twice");
+    send("PostToolUse", "Bash", "t1");
+    check(status(sm) == "thinking", "approved tool finishing must clear ID-less Claude permission");
+
+    send("PreToolUse", "AskUserQuestion", "q1");
+    send("PermissionRequest", "AskUserQuestion");
+    check(seq() == before + 2, "question plus its permission event is one alert");
+    send("PostToolUse", "AskUserQuestion", "q1");
+    check(status(sm) == "thinking", "answered question must clear alert");
+
+    send("SubagentStart", "", "", "worker");
+    send("PreToolUse", "Bash", "c1", "worker");
+    send("Stop");
+    check(status(sm) == "tool-use", "main Stop must not hide a running Claude subagent");
+    send("PostToolUse", "Bash", "c1", "worker");
+    send("SubagentStop", "", "", "worker");
+    check(status(sm) == "idle", "finished subagent and main turn must be idle");
+    send("PreToolUse", "Bash", "wake");
+    check(status(sm) == "tool-use", "Claude turn started without a prompt (background wake-up) must show work");
+    send("StopFailure");
+    check(status(sm) == "idle", "API error must end the turn");
+
+    send("UserPromptSubmit");
+    send("PreToolUse", "Bash", "t2");
+    send("PermissionRequest", "Bash");
+    send("Notification", "", "", "", "idle_prompt"); // user pressed Esc: no Stop hook
+    check(status(sm) == "idle", "idle prompt must clear an abandoned Claude permission dialog");
+
+    send("UserPromptSubmit");
+    sm.syncDetectedWindows({});
+    sm.syncDetectedWindows({});
+    sm.syncDetectedWindows({});
+    CliLiveness absent; absent.scan_succeeded = true;
+    sm.syncCliLiveness(absent);
+    sm.syncCliLiveness(absent);
+    check(sm.sessionCount() == 1, "Claude sessions have no window or dedicated process to scan");
+    send("SessionEnd");
+    check(sm.sessionCount() == 0, "Claude SessionEnd must remove session");
+
+    // Qoder 无工作区对话：目录名是随机 ID，且永远没有同名窗口
+    auto quest = event("PreToolUse", "quest", "Read", "q1");
+    quest.ide = IdeKind::Qoder;
+    quest.project_path = "C:/Users/u/Documents/Qoder/2026-11-12/b8f041b1";
+    quest.project_name = "b8f041b1";
+    sm.handleHookEvent(quest);
+    check(sm.snapshotJson()["sessions"][0]["projectName"] == "Qoder 对话",
+        "random-ID folder must not be shown as a project name");
+    for (int i = 0; i < 5; ++i) sm.syncDetectedWindows({});
+    check(sm.sessionCount() == 1, "session that never had a window must survive window scans");
+    sm.handleHookEvent(event("SessionEnd", "quest"));
+    auto windowed = event("UserPromptSubmit", "win");
+    windowed.ide = IdeKind::Qoder;
+    windowed.project_path = "D:/work/shop";
+    windowed.project_name = "shop";
+    sm.handleHookEvent(windowed);
+    sm.syncDetectedWindows({{"shop", IdeKind::Qoder}});
+    for (int i = 0; i < 3; ++i) sm.syncDetectedWindows({});
+    check(sm.sessionCount() == 0, "closing a window that was seen still removes its session");
+}
+
 #ifdef _WIN32
 namespace fs = std::filesystem;
 json readJson(const fs::path& path) { std::ifstream in(path); return json::parse(in); }
@@ -252,17 +333,48 @@ struct TestHome {
     fs::path path = fs::temp_directory_path() / (L"dutyon-hooks-测试-" + std::to_wstring(currentMillis()));
     std::wstring old_home = _wgetenv(L"USERPROFILE") ? _wgetenv(L"USERPROFILE") : L"";
     std::wstring old_codex = _wgetenv(L"CODEX_HOME") ? _wgetenv(L"CODEX_HOME") : L"";
+    std::wstring old_claude = _wgetenv(L"CLAUDE_CONFIG_DIR") ? _wgetenv(L"CLAUDE_CONFIG_DIR") : L"";
     TestHome() {
         fs::create_directories(path / "custom codex");
         _wputenv_s(L"USERPROFILE", path.c_str());
         _wputenv_s(L"CODEX_HOME", (path / "custom codex").c_str());
+        _wputenv_s(L"CLAUDE_CONFIG_DIR", (path / L"claude 配置").c_str());
     }
     ~TestHome() {
         _wputenv_s(L"USERPROFILE", old_home.c_str());
         _wputenv_s(L"CODEX_HOME", old_codex.c_str());
+        _wputenv_s(L"CLAUDE_CONFIG_DIR", old_claude.c_str());
         std::error_code ec; fs::remove_all(path, ec);
     }
 };
+
+// Claude Code keeps hooks beside unrelated user settings (env, permissions).
+void claudeInstallerTests(const std::string& hooks, const fs::path& home) {
+    const auto path = home / L"claude 配置" / "settings.json";
+    check(!fs::exists(path) && !fs::exists(home / ".claude"), "Claude Code must not be configured when absent");
+    fs::create_directories(path.parent_path());
+    json foreign = {{"type", "command"}, {"command", "echo keep-me"}};
+    json settings = {{"env", {{"ANTHROPIC_BASE_URL", "https://example.invalid"}}},
+                     {"permissions", {{"allow", json::array({"Bash(git status)"})}}},
+                     {"hooks", {{"Stop", json::array({{{"hooks", json::array({foreign})}}})}}}};
+    writeJson(path, settings);
+    check(installHooks(hooks).success, "install with Claude Code present succeeds");
+    const auto installed = readJson(path);
+    check(installed["env"] == settings["env"] && installed["permissions"] == settings["permissions"],
+          "Claude settings outside hooks must be preserved");
+    check(!installed.contains("version"), "Claude settings.json takes no version field");
+    check(installed["hooks"]["Stop"][0]["hooks"][0] == foreign, "user's own Claude hooks must be preserved");
+    for (const auto* name : bc::kClaudeHookEvents) {
+        const auto& handler = installed["hooks"][name].back()["hooks"][0];
+        const auto command = handler["command"].get<std::string>();
+        check(command.find("-Ide claude") != std::string::npos, "Claude hook must identify its source");
+        check(handler["shell"] == "powershell", "Claude hook must not depend on Git Bash path parsing");
+    }
+    check(isHooksInstalled().claude_hooks_exist, "status must honor CLAUDE_CONFIG_DIR");
+    const auto mtime = fs::last_write_time(path);
+    check(installHooks(hooks).success && fs::last_write_time(path) == mtime,
+          "Claude reinstall must not rewrite settings.json");
+}
 
 void installerTests(const std::string& hooks) {
     TestHome home;
@@ -296,6 +408,7 @@ void installerTests(const std::string& hooks) {
     check(isHooksInstalled().codex_hooks_exist, "status must honor CODEX_HOME");
     writeJson(path, {{"description", ".dutyon/hooks/trae-hook-bridge.ps1"}, {"hooks", json::object()}});
     check(!isHooksInstalled().codex_hooks_exist, "text in description is not an installed hook");
+    claudeInstallerTests(hooks, home.path);
     check(scanCliProcesses().scan_succeeded, "real Windows process enumeration must complete");
     const auto trae_path = home.path / ".trae-cn" / "hooks.json";
     const auto seconds = currentMillis() / 1000;
@@ -318,6 +431,7 @@ int main(int argc, char** argv) {
     try {
         stateTests();
         actorTests();
+        claudeTests();
 #ifdef _WIN32
         check(argc == 2, "pass hooks source directory");
         installerTests(argv[1]);

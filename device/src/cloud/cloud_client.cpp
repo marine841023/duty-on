@@ -27,6 +27,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -343,7 +344,11 @@ void CloudClient::startWorker() {
     worker_ = std::thread([this] { workerLoop(); });
 }
 
-void CloudClient::syncNow() { sync_requested_ = true; }
+void CloudClient::syncNow() {
+    // 上一轮发现设置两边都改过：用户再点「立即同步」表示以本机为准
+    if (config_conflict_) force_push_ = true;
+    sync_requested_ = true;
+}
 void CloudClient::requestRestore() { restore_requested_ = true; }
 void CloudClient::checkUpdate() { update_check_requested_ = true; }
 void CloudClient::startUpdateDownload() { update_download_requested_ = true; }
@@ -395,13 +400,24 @@ void CloudClient::workerLoop() {
 
 // ---- 增量上传 ----
 
+// 一轮同步：本机与云端双向对账（文件 + 设置）。
+//
+// 网页云空间可以直接增删改角色，所以不能再"本机永远覆盖云端"：
+//   设置   三方比较（上次同步时的本机/云端 vs 现在的本机/云端）：
+//     只有本机改过 → 上传；只有云端改过 → 取回并应用；两边都改过 →
+//     不覆盖任何一边，提示用户选"从云端恢复"或"立即同步"。
+//   文件   本机有、云端没有：以前同步过且现在没被引用 → 是在网页上删的，本机
+//     那一份移进 ~/.dutyon/cloud-trash；否则是新文件，上传。
+//   云端有、本机没有：以前同步过且现在没被引用 → 是在本机删的，云端
+//     也删；否则是网页新传的（或被引用却丢了），下载。
+//   两边内容不同：沿用原规则（云端在别处变过则报冲突，否则上传本机版）。
+// "被引用" = 当前设置里某个角色的动画或声音正用着这个文件，这类文件不删。
 bool CloudClient::doUploadOnce(std::string& err) {
     std::string host, token;
     int port = 0;
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        if (!parseServerUrl(account_.server, host, port) ||
-            account_.token.empty()) {
+        if (!parseServerUrl(account_.server, host, port) || account_.token.empty()) {
             err = "未登录";
             return false;
         }
@@ -409,116 +425,310 @@ bool CloudClient::doUploadOnce(std::string& err) {
     }
     CloudTransport cli(host, port);
     cli.set_connection_timeout(5);
-    cli.set_read_timeout(30);
+    cli.set_read_timeout(60);
     httplib::Headers auth = {{"Authorization", "Bearer " + token}};
 
     const std::string home = homeDir();
     const std::string anim_dir = UserConfigStore::animationsDir();
     const std::string l2d_dir = UserConfigStore::userModelsDir();
+    const bool force_push = force_push_.exchange(false);
 
-    // 本地文件清单（size+mtime 缓存命中免算 sha256）
+    // 本机缓存：文件摘要（size+mtime 命中免算）、各文件上次同步时的摘要、
+    // 设置上次同步时的本机摘要与云端版本号
     const std::string cache_path = home + "/.dutyon/cloud-cache.json";
     json cache = readJsonFile(cache_path);
-    if (!cache.contains("files") || !cache["files"].is_object())
-        cache["files"] = json::object();
+    if (!cache.contains("files") || !cache["files"].is_object()) cache["files"] = json::object();
     json& cache_files = cache["files"];
     std::string accountKey;
-    {std::lock_guard<std::mutex> lk(mtx_); accountKey=account_.server+"/"+account_.username;}
-    if (!cache.contains("synced") || !cache["synced"].is_object()) cache["synced"]=json::object();
-    if (!cache["synced"].contains(accountKey) || !cache["synced"][accountKey].is_object()) cache["synced"][accountKey]=json::object();
-    json& synced=cache["synced"][accountKey];
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        accountKey = account_.server + "/" + account_.username;
+    }
+    for (const char* section : {"synced", "config"}) {
+        if (!cache.contains(section) || !cache[section].is_object())
+            cache[section] = json::object();
+        if (!cache[section].contains(accountKey) || !cache[section][accountKey].is_object())
+            cache[section][accountKey] = json::object();
+    }
+    json& synced = cache["synced"][accountKey];
+    json& cfg_base = cache["config"][accountKey];
 
+    // ---- 云端现状：文件清单 + 设置 ----
+    auto res = cli.Get("/api/sync/manifest", auth);
+    if (!res || res->status != 200) {
+        err = res ? ("清单获取失败 (" + std::to_string(res->status) + ")") : "无法连接服务器";
+        return false;
+    }
+    const json remote = json::parse(res->body, nullptr, false);
+    if (!remote.is_array()) {
+        err = "云端清单格式错误";
+        return false;
+    }
+    struct RemoteFile {
+        std::string sha;
+        long long size;
+    };
+    std::map<std::string, RemoteFile> remote_map;
+    for (const auto& e : remote) {
+        if (!e.is_object() || !e.contains("path") || !e.contains("sha256")) continue;
+        const long long size =
+            e.contains("size") && e["size"].is_number_integer() ? e["size"].get<long long>() : -1;
+        remote_map[e["path"].get<std::string>()] = {e["sha256"].get<std::string>(), size};
+    }
+    auto cfg_res = cli.Get("/api/sync/config", auth);
+    if (!cfg_res || cfg_res->status != 200) {
+        err = "云端配置获取失败";
+        return false;
+    }
+    const json cj = json::parse(cfg_res->body, nullptr, false);
+    if (!cj.is_object() || !cj.contains("config") || !cj["config"].is_object()) {
+        err = "云端配置格式错误";
+        return false;
+    }
+    const json& remote_cfg = cj["config"];
+    // 旧版服务端不返回版本号：退回"本机覆盖云端"的老行为
+    const std::string remote_rev = cj.value("rev", std::string());
+
+    // ---- 设置：决定方向 ----
+    auto snapshotOf = [](const json& cfg) {
+        json s = json::object();
+        for (const char* key : cloudSyncFields())
+            if (cfg.contains(key)) s[key] = cfg[key];
+        return s;
+    };
+    auto digest = [](const json& j) {
+        const std::string text = j.dump();
+        return SHA256::toHex(SHA256::hash(text.data(), text.size()));
+    };
+    json local_cfg = readJsonFile(configPath());
+    if (!local_cfg.is_object()) local_cfg = json::object();
+    const std::string local_hash = digest(snapshotOf(local_cfg));
+    const bool have_base = cfg_base.contains("rev") && cfg_base.contains("local");
+    const bool remote_changed =
+        have_base && !remote_rev.empty() && cfg_base.value("rev", std::string()) != remote_rev;
+    const bool local_changed = !have_base || cfg_base.value("local", std::string()) != local_hash;
+    enum class CfgAction { None, Push, Pull, Conflict };
+    CfgAction action = CfgAction::None;
+    if (remote_rev.empty() || force_push)
+        action = CfgAction::Push;
+    else if (remote_changed && local_changed)
+        action = CfgAction::Conflict;
+    else if (remote_changed)
+        action = CfgAction::Pull;
+    else if (local_changed)
+        action = CfgAction::Push;
+
+    bool apply_needed = false;  // 本机设置或文件被云端改动 → 通知主线程重载
+    if (action == CfgAction::Pull) {
+        for (const char* key : cloudSyncFields())
+            if (remote_cfg.contains(key)) local_cfg[key] = remote_cfg[key];
+        if (!writeJsonFile(configPath(), local_cfg)) {
+            err = "配置保存失败";
+            return false;
+        }
+        apply_needed = true;
+    }
+
+    // 当前设置引用到的文件（角色各状态的动画、各状态绑定的声音）
+    std::set<std::string> referenced;
+    if (local_cfg.contains("customCharacters") && local_cfg["customCharacters"].is_array())
+        for (const auto& c : local_cfg["customCharacters"])
+            for (const char* state : {"sleeping", "working", "alert"})
+                if (c.is_object() && c.contains(state) && c[state].is_string() &&
+                    !c[state].get<std::string>().empty())
+                    referenced.insert("animations/" + c[state].get<std::string>());
+    if (local_cfg.contains("stateAudio") && local_cfg["stateAudio"].is_object())
+        for (const auto& per_key : local_cfg["stateAudio"])
+            if (per_key.is_object())
+                for (const auto& name : per_key)
+                    if (name.is_string() && !name.get<std::string>().empty())
+                        referenced.insert("animations/" + name.get<std::string>());
+    const std::string active = local_cfg.value("activeCharacterId", std::string());
+    auto inUse = [&](const std::string& rel) {
+        if (referenced.count(rel)) return true;
+        // Live2D：正在使用的模型整个文件夹都算被引用
+        if (rel.rfind("live2d/", 0) == 0) {
+            const size_t slash = rel.find('/', 7);
+            const std::string model =
+                rel.substr(7, slash == std::string::npos ? std::string::npos : slash - 7);
+            return !model.empty() && active.find(model) != std::string::npos;
+        }
+        return false;
+    };
+
+    // ---- 本机文件清单 ----
     struct LocalFile {
-        std::string rel;      // 相对 ~/.dutyon/（animations/x.gif）
+        std::string rel;  // 相对 ~/.dutyon/（animations/x.gif）
         std::string abs;
         std::string sha256;
         long long size;
     };
     std::vector<LocalFile> locals;
+    std::set<std::string> local_set;
     std::vector<std::string> rels;
     collectFiles(fs::u8path(anim_dir), "animations", rels);
     collectFiles(fs::u8path(l2d_dir), "live2d", rels);
     for (const auto& rel : rels) {
-        if(!validCloudPath(rel) || rel.size()>=15 && rel.substr(rel.size()-15)==".cloud-download") continue;
+        if (!validCloudPath(rel) ||
+            (rel.size() >= 15 && rel.substr(rel.size() - 15) == ".cloud-download"))
+            continue;
         const fs::path full = fs::u8path(home) / ".dutyon" / fs::u8path(rel);
         std::error_code ec;
         if (!fs::is_regular_file(full, ec)) continue;
         const auto sz = (long long)fs::file_size(full, ec);
         if (ec) continue;
         const auto mt = fs::last_write_time(full, ec);
-        const long long mtime =
-            (long long)mt.time_since_epoch().count();
+        const long long mtime = (long long)mt.time_since_epoch().count();
         std::string sha;
         const json& c = cache_files.contains(rel) ? cache_files[rel] : json();
         if (c.is_object() && c.value("s", (long long)-1) == sz &&
-            c.value("m", (long long)-1) == mtime && c.contains("h")) {
+            c.value("m", (long long)-1) == mtime && c.contains("h"))
             sha = c.value("h", std::string());
-        }
         if (sha.empty()) {
             sha = SHA256::fileHex(full);
             if (sha.empty()) continue;  // 读失败跳过
             cache_files[rel] = {{"s", sz}, {"m", mtime}, {"h", sha}};
         }
         locals.push_back({rel, full.u8string(), sha, sz});
+        local_set.insert(rel);
     }
 
-    // 云端清单
-    auto res = cli.Get("/api/sync/manifest", auth);
-    if (!res || res->status != 200) {
-        err = res ? ("清单获取失败 (" + std::to_string(res->status) + ")")
-                  : "无法连接服务器";
-        return false;
-    }
-    json remote = json::parse(res->body, nullptr, false);
-    std::map<std::string, std::string> remote_map;  // rel → sha256
-    if (!remote.is_array()) {err="云端清单格式错误"; return false;}
-    if (remote.is_array()) {
-        for (const auto& e : remote) {
-            if (e.is_object() && e.contains("path") && e.contains("sha256"))
-                remote_map[e["path"].get<std::string>()] =
-                    e["sha256"].get<std::string>();
-        }
-    }
+    // 云端清单为空而本机记着同步过不少文件：更像是服务端数据出了问题，
+    // 不把它当成"用户在网页上全删了"
+    const bool remote_wiped = remote_map.empty() && synced.size() >= 3;
+    auto wasSynced = [&](const std::string& rel, const std::string& sha) {
+        return synced.contains(rel) && synced[rel].is_string() &&
+               synced[rel].get<std::string>() == sha;
+    };
 
-    // 本地内容备份；云端独有内容保留，供网页上传及其他电脑恢复。
+    // ---- 本机有的文件 ----
     for (const auto& lf : locals) {
         auto it = remote_map.find(lf.rel);
-        if (it != remote_map.end() && it->second == lf.sha256) {synced[lf.rel]=lf.sha256; continue;}
-        if (it!=remote_map.end() && (!synced.contains(lf.rel) || synced[lf.rel]!=it->second)) {
-            err="云端文件已变化，请先从云端恢复："+lf.rel; return false;
+        if (it != remote_map.end() && it->second.sha == lf.sha256) {
+            synced[lf.rel] = lf.sha256;
+            continue;
         }
-        auto uploadAuth=auth;
-        if(it==remote_map.end()) uploadAuth.emplace("If-None-Match","*");
-        else uploadAuth.emplace("If-Match", "\""+it->second+"\"");
-        if (lf.size>50ll*1024*1024) {err="文件超过50MiB："+lf.rel; return false;}
+        if (it == remote_map.end() && synced.contains(lf.rel) && !remote_wiped && !inUse(lf.rel)) {
+            // 以前同步过、现在云端没有了：在网页上删的。本机那份移进回收目录
+            std::string flat = lf.rel;
+            std::replace(flat.begin(), flat.end(), '/', '_');
+            const fs::path trash = fs::u8path(home) / ".dutyon" / "cloud-trash";
+            std::error_code ec;
+            fs::create_directories(trash, ec);
+            fs::rename(fs::u8path(lf.abs), trash / fs::u8path(flat), ec);
+            if (ec) {  // 目标已存在或跨盘：退而求其次直接覆盖
+                fs::copy_file(fs::u8path(lf.abs), trash / fs::u8path(flat),
+                              fs::copy_options::overwrite_existing, ec);
+                fs::remove(fs::u8path(lf.abs), ec);
+            }
+            synced.erase(lf.rel);
+            cache_files.erase(lf.rel);
+            apply_needed = true;
+            continue;
+        }
+        if (it != remote_map.end() && !wasSynced(lf.rel, it->second.sha)) {
+            err = "云端文件已变化，请先从云端恢复：" + lf.rel;
+            writeJsonFile(cache_path, cache);
+            return false;
+        }
+        auto uploadAuth = auth;
+        if (it == remote_map.end())
+            uploadAuth.emplace("If-None-Match", "*");
+        else
+            uploadAuth.emplace("If-Match", "\"" + it->second.sha + "\"");
+        if (lf.size > 50ll * 1024 * 1024) {
+            err = "文件超过50MiB：" + lf.rel;
+            return false;
+        }
         std::ifstream in(fs::u8path(lf.abs), std::ios::binary);
         if (!in) continue;
         std::ostringstream ss;
         ss << in.rdbuf();
-        const std::string body = ss.str();
-        auto up = cli.Put("/api/sync/file?path=" + urlEncode(lf.rel), uploadAuth,
-                          body, "application/octet-stream");
+        auto up = cli.Put("/api/sync/file?path=" + urlEncode(lf.rel), uploadAuth, ss.str(),
+                          "application/octet-stream");
         if (!up || up->status != 200) {
             err = "上传 " + lf.rel + " 失败";
             return false;
         }
-        synced[lf.rel]=lf.sha256; writeJsonFile(cache_path,cache);
-    }
-    // 配置白名单快照
-    json snapshot = json::object();
-    {
-        const json local_cfg = readJsonFile(configPath());
-        for (const char* key : cloudSyncFields())
-            if (local_cfg.contains(key)) snapshot[key] = local_cfg[key];
-    }
-    auto cfg_res = cli.Put("/api/sync/config", auth, snapshot.dump(),
-                           "application/json");
-    if (!cfg_res || cfg_res->status != 200) {
-        err = "配置快照上传失败";
-        return false;
+        synced[lf.rel] = lf.sha256;
+        writeJsonFile(cache_path, cache);
     }
 
+    // ---- 云端有、本机没有的文件 ----
+    for (const auto& [rel, rf] : remote_map) {
+        if (local_set.count(rel) || !validCloudPath(rel)) continue;
+        if (wasSynced(rel, rf.sha) && !inUse(rel)) {
+            // 以前同步过、本机已经没有、也没被引用：在本机删的，云端跟着删
+            auto del = cli.Delete("/api/sync/file?path=" + urlEncode(rel), auth);
+            if (del && del->status == 200) synced.erase(rel);
+            continue;
+        }
+        // 网页新传的文件（或被引用却丢了的文件）：下载
+        if (!validDigest(rf.sha) || rf.size < 0 || rf.size > 50ll * 1024 * 1024) continue;
+        const fs::path full = fs::u8path(home) / ".dutyon" / fs::u8path(rel);
+        std::error_code ec;
+        fs::create_directories(full.parent_path(), ec);
+        auto temp = full;
+        temp += L".cloud-download";
+        long long received = 0;
+        bool ok = false;
+        {
+            std::ofstream out(temp, std::ios::binary);
+            if (!out) continue;
+            auto fr = cli.Get("/api/sync/file?path=" + urlEncode(rel), auth,
+                              [&](const char* data, size_t len) {
+                                  received += (long long)len;
+                                  if (received > rf.size) return false;
+                                  out.write(data, (std::streamsize)len);
+                                  return out.good();
+                              });
+            out.close();
+            ok = fr && fr->status == 200 && received == rf.size && SHA256::fileHex(temp) == rf.sha;
+        }
+        if (!ok || !MoveFileExW(temp.c_str(), full.c_str(),
+                                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            fs::remove(temp, ec);
+            err = "下载 " + rel + " 失败";
+            writeJsonFile(cache_path, cache);
+            return false;
+        }
+        synced[rel] = rf.sha;
+        apply_needed = true;
+    }
+
+    // ---- 设置：执行 ----
+    if (action == CfgAction::Push) {
+        const json snapshot = snapshotOf(local_cfg);
+        auto headers = auth;
+        if (!remote_rev.empty())  // 强制以本机为准时也带版本号："覆盖我刚看到的这一版"
+            headers.emplace("If-Match", "\"" + remote_rev + "\"");
+        auto put = cli.Put("/api/sync/config", headers, snapshot.dump(), "application/json");
+        if (put && put->status == 412) {
+            err = "云端设置刚被修改，下一轮再同步";
+            writeJsonFile(cache_path, cache);
+            return false;
+        }
+        if (!put || put->status != 200) {
+            err = "配置快照上传失败";
+            return false;
+        }
+        const json pj = json::parse(put->body, nullptr, false);
+        const std::string new_rev = pj.is_object() ? pj.value("rev", std::string()) : std::string();
+        if (!new_rev.empty()) {
+            cfg_base["rev"] = new_rev;
+            cfg_base["local"] = digest(snapshot);
+        }
+    } else if (action == CfgAction::Pull || (action == CfgAction::None && !have_base)) {
+        cfg_base["rev"] = remote_rev;
+        cfg_base["local"] = digest(snapshotOf(local_cfg));
+    }
+    config_conflict_ = action == CfgAction::Conflict;
     writeJsonFile(cache_path, cache);
+    if (apply_needed) restore_done_ = true;  // 主线程重载设置、重新载入当前角色
+    if (action == CfgAction::Conflict) {
+        err = "设置在云端和本机都改过。选「从云端恢复」用云端的，或再点一次「立即同步」用本机的";
+        return false;
+    }
     return true;
 }
 

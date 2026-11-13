@@ -1020,6 +1020,15 @@ struct UIRenderer::Impl {
 
     // ---- 菜单条目（.menu-item：12px 白 0.8，padding 7x12，圆角 4，
     // hover 白 10% 底全白；active 蓝 #6496ff + ✓ 前缀；danger 红）----
+    // 菜单色板（与设备屏、弹窗、官网同一套）：牌面深灰、纸白文字、主题色选中、
+    // 珊瑚红只给危险项
+    static constexpr ImU32 kMenuText = IM_COL32(0xF3, 0xEF, 0xE7, 222);
+    static constexpr ImU32 kMenuFaint = IM_COL32(0x8A, 0x86, 0x7E, 255);
+    static constexpr ImU32 kMenuHover = IM_COL32(0x2E, 0x2E, 0x36, 255);
+    static constexpr ImU32 kMenuInk = IM_COL32(0xE0, 0xA6, 0x53, 255);
+    static constexpr ImU32 kMenuCoral = IM_COL32(0xFF, 0x5F, 0x52, 255);
+    static constexpr ImU32 kMenuCoralInk = IM_COL32(0x2A, 0x09, 0x06, 255);
+
     struct MenuRowResult {
         bool clicked = false;
         bool hovered = false;
@@ -1043,54 +1052,45 @@ struct UIRenderer::Impl {
         const ImVec2 mmin = ImGui::GetItemRectMin();
         const ImVec2 mmax = ImGui::GetItemRectMax();
 
-        // hover 背景（danger: rgba(255,68,68,0.15)，普通: rgba(255,255,255,0.1)）
+        // 悬停：普通项牌面提亮；危险项整行反色成珊瑚红（与"需要确认"的牌同一语言）
         if (r.hovered)
-            dl->AddRectFilled(mmin, mmax, danger ? IM_COL32(255, 68, 68, 38)
-                                                 : IM_COL32(255, 255, 255, 26),
-                              4.0f * S);
+            dl->AddRectFilled(mmin, mmax, danger ? kMenuCoral : kMenuHover, 8.0f * S);
 
-        // 文字颜色 + active ✓ 前缀（.menu-item.active::before '✓ '）
-        char text[160];
-        if (active)
-            snprintf(text, sizeof(text), "\xE2\x9C\x93 %s", label);
-        else
-            snprintf(text, sizeof(text), "%s", label);
+        // 选中项：主题色文字 + 前面一个实心点（状态灯）
         ImU32 col;
         if (danger)
-            col = r.hovered ? IM_COL32(0xFF, 0x66, 0x66, 255) : IM_COL32(255, 100, 100, 204);
+            col = r.hovered ? kMenuCoralInk : kMenuCoral;
         else if (active)
-            col = IM_COL32(0x64, 0x96, 0xFF, 255);
+            col = kMenuInk;
         else
-            col = r.hovered ? IM_COL32(255, 255, 255, 255) : IM_COL32(255, 255, 255, 204);
+            col = r.hovered ? IM_COL32(0xF3, 0xEF, 0xE7, 255) : kMenuText;
         // 行内文字按墨迹垂直居中（CJK 墨迹偏行框下半，行高居中会偏上）
         const float row_mid = (mmin.y + mmax.y) * 0.5f;
-        AddTextS(dl,font_12, font_size,
-                    ImVec2(mmin.x + pad_h,
-                           TextCenteredY(font_12, font_size, text, row_mid)),
-                    col, text);
-
-        // 右侧提示（.menu-hint 10px 白 0.35）
-        if (hint && hint[0]) {
-            const float hw = TextW(font_10, 10.0f * S * kTextScale, hint);
-            float hx = mmax.x - pad_h;
-            if (has_arrow) hx -= 18.0f * S;
-            AddTextS(dl,font_10, 10.0f * S * kTextScale,
-                        ImVec2(hx - hw,
-                               TextCenteredY(font_10, 10.0f * S * kTextScale,
-                                             hint, row_mid)),
-                        IM_COL32(255, 255, 255, 89), hint);
+        float tx = mmin.x + pad_h;
+        if (active) {
+            dl->AddCircleFilled(ImVec2(tx + 3.0f * S, row_mid), 3.0f * S, kMenuInk, 12);
+            tx += 12.0f * S;
         }
-        // 子菜单箭头（▶ 10px 白 0.4，hover 白 0.95 + 右移 2px）
+        AddTextS(dl, font_12, font_size,
+          ImVec2(tx, TextCenteredY(font_12, font_size, label, row_mid)), col, label);
+
+        // 右侧提示
+        if (hint && hint[0]) {
+            const float hw = TextW(font_10, font_hint, hint);
+            float hx = mmax.x - pad_h;
+            if (has_arrow) hx -= 16.0f * S;
+            AddTextS(dl, font_10, font_hint,
+              ImVec2(hx - hw, TextCenteredY(font_10, font_hint, hint, row_mid)),
+                     danger && r.hovered ? kMenuCoralInk : kMenuFaint, hint);
+        }
+        // 子菜单箭头：细线折角，悬停时变亮并右移一点
         if (has_arrow) {
-            const char* arrow = "\xE2\x96\xB6";
-            const float aw = TextW(font_10, 10.0f * S * kTextScale, arrow);
-            AddTextS(dl,font_10, 10.0f * S * kTextScale,
-                        ImVec2(mmax.x - pad_h - aw + (r.hovered ? 2.0f * S : 0.0f),
-                               TextCenteredY(font_10, 10.0f * S * kTextScale,
-                                             arrow, row_mid)),
-                        r.hovered ? IM_COL32(255, 255, 255, 242)
-                                  : IM_COL32(255, 255, 255, 102),
-                        arrow);
+            const float ax = mmax.x - pad_h - 5.0f * S + (r.hovered ? 2.0f * S : 0.0f);
+            const float k = 3.5f * S;
+            const ImVec2 pts[3] = {ImVec2(ax - k * 0.5f, row_mid - k), ImVec2(ax + k * 0.5f, row_mid),
+               ImVec2(ax - k * 0.5f, row_mid + k)};
+            dl->AddPolyline(pts, 3, r.hovered ? IM_COL32(0xF3, 0xEF, 0xE7, 255) : kMenuFaint,
+              ImDrawFlags_None, 1.4f * S);
         }
         return r;
     }
@@ -1103,7 +1103,7 @@ struct UIRenderer::Impl {
         const float w = ImGui::GetWindowSize().x - 8.0f * S;
         const float h = 10.0f * S + 8.0f * S;
         AddTextS(dl,font_10, 10.0f * S * kTextScale, ImVec2(mmin.x + 12.0f * S, mmin.y + 6.0f * S),
-                    IM_COL32(255, 255, 255, 102), text);
+                    kMenuFaint, text);
         ImGui::Dummy(ImVec2(w, h));
     }
 
@@ -1115,7 +1115,7 @@ struct UIRenderer::Impl {
         const float w = ImGui::GetWindowSize().x - 8.0f * S;
         dl->AddLine(ImVec2(mmin.x, mmin.y + 4.0f * S),
                     ImVec2(mmin.x + w, mmin.y + 4.0f * S),
-                    IM_COL32(255, 255, 255, 20), 1.0f);
+                    IM_COL32(255, 255, 255, 23), 1.0f);
         ImGui::Dummy(ImVec2(w, 8.0f * S + 1.0f));
     }
 
@@ -1151,7 +1151,7 @@ struct UIRenderer::Impl {
                     ImVec2(mmin.x + (cell_w - tw) * 0.5f,
                            TextCenteredY(font_12, font_size, text,
                                          (mmin.y + mmax.y) * 0.5f)),
-                    active ? IM_COL32(0x64, 0x96, 0xFF, 255)
+                    active ? IM_COL32(0xE0, 0xA6, 0x53, 255)
                            : (r.hovered ? IM_COL32(255, 255, 255, 255)
                                         : IM_COL32(255, 255, 255, 204)),
                     text);
@@ -1257,7 +1257,7 @@ struct UIRenderer::Impl {
         AddTextS(dl, font_10, fs_arrow,
                     ImVec2(rmax.x - pad_h * 0.5f - aw + (play_hov ? 2.0f * S : 0.0f),
                            TextCenteredY(font_10, fs_arrow, arrow, mid)),
-                    play_hov ? IM_COL32(0x64, 0x96, 0xFF, 255)
+                    play_hov ? IM_COL32(0xE0, 0xA6, 0x53, 255)
                              : IM_COL32(255, 255, 255, 150),
                     arrow);
         // 当前音频名（右对齐到 ▶ 左侧 gap 6）
@@ -1287,6 +1287,37 @@ struct UIRenderer::Impl {
     };
     std::map<std::string, ThumbTex> thumb_cache;
 
+    // GIF 首帧常常只覆盖画布的一部分（四周裁掉了透明边）。stb 把帧矩形之外的
+    // 区域填成不透明的"背景色"（抠过图的动图里通常是绿色），缩略图上就多出一条
+    // 绿边。这里读出首帧矩形，把矩形外的像素改回透明。
+    static bool GifFirstFrameRect(const std::string& path, int* x, int* y, int* w, int* h) {
+        FILE* fp = fopen(path.c_str(), "rb");
+        if (!fp) return false;
+        unsigned char head[13];
+        bool ok = fread(head, 1, 13, fp) == 13 && memcmp(head, "GIF8", 4) == 0;
+        if (ok && (head[10] & 0x80)) ok = fseek(fp, 3L << ((head[10] & 7) + 1), SEEK_CUR) == 0;
+        while (ok) {
+            const int block = fgetc(fp);
+            if (block == 0x2C) {  // 图像描述符：x、y、宽、高各 2 字节
+                unsigned char d[8];
+                ok = fread(d, 1, 8, fp) == 8;
+                if (ok) {
+                    *x = d[0] | (d[1] << 8);
+                    *y = d[2] | (d[3] << 8);
+                    *w = d[4] | (d[5] << 8);
+                    *h = d[6] | (d[7] << 8);
+                }
+                break;
+            }
+            if (block != 0x21) { ok = false; break; }
+            fgetc(fp);  // 扩展类型
+            for (int n = fgetc(fp); n > 0; n = fgetc(fp))  // 逐个跳过数据子块
+                if (fseek(fp, n, SEEK_CUR) != 0) { ok = false; break; }
+        }
+        fclose(fp);
+        return ok;
+    }
+
     const ThumbTex& ThumbTexture(const std::string& path) {
         auto it = thumb_cache.find(path);
         if (it != thumb_cache.end()) return it->second;
@@ -1295,6 +1326,13 @@ struct UIRenderer::Impl {
         unsigned char* data = stbi_load(path.c_str(), &t.w, &t.h, &channels,
                                          STBI_rgb_alpha);
         if (data && t.w > 0 && t.h > 0) {
+            int fx = 0, fy = 0, fw = 0, fh = 0;
+            if (GifFirstFrameRect(path, &fx, &fy, &fw, &fh) && (fw < t.w || fh < t.h)) {
+                for (int py = 0; py < t.h; py++)
+                    for (int px = 0; px < t.w; px++)
+                        if (px < fx || py < fy || px >= fx + fw || py >= fy + fh)
+                            memset(data + ((size_t)py * t.w + px) * 4, 0, 4);
+            }
             // 就地减半到 ≤128（缩略图显示尺寸 64px×DPI，128 已有 2 倍余量）
             while (t.w > 128 || t.h > 128) {
                 if (!HalveRGBA(data, &t.w, &t.h)) break;
@@ -1335,8 +1373,8 @@ struct UIRenderer::Impl {
         ImU32 bg = IM_COL32(255, 255, 255, 10);       // rgba(255,255,255,0.04)
         ImU32 border = IM_COL32(255, 255, 255, 15);   // rgba(255,255,255,0.06)
         if (e.checked) {
-            bg = IM_COL32(0x64, 0x96, 0xFF, 41);      // rgba(100,150,255,0.16)
-            border = IM_COL32(0x64, 0x96, 0xFF, 153); // rgba(100,150,255,0.6)
+            bg = IM_COL32(0xE0, 0xA6, 0x53, 41);      // rgba(100,150,255,0.16)
+            border = IM_COL32(0xE0, 0xA6, 0x53, 153); // rgba(100,150,255,0.6)
         } else if (hov) {
             bg = IM_COL32(255, 255, 255, 26);         // 0.1
             border = IM_COL32(255, 255, 255, 46);     // 0.18
@@ -1394,7 +1432,7 @@ struct UIRenderer::Impl {
             const float cw = TextW(font_11, fs, check);
             AddTextS(dl,font_11, fs,
                         ImVec2(cmax.x - 6.0f * S - cw, cmin.y + 4.0f * S),
-                        IM_COL32(0x64, 0x96, 0xFF, 255), check);
+                        IM_COL32(0xE0, 0xA6, 0x53, 255), check);
         }
         return clicked;
     }
@@ -1653,37 +1691,72 @@ constexpr ImU32 kColSleepDot = IM_COL32(0x64, 0x96, 0xFF, 255);
 constexpr ImU32 kColWorkDot = IM_COL32(0xFF, 0xC8, 0x32, 255);
 constexpr ImU32 kColAlertDot = IM_COL32(0xFF, 0x44, 0x44, 255);
 
-// 项目状态（styles.css .project-dot / .project-item.status-*）
-struct ProjectStyle {
-    ImU32 border;    // 左边框色
-    ImU32 dot;       // 状态点
-    float dot_period;    // 点闪烁周期（0 = 不闪）
-    float glow_period;   // 行背景呼吸周期（0 = 静态）
-    ImU32 accent;    // 文字强调色（working/thinking/tool-use 名称+状态文字）
-    bool name_accent;     // 名称是否用强调色
-    bool name_red;        // confirmation-needed 名称红
+// 色板（与设备端 task_panel.cpp 一致）：纸白系文字 + 状态色 + 珊瑚红
+constexpr ImU32 kPaper = IM_COL32(0xF3, 0xEF, 0xE7, 240);
+constexpr ImU32 kDim = IM_COL32(0xB4, 0xAF, 0xA5, 255);
+constexpr ImU32 kFaint = IM_COL32(0x8A, 0x86, 0x7E, 255);
+constexpr ImU32 kCoral = IM_COL32(0xFF, 0x5F, 0x52, 255);
+constexpr ImU32 kCoralDeep = IM_COL32(0xF2, 0x46, 0x3B, 255);
+constexpr ImU32 kCoralInk = IM_COL32(0x2A, 0x09, 0x06, 255);
+
+ImU32 WithAlpha(ImU32 c, float a) {
+    if (a < 0.0f) a = 0.0f;
+    if (a > 1.0f) a = 1.0f;
+    const ImU32 base = (c >> IM_COL32_A_SHIFT) & 0xFF;
+    return (c & ~IM_COL32_A_MASK) | ((ImU32)(base * a + 0.5f) << IM_COL32_A_SHIFT);
+}
+
+// 项目状态：颜色 + 状态灯的动作
+struct LampStyle {
+    ImU32 color;
+    int lamp;  // 0 空心环 / 1 脉冲点 / 2 三点 / 3 转圈 / 4 感叹号
 };
-const ProjectStyle& StyleFor(const SessionInfo& s) {
-    static const ProjectStyle kIdle = {
-        IM_COL32(0x64, 0x96, 0xFF, 102), IM_COL32(0x64, 0x96, 0xFF, 128),
-        0.0f, 0.0f, 0, false, false};
-    static const ProjectStyle kWorking = {
-        IM_COL32(0xFF, 0xC8, 0x32, 153), IM_COL32(0xFF, 0xC8, 0x32, 255),
-        1.0f, 0.0f, IM_COL32(0xFF, 0xC8, 0x32, 255), true, false};
-    static const ProjectStyle kThinking = {
-        IM_COL32(0x9B, 0x8C, 0xFF, 153), IM_COL32(0x9B, 0x8C, 0xFF, 255),
-        1.0f, 0.0f, IM_COL32(0x9B, 0x8C, 0xFF, 255), true, false};
-    static const ProjectStyle kToolUse = {
-        IM_COL32(0xFF, 0x9B, 0x32, 153), IM_COL32(0xFF, 0x9B, 0x32, 255),
-        0.7f, 0.0f, IM_COL32(0xFF, 0x9B, 0x32, 255), true, false};
-    static const ProjectStyle kConfirm = {
-        IM_COL32(0xFF, 0x44, 0x44, 204), IM_COL32(0xFF, 0x44, 0x44, 255),
-        0.5f, 1.5f, IM_COL32(0xFF, 0x66, 0x66, 255), false, true};
-    if (s.status == "working") return kWorking;
-    if (s.status == "thinking") return kThinking;
-    if (s.status == "tool-use") return kToolUse;
-    if (s.status == "confirmation-needed") return kConfirm;
-    return kIdle;
+LampStyle LampFor(const SessionInfo& s) {
+    if (s.status == "working") return {IM_COL32(0xFF, 0xC9, 0x4D, 255), 1};
+    if (s.status == "thinking") return {IM_COL32(0xAE, 0x9F, 0xFF, 255), 2};
+    if (s.status == "tool-use") return {IM_COL32(0xFF, 0x9F, 0x45, 255), 3};
+    if (s.status == "confirmation-needed") return {kCoral, 4};
+    return {IM_COL32(0x7D, 0x87, 0x97, 255), 0};
+}
+
+// u = 1 个逻辑像素（DPI 缩放后）
+void DrawLamp(ImDrawList* dl, ImVec2 c, const LampStyle& st, float t, float u) {
+    const float kTau = 6.2831853f;
+    switch (st.lamp) {
+        case 0:  // 空闲：静止的空心环
+            dl->AddCircle(c, 3.4f * u, WithAlpha(st.color, 0.9f), 16, 1.2f * u);
+            break;
+        case 1: {  // 忙碌：实心点 + 向外扩散的波纹
+            const float k = fmodf(t / 1.6f, 1.0f);
+            dl->AddCircle(c, (3.0f + 4.0f * k) * u,
+                          WithAlpha(st.color, 0.6f * (1.0f - k)), 20, 1.0f * u);
+            dl->AddCircleFilled(c, 3.0f * u, st.color, 16);
+            break;
+        }
+        case 2:  // 思考：三点依次起伏
+            for (int i = 0; i < 3; i++) {
+                const float w = 0.5f + 0.5f * sinf(t * 4.2f - i * 0.9f);
+                dl->AddCircleFilled(
+                    ImVec2(c.x + (i - 1) * 4.2f * u, c.y - (w - 0.5f) * 2.4f * u),
+                    1.5f * u, WithAlpha(st.color, 0.45f + 0.55f * w), 10);
+            }
+            break;
+        case 3:  // 执行：转圈
+            for (int i = 0; i < 8; i++) {
+                const float ang = kTau * i / 8.0f;
+                const float k = fmodf(i / 8.0f + t * 1.1f, 1.0f);
+                dl->AddCircleFilled(
+                    ImVec2(c.x + 4.4f * u * cosf(ang), c.y + 4.4f * u * sinf(ang)),
+                    1.1f * u, WithAlpha(st.color, 0.18f + 0.82f * k * k), 8);
+            }
+            break;
+        default:  // 需要确认：深色圆里一个感叹号（画在珊瑚底上）
+            dl->AddCircleFilled(c, 6.0f * u, kCoralInk, 20);
+            dl->AddRectFilled(ImVec2(c.x - 0.9f * u, c.y - 3.6f * u),
+                              ImVec2(c.x + 0.9f * u, c.y + 1.0f * u), kCoral, 0.9f * u);
+            dl->AddCircleFilled(ImVec2(c.x, c.y + 3.0f * u), 1.0f * u, kCoral, 8);
+            break;
+    }
 }
 
 // 项目状态文字（1.x status.*）
@@ -1705,6 +1778,7 @@ IdeBadge BadgeFor(const SessionInfo& s) {
     if (s.ide == "qoder") return {'Q', IM_COL32(0xBA, 0x8C, 0xFF, 56), IM_COL32(0xCF, 0xAA, 0xFF, 255)};
     if (s.ide == "cursor") return {'C', IM_COL32(0x50, 0xD2, 0xBE, 56), IM_COL32(0x8F, 0xE8, 0xD8, 255)};
     if (s.ide == "codex") return {'X', IM_COL32(0xFF, 0xAA, 0x50, 56), IM_COL32(0xFF, 0xC8, 0x80, 255)};
+    if (s.ide == "claude") return {'A', IM_COL32(0xD9, 0x77, 0x57, 64), IM_COL32(0xF0, 0x9A, 0x7C, 255)};
     if (s.ide == "opencode") return {'O', IM_COL32(0xFF, 0x78, 0xA0, 56), IM_COL32(0xFF, 0x9F, 0xB5, 255)};
     return {'T', IM_COL32(0x64, 0x96, 0xFF, 56), IM_COL32(0x9D, 0xB9, 0xFF, 255)};
 }
@@ -1861,7 +1935,6 @@ void UIRenderer::renderStatus(const PetStatus& s) {
                 ImDrawList* cdl = ImGui::GetWindowDrawList();
                 for (int i = 0; i < n; i++) {
                     const SessionInfo& sess = s.sessions[i];
-                    const ProjectStyle& st = StyleFor(sess);
 
                     // 行矩形（child 顶部有 4px 列表 padding 的近似：首行偏移）
                     const float y = 4.0f * S + (float)i * row_h -
@@ -1888,115 +1961,83 @@ void UIRenderer::renderStatus(const PetStatus& s) {
                     const bool hov = ImGui::IsItemHovered();
                     ImGui::PopID();
 
-                    // 行背景：状态色淡底 + hover 高亮（rgba(255,255,255,0.06)）
-                    if (st.glow_period > 0.0f) {
-                        // item-glow：确认行红底呼吸 0.05↔0.12
-                        const float a = 0.05f + 0.07f * TriWave((float)now, st.glow_period);
-                        row_fill(IM_COL32(255, 68, 68, (int)(a * 255.0f)));
-                    } else if (sess.status == "working") {
-                        row_fill(IM_COL32(255, 200, 50, 13));
-                    } else if (sess.status == "thinking") {
-                        row_fill(IM_COL32(155, 140, 255, 13));
-                    } else if (sess.status == "tool-use") {
-                        row_fill(IM_COL32(255, 155, 50, 13));
-                    }
-                    if (hov) row_fill(IM_COL32(255, 255, 255, 15));
-
-                    // 左边框 3px 状态色（末行下端沿窗口圆弧裁剪）
-                    {
-                        const float bw = 3.0f * S;
-                        const float x0 = rmin_fixed.x, x1 = x0 + bw;
-                        const float cy0 = win_bottom - win_round;  // 角区起点
-                        if (!last_row || rmax.y <= cy0 ||
-                            win_round <= bw) {
-                            cdl->AddRectFilled(rmin_fixed, ImVec2(x1, rmax.y),
-                                               st.border);
-                        } else {
-                            // 角区以上全宽
-                            cdl->AddRectFilled(rmin_fixed, ImVec2(x1, cy0),
-                                               st.border);
-                            // 角区：右缘下行到弧线交点，再沿左下圆弧回到左缘
-                            //（ImGui 只有矩形裁剪，弧形按 Path 手工构造）
-                            const float cx = x0 + win_round;  // 弧心
-                            const float dx1 = x1 - cx;        // <0
-                            const float arc_y1 = sqrtf(win_round * win_round -
-                                                       dx1 * dx1);
-                            const float y_end = rmax.y - cy0 < arc_y1
-                                                      ? rmax.y - cy0
-                                                      : arc_y1;
-                            cdl->PathLineTo(ImVec2(x1, cy0));
-                            cdl->PathLineTo(ImVec2(x1, cy0 + y_end));
-                            float ax = dx1;
-                            if (y_end < arc_y1) {
-                                ax = -sqrtf(win_round * win_round -
-                                            y_end * y_end);
-                                cdl->PathLineTo(ImVec2(cx + ax, cy0 + y_end));
-                            }
-                            cdl->PathArcTo(ImVec2(cx, cy0), win_round,
-                                           atan2f(y_end, ax), 3.14159265f);
-                            cdl->PathFillConvex(st.border);
-                        }
-                    }
-
-                    // 内容基线（垂直居中）
+                    // 一行 = 状态灯 + 项目名 + IDE 小标 + 状态词（与设备端
+                    // 值班牌同一套语言）：颜色只给状态灯和状态词；需要确认
+                    // 的行整块反色成珊瑚红。
+                    const LampStyle st = LampFor(sess);
+                    const bool alert = st.lamp == 4;
+                    const bool idle = st.lamp == 0;
+                    const float m = mini ? 0.8f : 1.0f;  // mini 档整体缩小
                     const float midy = rmin_fixed.y + row_h * 0.5f;
-                    float x = rmin_fixed.x + pad_h;
-
-                    // 状态点（.project-dot 8px；闪烁）
-                    ImU32 dotc = st.dot;
-                    if (sess.status == "idle") dotc = (st.dot & ~IM_COL32_A_MASK) | (128u << IM_COL32_A_SHIFT);
-                    else if (st.dot_period > 0.0f)
-                        dotc = (st.dot & ~IM_COL32_A_MASK) |
-                               (ImU32)(255.0f * PulseAlpha((float)now, st.dot_period)) << IM_COL32_A_SHIFT;
-                    const float dd = mini ? 6.0f * S : 8.0f * S;
-                    cdl->AddCircleFilled(ImVec2(x + dd * 0.5f, midy), dd * 0.5f, dotc, 12);
-                    x += dd + (mini ? 5.0f : 8.0f) * S;
-
-                    // IDE 徽标（.project-ide 14x14 圆角 3，9px 700）
-                    if (!sess.ide.empty()) {
-                        const IdeBadge b = BadgeFor(sess);
-                        const float bs = mini ? 11.0f * S : 14.0f * S;
-                        const float bfont = p->font_9->FontSize;
-                        cdl->AddRectFilled(ImVec2(x, midy - bs * 0.5f),
-                                           ImVec2(x + bs, midy + bs * 0.5f), b.bg,
-                                           3.0f * S);
-                        const float lw = TextW(p->font_9, bfont,
-                                               std::string(1, b.letter).c_str());
-                        AddTextS(cdl,p->font_9, bfont,
-                                     ImVec2(x + (bs - lw) * 0.5f,
-                                            TextCenteredY(p->font_9, bfont,
-                                                std::string(1, b.letter).c_str(),
-                                                midy)),
-                                     b.fg, std::string(1, b.letter).c_str());
-                        x += bs + (mini ? 5.0f : 8.0f) * S;
+                    const ImVec2 imin(rmin_fixed.x + 4.0f * S, rmin_fixed.y + 1.0f * S);
+                    const ImVec2 imax(rmax.x - 4.0f * S, rmax.y - 1.0f * S);
+                    const float irad = 7.0f * S * m;
+                    if (alert) {
+                        const float k = TriWave((float)now, 1.4f);
+                        cdl->AddRectFilled(ImVec2(imin.x - 1.5f * S, imin.y - 1.5f * S),
+                                           ImVec2(imax.x + 1.5f * S, imax.y + 1.5f * S),
+                                           WithAlpha(kCoral, 0.22f + 0.33f * k),
+                                           irad + 1.5f * S);
+                        cdl->AddRectFilledMultiColor(
+                            ImVec2(imin.x + irad, imin.y), ImVec2(imax.x - irad, imax.y),
+                            kCoral, kCoral, kCoralDeep, kCoralDeep);
+                        cdl->AddRectFilled(imin, ImVec2(imin.x + irad * 2.0f, imax.y),
+                                           kCoral, irad, ImDrawFlags_RoundCornersLeft);
+                        cdl->AddRectFilled(ImVec2(imax.x - irad * 2.0f, imin.y), imax,
+                                           kCoral, irad, ImDrawFlags_RoundCornersRight);
+                        cdl->AddRectFilledMultiColor(
+                            ImVec2(imin.x + irad, imin.y), ImVec2(imax.x - irad, imax.y),
+                            kCoral, kCoral, kCoralDeep, kCoralDeep);
+                    } else if (hov) {
+                        cdl->AddRectFilled(imin, imax, IM_COL32(255, 255, 255, 18), irad);
                     }
 
-                    // 状态文字（右侧，先算宽给名称留位）
+                    // 状态灯：每种状态一个不同的动作，不看颜色也分得清
+                    const float lx = rmin_fixed.x + pad_h + 5.0f * S * m;
+                    DrawLamp(cdl, ImVec2(lx, midy), st, (float)now, S * m);
+                    float x = lx + 13.0f * S * m;
+
+                    // 状态词（右侧，先算宽给名称留位）
                     const char* stxt = StatusText(sess);
                     const float stw = TextW(f_stxt, font_stxt, stxt);
-                    // 状态文字颜色：idle 绿 #57d97a；working/thinking/tool-use 强调色；
-                    // confirm 红 #ff6666 600；其余白 0.45
-                    ImU32 stcol = IM_COL32(255, 255, 255, 115);
-                    if (sess.status == "idle") stcol = IM_COL32(0x57, 0xD9, 0x7A, 255);
-                    else if (sess.status == "confirmation-needed")
-                        stcol = IM_COL32(0xFF, 0x66, 0x66, 255);
-                    else if (st.name_accent) stcol = st.accent;
-                    AddTextS(cdl,f_stxt, font_stxt,
-                                 ImVec2(rmax.x - pad_h - stw,
-                                        TextCenteredY(f_stxt, font_stxt, stxt, midy)),
-                                 stcol, stxt);
+                    const float st_x = rmax.x - pad_h - stw;
+                    AddTextS(cdl, f_stxt, font_stxt,
+                             ImVec2(st_x, TextCenteredY(f_stxt, font_stxt, stxt, midy)),
+                             alert  ? kCoralInk
+                             : idle ? kFaint
+                                    : st.color,
+                             stxt);
 
-                    // 项目名（.project-name 12px 白 0.85；超宽截断省略号）
-                    const float name_max = (rmax.x - pad_h - stw - 10.0f * S) - x;
+                    // 项目名（超宽截断）+ 紧跟其后的 IDE 小标
+                    const float tag = sess.ide.empty() ? 0.0f : 12.0f * S * m;
+                    const float tag_gap = sess.ide.empty() ? 0.0f : 5.0f * S * m;
+                    const float name_max = (st_x - 8.0f * S) - x - tag - tag_gap;
                     char name[96];
-                    TruncateUtf8(sess.project_name.c_str(), name_max, name,
-                                 sizeof(name), f_name, font_name);
-                    ImU32 namecol = IM_COL32(255, 255, 255, 217);
-                    if (st.name_red) namecol = IM_COL32(0xFF, 0x66, 0x66, 255);
-                    else if (st.name_accent) namecol = st.accent;
-                    AddTextS(cdl,f_name, font_name,
-                                 ImVec2(x, TextCenteredY(f_name, font_name, name, midy)),
-                                 namecol, name);
+                    TruncateUtf8(sess.project_name.c_str(), name_max, name, sizeof(name),
+                                 f_name, font_name);
+                    AddTextS(cdl, f_name, font_name,
+                             ImVec2(x, TextCenteredY(f_name, font_name, name, midy)),
+                             alert  ? kCoralInk
+                             : idle ? kDim
+                                    : kPaper,
+                             name);
+                    if (tag > 0.0f) {
+                        const IdeBadge bdg = BadgeFor(sess);
+                        const float tx = x + TextW(f_name, font_name, name) + tag_gap;
+                        const ImU32 tc =
+                            alert ? kCoralInk : WithAlpha(bdg.fg, idle ? 0.55f : 0.9f);
+                        cdl->AddRect(ImVec2(tx, midy - tag * 0.5f),
+                                     ImVec2(tx + tag, midy + tag * 0.5f),
+                                     WithAlpha(tc, 0.5f), 3.0f * S * m, 0, 1.0f * S);
+                        const std::string letter(1, bdg.letter);
+                        const float bfont = p->font_9->FontSize * m;
+                        const float lw = TextW(p->font_9, bfont, letter.c_str());
+                        AddTextS(
+                            cdl, p->font_9, bfont,
+                            ImVec2(tx + (tag - lw) * 0.5f,
+                                   TextCenteredY(p->font_9, bfont, letter.c_str(), midy)),
+                            tc, letter.c_str());
+                    }
 
                     if (clicked && on_project_click) on_project_click(sess);
                 }
@@ -2331,10 +2372,10 @@ void UIRenderer::renderMenu() {
     ImGui::SetNextWindowSizeConstraints(
         ImVec2(menu_w, 0.0f), ImVec2(menu_w, (float)p->win_h - 8.0f * S));
     ImGui::SetNextWindowSize(ImVec2(menu_w, 0.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.95f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, Rgb(30, 30, 40));
-    ImGui::PushStyleColor(ImGuiCol_Border, Rgb(255, 255, 255, 26));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f * S);
+    ImGui::SetNextWindowBgAlpha(0.97f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, Rgb(0x1A, 0x1A, 0x1F));
+    ImGui::PushStyleColor(ImGuiCol_Border, Rgb(255, 255, 255, 30));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f * S);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.0f * S, 4.0f * S));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f * S);
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |

@@ -79,6 +79,23 @@ try {
     payload = run({conversation_id: 'c'}, 'cursor', name);
     assert.equal(payload.hook_event_name, name[0].toUpperCase() + name.slice(1));
   }
+  const claudeEnv = {CLAUDE_PROJECT_DIR: 'D:/claude/项目'};
+  payload = run({session_id: 'claude-s', hook_event_name: 'PermissionRequest', cwd: 'D:/claude/项目/sub/dir',
+    tool_name: 'Bash', agent_id: 'worker', tool_input: {command: 'SECRET_COMMAND'}}, 'claude', '', claudeEnv);
+  assert.equal(payload.ide, 'claude');
+  assert.equal(payload.project_path, 'D:/claude/项目', 'Claude project root must not follow the agent cwd');
+  assert.equal(payload.project_name, '项目');
+  assert.equal(payload.agent_id, 'worker');
+  assert.equal(payload.tool_input, undefined);
+  payload = run({session_id: 'claude-wt', hook_event_name: 'PreToolUse', tool_name: 'Edit',
+    cwd: 'D:/claude/项目/.claude/worktrees/agent-7f3a/src'}, 'claude', '',
+    {CLAUDE_PROJECT_DIR: 'D:\\claude\\项目\\.claude\\worktrees\\agent-7f3a'});
+  assert.equal(payload.project_path, 'D:\\claude\\项目', 'Claude worktree must report its owning project');
+  assert.equal(payload.project_name, '项目');
+  payload = run({session_id: 'claude-s', hook_event_name: 'Notification', cwd: 'D:/claude/only-cwd',
+    notification_type: 'idle_prompt'}, 'claude', '', {CLAUDE_PROJECT_DIR: ''});
+  assert.equal(payload.project_name, 'only-cwd', 'Claude falls back to cwd without its project env');
+  assert.equal(payload.notification_type, 'idle_prompt');
   assert.equal(run('{broken', 'cursor', 'preToolUse'), null, 'unavailable observer must still respond');
   payload = run('\uFEFF' + JSON.stringify({session_id: 'bom', hook_event_name: 'Interrupt', cwd: 'D:/p'}));
   assert.equal(payload.hook_event_name, 'Interrupt');

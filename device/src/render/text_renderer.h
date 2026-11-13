@@ -4,7 +4,7 @@
 // 单张图集纹理 + 四边形批量绘制，支持 UTF-8（含 CJK）。
 // PC 端走 ImGui 自有字体系统，本类仅设备端编译。
 
-#ifndef _WIN32
+#if !defined(_WIN32) || defined(DUTYON_UI_PREVIEW)
 
 #include <string>
 
@@ -36,6 +36,9 @@ public:
 
     // 行高（ascent - descent，用于垂直居中）
     float lineHeight(float pixel_size) const;
+
+    // 顶边到基线的距离（不同字号的文字按基线对齐用）
+    float ascent(float pixel_size) const;
 
     // 字距缩放（默认 1.0；<1 收紧字距 —— 大字排版更紧凑、同样行宽能容
     // 更大字号）。measureWidth/draw 同步生效，居中测量一致

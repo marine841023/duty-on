@@ -1,10 +1,19 @@
 #pragma once
 
-// 设备端任务列表面板（屏幕下半屏）：会话行 = 状态色圆点 + 项目名 + 状态文字，
-// 配色/文案对齐 PC 端状态栏（ui_renderer.cpp StyleFor / StatusText）。
-// 行块贴角色区下方堆叠成半透明黑圆角卡片（与角色留一线距离），未占区域保持透明黑。
+// 设备端界面（ARM Linux GLES 直绘，无 ImGui）。视觉语言：
+//   - 屏幕是一个小舞台：角色身后一束随整体状态变色、呼吸的舞台光；
+//   - 任务是一排"值班牌"：圆角牌 + 状态灯 + 项目名 + 状态词。颜色只给状态灯
+//     和状态词，需要确认的牌整块反色成珊瑚红，隔着桌子一眼能看到；
+//   - 时钟主题色（PC 菜单下发）是全屏唯一的强调色。
+// 所有形状走同一个 SDF 着色器（圆角/描边/光晕都有抗锯齿）。
+//
+// 坐标约定：像素坐标，GL 原点左下、y 向上。region_x/region_w 是信息区的
+// 水平范围（横屏为右列，竖屏为整屏；region_w<0 = 整屏宽）。
+//
+// DUTYON_UI_PREVIEW：Windows 离屏预览工具（device/tools/ui-preview）用桌面 GL
+// 编译同一份代码出图，设备端与 PC 正式程序都不定义它。
 
-#ifndef _WIN32
+#if !defined(_WIN32) || defined(DUTYON_UI_PREVIEW)
 
 #include <string>
 #include <vector>
@@ -18,72 +27,79 @@ public:
     TaskPanel();
     ~TaskPanel();
 
-    // 加载文字字体；失败则面板只画底色无文字
-    bool init(const std::string& font_path);
+    // 加载字体：font_path = 正文（含 CJK）；clock_font_path = 时钟数字字体，
+    // 缺失时回退正文字体。正文字体失败返回 false（之后只画形状无文字）
+    bool init(const std::string& font_path,
+              const std::string& clock_font_path = "/opt/dutyon/assets/font-clock.ttf");
 
-    // 设定时钟/日期颜色主题（PC 菜单下发）：amber(默认)/ice/white/green/pink；
-    // 未知名字回退 amber。renderClock/renderDate 立即使用新颜色
+    // 主题色（PC 菜单下发）：amber(默认)/ice/white/green/pink，未知回退 amber
     void setClockColor(const std::string& name);
 
-    // multi 模式动态分屏：按任务数算面板区高度（行数×行高 + 顶隙 +
-    // 底边距）。任务少时面板矮、角色区大；0 任务按 1 行（"暂无任务"）
+    // ---- 正常画面 ----
+
+    // 舞台光：画在角色之前。vx/vy/vw/vh = 角色视口；overall_state =
+    // sleeping/working/alert，决定光的颜色和呼吸节奏
+    void renderBackdrop(const std::string& overall_state, int screen_w, int screen_h, int vx,
+                        int vy, int vw, int vh);
+
+    // 顶部时间栏高度（主循环给角色视口让位用）。large = 单任务/相框的大时钟
+    float headerHeight(bool large, bool landscape) const;
+
+    // 时间栏：时:分 大字 + 小号秒；date（如 11月12日）与 weekday（如 星期四）
+    // 竖屏多任务排在右侧两行，其余排成一行。
+    // hms = "HH:MM:SS"；date/weekday 可为空
+    void renderHeader(const std::string& hms, const std::string& date, const std::string& weekday,
+                      bool large, bool landscape, int screen_w, int screen_h, int region_x = 0,
+                      int region_w = -1);
+
+    // 任务牌占用高度（竖屏多任务模式动态分屏）；0 个任务按 1 行算
     static float heightForSessions(int session_count);
 
-    // 在下半屏绘制：area_top = 面板区顶边（布局约定为 screen_h/2），
-    // 行块自角色区下方（留隙）向下堆叠（卡片高度按行数自适应）。
-    // region_x/region_w：水平放置区域（横屏左右布局时限制到右列）；
-    // region_w<0 表示用整屏宽（竖屏默认，等价旧行为）
+    // 任务牌列表：自 area_top 向下排，放不下的折叠成"还有 N 个"
     void render(const PetStatus& status, int screen_w, int screen_h, float area_top,
                 int region_x = 0, int region_w = -1);
 
-    // 顶部时钟（HH:MM:SS 居中）：y_top = 文本区顶边（GL 坐标），
-    // size = 字号（多任务模式 ~40，单任务模式 ~56）。region_x/region_w
-    // 同上（在区域内水平居中；region_w<0 = 整屏）
-    void renderClock(const std::string& text, float y_top, float size,
-                     int screen_w, int screen_h,
+    // 单任务模式：只画最要紧的一张牌（待确认 > 进行中），都空闲则不画。
+    // 牌顶边 = area_top
+    void renderFocus(const PetStatus& status, int screen_w, int screen_h, float area_top,
                      int region_x = 0, int region_w = -1);
 
-    // 底部日期行（YYYY年M月D日 星期X 居中，屏幕下缘）：同款字体/配色、
-    // 字号更小；过宽自动缩字号保证一行放下。region_x/region_w 同上
-    void renderDate(const std::string& text, float y_top, float size,
-                    int screen_w, int screen_h,
-                    int region_x = 0, int region_w = -1);
-
-    // 语音会话动作区（设备端，布局：上时钟/中人物/下动作 ≤2 行）：
-    // pill 网格展示当前角色可执行指令（仅展示，无触摸），highlight 指令
-    // 主题色高亮闪烁；commands 为空 = 角色不支持（画 voice.unsupported 提示）。
-    // area_top = 动作区顶边（GL y）；返回面板实际高度（px，主循环压缩人物视口用）
+    // 语音指令区：提示行 + 指令药丸网格（highlight 为命中的指令）。
+    // area_top = 区域顶边；返回实际高度
     float renderVoicePanel(const std::vector<std::string>& commands, int highlight,
-                           const std::string& hint, int screen_w, int screen_h,
-                           float area_top, int region_x = 0, int region_w = -1);
-
-    // 语音面板高度测量（与 renderVoicePanel 同公式）：主循环设人物视口时
-    // 需先知道面板高度（面板贴底、卡片占 [0, 高度]），渲染时 area_top 传
-    // 该值即可精确贴底。字体未加载返回 0（面板不画、人物视口不压缩）。
+                           const std::string& hint, int screen_w, int screen_h, float area_top,
+                           int region_x = 0, int region_w = -1);
     float voicePanelHeight(int command_count);
 
-    // 屏幕右上角连接状态图标（两块，纯色几何、无贴图）：
-    //   最右 Wi-Fi 信号条（4 根递增）——设备是否已入网：入网=绿，未入网/配网中=红；
-    //   其左 显示器图标——是否已连上 PC：连上=绿，未连=灰。两段链路分开表示。
-    void renderNetStatus(bool wifi_online, bool pc_online,
-                         int screen_w, int screen_h);
+    // ---- 引导画面（整屏，不画角色）----
 
-    // 全屏压暗叠层（软件亮度）：brightness 10-100，>=100 不画。
-    // 当前屏无 /sys/class/backlight 内核接口时的亮度实现；
-    // 有背光 sysfs 的量产屏由 main 优先写背光，此叠层不生效
+    // 配网：热点名/密码 + 步骤。failure 非空时作为标题（上次入网失败原因）
+    void renderProvision(const std::string& ssid, const std::string& pass,
+                         const std::string& failure, int screen_w, int screen_h);
+    // 正在入网：progress = 尝试次数/倒计时文案
+    void renderJoining(const std::string& progress, int screen_w, int screen_h);
+    // 配对码：waiting = 已配对过、等原电脑上线；wifi_just_ok = 刚入网的提示
+    void renderPairing(const std::string& code, bool waiting, bool wifi_just_ok, int screen_w,
+                       int screen_h);
+
+    // ---- 常驻叠加 ----
+
+    // 右上角两段链路：Wi-Fi（设备入网）与电脑（已连上 PC）。
+    // 断开 = 变灰 + 珊瑚色斜杠（不只靠颜色区分）
+    void renderNetStatus(bool wifi_online, bool pc_online, int screen_w, int screen_h);
+
+    // 有任务等确认时，屏幕四边泛起呼吸的珊瑚色光（画在角色之上，
+    // 任何角色、任何模式下余光都能扫到）
+    void renderAlertEdge(int screen_w, int screen_h);
+
+    // 软件亮度：整屏压暗（brightness 10-100，>=100 不画）
     void renderDim(int brightness, int screen_w, int screen_h);
-
-    // 时钟字体行高（用于日期行垂直定位；卡通字体加载失败回退主字体行高）
-    float clockLineHeight(float pixel_size) const;
-
-    // 字距缩放转发到两套字体（<1 收紧；配网大字页用，渲染后还原 1.0）
-    void setSpacing(float scale);
 
 private:
     struct Impl;
     Impl* impl_;
 };
 
-} // namespace dutyon
+}  // namespace dutyon
 
-#endif // !_WIN32
+#endif  // !_WIN32 || DUTYON_UI_PREVIEW

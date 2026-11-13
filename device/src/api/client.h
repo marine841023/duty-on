@@ -25,7 +25,7 @@ namespace dutyon {
 struct SessionInfo {
     std::string project_name;
     std::string status;          // "idle"|"working"|"thinking"|"tool-use"|"confirmation-needed"
-    std::string ide;             // "trae"|"qoder"|"cursor"|"codex"|"opencode"（可为空）
+    std::string ide;             // "trae"|"qoder"|"cursor"|"codex"|"opencode"|"claude"（可为空）
     std::string alert_message;   // 需要确认时的提示文本（可为空）
 };
 

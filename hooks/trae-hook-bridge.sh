@@ -121,12 +121,18 @@ elif command -v python3 >/dev/null 2>&1; then
 fi
 if [ -z "$project_dir" ]; then
   case "$ide" in
+    claude) project_dir="$CLAUDE_PROJECT_DIR" ;;
     codex) project_dir="$CODEX_PROJECT_DIR" ;;
     cursor) project_dir="$CURSOR_PROJECT_DIR" ;;
     qoder) project_dir="$QODER_PROJECT_DIR" ;;
     trae) project_dir="${TRAE_PROJECT_DIR:-$CLAUDE_PROJECT_DIR}" ;;
     *) project_dir="${TRAE_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$QODER_PROJECT_DIR}}" ;;
   esac
+fi
+
+# Claude Code worktree sessions belong to the project that owns the worktree.
+if [ "$ide" = "claude" ]; then
+  project_dir=$(printf '%s' "$project_dir" | sed -E 's#[\\/]\.claude[\\/]worktrees[\\/][^\\/]+[\\/]?$##')
 fi
 
 project_name=""

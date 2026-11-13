@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -74,6 +75,47 @@ func TestAccountPersistenceAndIsolation(t *testing.T) {
 	w := call(h, "GET", "/api/sync/config", alice, nil)
 	if bytes.Contains(w.Body.Bytes(), []byte("secret")) || !bytes.Contains(w.Body.Bytes(), []byte("language")) {
 		t.Fatal(w.Body)
+	}
+	// 设置带版本号：带旧版本号写入被拒绝，带当前版本号写入成功并得到新版本号
+	var got struct {
+		Rev string `json:"rev"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &got)
+	if len(got.Rev) != 32 {
+		t.Fatal("config must carry a revision", w.Body)
+	}
+	put := func(rev, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("PUT", "/api/sync/config", bytes.NewReader([]byte(body)))
+		req.Header.Set("Authorization", "Bearer "+alice)
+		req.Header.Set("If-Match", "\""+rev+"\"")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := put("0", `{"language":"en"}`); rec.Code != 412 || !bytes.Contains(rec.Body.Bytes(), []byte(got.Rev)) {
+		t.Fatal("stale revision must be rejected with the current one", rec.Code, rec.Body)
+	}
+	rec := put(got.Rev, `{"language":"en","customCharacters":[{"id":"char_1","name":"测试"}]}`)
+	if rec.Code != 200 || bytes.Contains(rec.Body.Bytes(), []byte(got.Rev)) {
+		t.Fatal("matching revision must be accepted and return a new one", rec.Code, rec.Body)
+	}
+	if rec := put(got.Rev, `{"language":"ja"}`); rec.Code != 412 {
+		t.Fatal("old revision must not win after an update", rec.Code)
+	}
+	// 旧版桌宠不带版本号、每分钟上传本机设置：云端被网页改过之后，内容不同的
+	// 无条件上传必须被拒绝（否则网页的修改一分钟内就被盖掉）；内容相同照常通过
+	if w := call(h, "PUT", "/api/sync/config", alice, []byte(`{"language":"zh"}`)); w.Code != 412 {
+		t.Fatal("unconditional write must not clobber a web edit", w.Code)
+	}
+	if w := call(h, "PUT", "/api/sync/config", alice, []byte(`{"customCharacters":[{"id":"char_1","name":"测试"}],"language":"en"}`)); w.Code != 200 {
+		t.Fatal("unconditional write of identical content must pass", w.Code, w.Body)
+	}
+	// 从没用过网页的账号：旧版桌宠的无条件上传不受影响
+	if w := call(h, "PUT", "/api/sync/config", bob, []byte(`{"language":"zh"}`)); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	if w := call(h, "PUT", "/api/sync/config", bob, []byte(`{"language":"en"}`)); w.Code != 200 {
+		t.Fatal("accounts never edited on the web keep last-write-wins", w.Code)
 	}
 	s, err := OpenStore(a.store.dir)
 	if err != nil {
@@ -227,10 +269,20 @@ func TestImmutableReleasesAndWeb(t *testing.T) {
 	if err := a.publish(bad, ""); err == nil {
 		t.Fatal("accepted invalid zip")
 	}
-	for _, path := range []string{"/", "/app.js", "/style.css", "/healthz"} {
+	for _, path := range []string{"/", "/app.js", "/style.css", "/img/icon.png", "/img/nipsilon.png", "/healthz"} {
 		if w := call(h, "GET", path, "", nil); w.Code != 200 || w.Header().Get("X-Content-Type-Options") != "nosniff" {
 			t.Fatal(path, w.Code)
 		}
+	}
+	// 网页只发 web/ 下确实存在的文件：目录、不存在的路径、源码文件都是 404
+	for _, path := range []string{"/img/", "/img", "/nope.js", "/store.go", "/web/index.html"} {
+		if w := call(h, "GET", path, "", nil); w.Code != 404 {
+			t.Fatal(path, w.Code)
+		}
+	}
+	if w := call(h, "GET", "/", "", nil); !strings.Contains(w.Header().Get("Content-Security-Policy"), "default-src 'none'") ||
+		!strings.Contains(w.Body.String(), "云空间") {
+		t.Fatal("home page must carry CSP and content")
 	}
 	if w := call(h, "GET", "/data/users.json", "", nil); w.Code != 404 {
 		t.Fatal(w.Code)

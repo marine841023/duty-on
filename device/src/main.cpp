@@ -508,7 +508,7 @@ int main() {
         GetLastError() == ERROR_ALREADY_EXISTS) {
         // 必须 MessageBoxW：项目按 /utf-8 编译，窄字符串走 ANSI(GBK) 解码会
         // 把 UTF-8 中文渲染成乱码
-        MessageBoxW(nullptr,
+        dutyon::dk::messageBox(nullptr,
                     L"DutyOn 已经在运行中，请勿重复启动。\r\n\r\n"
                     L"DutyOn is already running.\r\n"
                     L"Check the desktop for the existing pet window.",
@@ -1232,7 +1232,7 @@ int main() {
         std::string ext = fs::path(src).extension().string();
         for (auto& ch : ext) ch = (char)tolower((unsigned char)ch);
         if (ext != ".gif" && ext != ".png" && ext != ".jpg" && ext != ".jpeg") {
-            MessageBoxW(pet_hwnd, L"仅支持 GIF / PNG / JPG 文件",
+            dutyon::dk::messageBox(pet_hwnd, L"仅支持 GIF / PNG / JPG 文件",
                         L"Duty On", MB_OK | MB_ICONWARNING);
             return false;
         }
@@ -1247,7 +1247,7 @@ int main() {
         fs::copy_file(fs::path(src), dst,
                       fs::copy_options::overwrite_existing, ec);
         if (ec) {
-            MessageBoxW(pet_hwnd, L"文件复制失败，请重试", L"Duty On",
+            dutyon::dk::messageBox(pet_hwnd, L"文件复制失败，请重试", L"Duty On",
                         MB_OK | MB_ICONWARNING);
             return false;
         }
@@ -1295,7 +1295,7 @@ int main() {
         for (auto& ch : ext) ch = (char)tolower((unsigned char)ch);
         if (ext != ".wav" && ext != ".mp3" && ext != ".ogg" &&
             ext != ".flac" && ext != ".m4a") {
-            MessageBoxW(pet_hwnd,
+            dutyon::dk::messageBox(pet_hwnd,
                         L"仅支持 WAV / MP3 / OGG / FLAC / M4A 文件",
                         L"Duty On", MB_OK | MB_ICONWARNING);
             return false;
@@ -1317,7 +1317,7 @@ int main() {
         fs::copy_file(fs::path(src), dst,
                       fs::copy_options::overwrite_existing, ec);
         if (ec) {
-            MessageBoxW(pet_hwnd, L"文件复制失败，请重试", L"Duty On",
+            dutyon::dk::messageBox(pet_hwnd, L"文件复制失败，请重试", L"Duty On",
                         MB_OK | MB_ICONWARNING);
             return false;
         }
@@ -1577,9 +1577,9 @@ int main() {
             host.reset_wifi = [&](const std::string& did) {
                 // 清设备端 Wi-Fi 凭据重进配网模式（token 保留，无需再配对）
                 backend.requestDeviceResetWifi(did);
-                MessageBoxW(
+                dutyon::dk::messageBox(
                     pet_hwnd,
-                    L"已下发重新配网指令，设备将清除 Wi-Fi 并重启配网模式",
+                    L"已通知硬件屏清除 Wi-Fi。它会回到配网热点，按屏幕上的步骤重新联网即可。",
                     L"Duty On", MB_OK | MB_ICONINFORMATION);
             };
             host.paired = [&]() {
@@ -1718,7 +1718,7 @@ int main() {
                                     wname.data(), wlen);
                 const std::wstring q = L"确定删除角色「" + wname +
                                        L"」吗？\r\n对应的动画文件会一并删除。";
-                if (MessageBoxW(pet_hwnd, q.c_str(), L"Duty On",
+                if (dutyon::dk::messageBox(pet_hwnd, q.c_str(), L"Duty On",
                                 MB_YESNO | MB_ICONQUESTION) != IDYES)
                     break;
                 const bool was_active =
@@ -1925,7 +1925,7 @@ int main() {
                            j.find("\"success\": true") != std::string::npos)
                             ? L"IDE 集成安装完成"
                             : L"IDE 集成安装失败，请重试";
-                    MessageBoxW(nullptr, msg, L"Duty On", MB_OK | MB_ICONINFORMATION);
+                    dutyon::dk::messageBox(nullptr, msg, L"Duty On", MB_OK | MB_ICONINFORMATION);
                     installing = false;
                 }).detach();
             }
@@ -1937,11 +1937,38 @@ int main() {
             if (!querying.exchange(true)) {
                 std::thread([&]() {
                     const std::string j = api.getHooks();
-                    std::wstring msg = j.empty() ? L"无法连接后端服务"
-                                                 : L"Hook 状态：\n" +
-                                                   std::wstring(j.begin(), j.end());
-                    MessageBoxW(nullptr, msg.c_str(), L"Duty On — Hook 状态",
-                                MB_OK | MB_ICONINFORMATION);
+                    std::wstring msg = L"无法连接后端服务。";
+                    if (!j.empty()) {
+                        // 逐项列出，不把 JSON 原文甩给用户
+                        auto on = [&](const char* key) {
+                            return j.find(std::string("\"") + key +
+                                          "\":true") != std::string::npos;
+                        };
+                        struct Item {
+                            const wchar_t* name;
+                            const char* key;
+                        };
+                        static const Item kItems[] = {
+                            {L"Trae", "hooksExist"},
+                            {L"Qoder", "qoderHooksExist"},
+                            {L"Cursor", "cursorHooksExist"},
+                            {L"Codex", "codexHooksExist"},
+                            {L"OpenCode", "opencodePluginExist"},
+                            {L"Claude Code", "claudeHooksExist"},
+                        };
+                        msg = on("bridgeExists") ? L""
+                                                 : L"桥接脚本缺失，请重新安装 "
+                                                   L"IDE 集成。\r\n\r\n";
+                        for (const auto& it : kItems)
+                            msg += std::wstring(it.name) +
+                                   (on(it.key) ? L"：已接入\r\n"
+                                               : L"：未接入\r\n");
+                        msg +=
+                            L"\r\n未接入通常是因为这台电脑上没有装对应的工具。";
+                    }
+                    dutyon::dk::messageBox(nullptr, msg.c_str(),
+                                           L"IDE 集成状态",
+                                           MB_OK | MB_ICONINFORMATION);
                     querying = false;
                 }).detach();
             }
@@ -2153,11 +2180,18 @@ int main() {
             thumb_gen.next_at = thumb_gen.elapsed + 0.8f;
             const ModelEntry e = thumb_gen.queue[thumb_gen.idx++];
             if (UserConfigStore::thumbnailFor(e.name).empty()) {
+  // 缩略图边长：默认 128；DUTYON_THUMB_SIZE 可调大（官网配图等需要
+         // 透明底的高清角色图时用，取值 64~1024）
+         static const int thumb_px = [] {
+      const char* e = getenv("DUTYON_THUMB_SIZE");
+      const int v = e ? atoi(e) : 128;
+      return v >= 64 && v <= 1024 ? v : 128;
+  }();
                 Live2DRenderer tmp;
                 if (tmp.loadModelFile(e.dir, e.json)) {
                     tmp.update(0.033f);
                     if (tmp.captureThumbnailPng(
-                            UserConfigStore::thumbnailPathFor(e.name), 128))
+                            UserConfigStore::thumbnailPathFor(e.name), thumb_px))
                         printf("[Thumb] generated: %s\n", e.name.c_str());
                 }
             }
@@ -2975,6 +3009,13 @@ int main() {
             //     （满高），时钟/日期/任务列表在右列自上而下；
             //   竖屏（rotation 90/270）= 沿用上下布局：角色区 + 底部面板。
             const bool landscape = (WIN_W >= WIN_H);
+            // 角色视口（舞台光要画在同一块区域里）
+            int char_vx = 0, char_vy = 0, char_vw = WIN_W, char_vh = WIN_H;
+            auto set_char_vp = [&](int x, int y, int w, int h) {
+                char_vx = x; char_vy = y; char_vw = w; char_vh = h;
+                renderer.setViewport(x, y, w, h);
+                gif.setViewport(x, y, w, h);
+            };
             const int left_w = landscape ? WIN_H : WIN_W;   // 横屏左列（正方形）宽
             const int region_x = landscape ? left_w : 0;     // 信息区起点 x
             const int region_w = landscape ? (WIN_W - left_w) : WIN_W;
@@ -2991,28 +3032,24 @@ int main() {
             if (landscape) {
                 // 左右布局：人偶占满高左列（列内居中），右列留给时钟/日期/任务；
                 // 语音面板画右列底部（叠加段），人偶不动
-                renderer.setViewport(0, 0, left_w, WIN_H);
-                gif.setViewport(0, 0, left_w, WIN_H);
+                set_char_vp(0, 0, left_w, WIN_H);
             } else if (voice_active) {
                 // 竖屏语音模式：上时钟（预留 110）+ 中人物 + 下面板
                 //（待机提示行 / 会话指令列表）
-                const int clock_reserve = 110;
+                const int clock_reserve = (int)task_panel.headerHeight(false, false);
                 const int char_h = WIN_H - clock_reserve - (int)panel_h;
-                renderer.setViewport(0, (int)panel_h, WIN_W, char_h);
-                gif.setViewport(0, (int)panel_h, WIN_W, char_h);
+                set_char_vp(0, (int)panel_h, WIN_W, char_h);
             } else if (device_mode == "multi") {
                 // 竖屏多任务：动态分屏（角色区 = 时钟下沿 ~ 面板顶，内容
                 // 在该区域内垂直居中）。时钟区预留 ≈ 110px
                 panel_h = TaskPanel::heightForSessions(
                     pc_ready ? (int)current_status.sessions.size() : 0);
-                const int clock_reserve = 110;
+                const int clock_reserve = (int)task_panel.headerHeight(false, false);
                 const int char_h = WIN_H - clock_reserve - (int)panel_h;
-                renderer.setViewport(0, (int)panel_h, WIN_W, char_h);
-                gif.setViewport(0, (int)panel_h, WIN_W, char_h);
+                set_char_vp(0, (int)panel_h, WIN_W, char_h);
             } else {
                 // 竖屏单任务/相框：全屏 + 垂直居中
-                renderer.setViewport(0, 0, WIN_W, WIN_H);
-                gif.setViewport(0, 0, WIN_W, WIN_H);
+                set_char_vp(0, 0, WIN_W, WIN_H);
             }
             // 相框模式播放：folder=照片逐张流式（PhotoPlayer）/ motion=动作
             // 轮播（现行）。无照片可显（PC 离线 / 首帧未就绪）时兜底跑动作
@@ -3051,6 +3088,15 @@ int main() {
             // 不画角色（照片满屏）。
             const bool draw_character =
                 (dev_screen == DevScreen::Normal) && !photo_showing;
+            // 舞台光：垫在角色身后，颜色与呼吸跟随整体状态。只给 Live2D——
+            // 自定义 GIF 多为不透明底图，光会被整块挡住只剩一圈边。相框模式
+            // 不响应任务状态，保持睡眠时的余光。
+            if (draw_character && !using_gif)
+                task_panel.renderBackdrop(pc_ready && device_mode != "frame"
+                                              ? current_status.overall_state
+                                              : std::string("sleeping"),
+                                          WIN_W, WIN_H, char_vx, char_vy,
+                                          char_vw, char_vh);
 #endif
             if (using_gif) {
                 gif.update(delta);
@@ -3120,188 +3166,74 @@ int main() {
             // 后续绘制的 NDC->窗口映射，不复位面板会被压进上半屏）
             glViewport(0, 0, WIN_W, WIN_H);
 
-            // ---- 配网 / 入网 / 配对 引导画面（非正常态，覆盖待机动画）----
-            // 文字复用 task_panel：renderClock=数字卡通字体（配对码），
-            // renderDate=主字体（含中文提示）。位置按 WIN_H 比例，横竖屏通用。
+            // ---- 配网 / 入网 / 配对 引导画面（非正常态，不画角色）----
             if (dev_screen == DevScreen::WifiProvision) {
-                // 配网引导：热点 SSID/密码大字（用户要抄的）+ 分步说明。
-                // 自动弹窗由手机系统决定；保留手动 HTTP 地址作为兜底，
-                // 并提醒用户在无互联网提示中继续使用设备热点。
-                //  横屏：左列热点信息、右列步骤；竖屏单列。
-                // 注意：本渲染系 y 轴向上（0=屏底），阅读顺序"上"= 大 y ——
-                // 标题在最大 y，步骤自上而下 = y 递减。
-                // 字距分支结束务必还原，勿影响时钟/任务页
-                task_panel.setSpacing(1.0f);
-                // 全页仅两种字号：em=凸显（标题/热点 SSID/密码）、nm=普通
-                //（标签/步骤/脚注），层级清晰不琐碎
-                const float em = landscape ? 46.f : 52.f;
-                const float nm = landscape ? 28.f : 30.f;
-                int hx, hw;             // 热点信息区起点 x / 宽
-                int sx, sw;             // 步骤文本区起点 x / 宽
-                float info_y[5];        // 标题/①/SSID/密码label/密码 的 y（文字顶）
-                float s_top;            // 步骤首行 ② 的 y（步骤区最上）
-                float foot_y;           // 底部下载指引 y（屏底小字）
-                if (landscape) {
-                    hx = 0;
-                    hw = left_w;
-                    sx = region_x;
-                    sw = region_w;
-                    s_top = 436.f;
-                    foot_y = 44.f;
-                    info_y[0] = 446.f;
-                    info_y[1] = 404.f;
-                    info_y[2] = 356.f;
-                    info_y[3] = 288.f;
-                    info_y[4] = 240.f;
-                } else {
-                    hx = 0;
-                    hw = WIN_W;
-                    sx = 0;
-                    sw = WIN_W;
-                    s_top = 440.f;
-                    foot_y = 42.f;
-                    info_y[0] = 764.f;
-                    info_y[1] = 712.f;
-                    info_y[2] = 662.f;
-                    info_y[3] = 594.f;
-                    info_y[4] = 544.f;
-                }
-                // ---- ① 热点信息（SSID/密码大字）----
-                const auto failure = wifi.joinFailure();
-                task_panel.renderDate(failure.empty() ? "设备配网" : failure, info_y[0], em, WIN_W, WIN_H,
-                                      hx, hw);
-                task_panel.renderDate("① 手机连接设备热点", info_y[1], nm,
-                                      WIN_W, WIN_H, hx, hw);
-                task_panel.renderDate("「" + wifi.apSsid() + "」", info_y[2],
-                                      em, WIN_W, WIN_H, hx, hw);
-                task_panel.renderDate("热点密码", info_y[3], nm, WIN_W, WIN_H,
-                                      hx, hw);
-                task_panel.renderDate(wifi.apPass(), info_y[4], em, WIN_W,
-                                      WIN_H, hx, hw);
-                // ---- ② ~ ⑥ 步骤（自上而下正序：y 从 s_top 递减）----
-                // 配网阶段用户往往还没装 PC 端 DutyOn，就地告知去哪下载；
-                // renderDate 过宽自动缩字。
-                const std::string steps[] = {
-                    "② 点「登录到网络」通知",
-                    "    未弹出打开 192.168.4.1",
-                    "③ 选 Wi-Fi 输密码提交",
-                    "④ 联网后屏幕显示配对码",
-                    "⑤ 电脑端右键宠物头像",
-                    "    设备 → 配对设备 输码",
-                    "⑥ 提示无互联网时",
-                    "    请选择继续使用此网络",
-                };
-                const int n = (int)(sizeof(steps) / sizeof(steps[0]));
-                // 行距：普通字号 1.5 倍行高
-                const float s_gap = nm * 1.5f;
-                for (int i = 0; i < n; ++i)
-                    task_panel.renderDate(steps[i], s_top - s_gap * (float)i,
-                                          nm, WIN_W, WIN_H, sx, sw);
-                // 底部脚注：软件下载指引（直接给仓库地址 —— 按名字在 Gitee/
-                // GitHub 搜索实测搜不到本仓库，搜索式引导误导用户；Gitee 在前
-                // 便于国内访问）
-                task_panel.renderDate(
-                    "下载 gitee.com/megrezsoft/duty-on",
-                    foot_y, nm, WIN_W, WIN_H, sx, sw);
-                task_panel.setSpacing(1.0f);  // 还原字距（勿影响其他画面）
+                task_panel.renderProvision(wifi.apSsid(), wifi.apPass(),
+                                           wifi.joinFailure(), WIN_W, WIN_H);
             } else if (dev_screen == DevScreen::JoiningWifi) {
-                task_panel.renderDate("正在连接 Wi-Fi…", (float)WIN_H * 0.60f,
-                                      44.f, WIN_W, WIN_H);
-                task_panel.renderDate(wifi.joinProgress(), (float)WIN_H * 0.44f,
-                                      28.f, WIN_W, WIN_H);
-                task_panel.renderDate("连接失败后会恢复设备热点", (float)WIN_H * 0.32f,
-                                      26.f, WIN_W, WIN_H);
+                task_panel.renderJoining(wifi.joinProgress(), WIN_W, WIN_H);
             } else if (dev_screen == DevScreen::PairCode ||
                        dev_screen == DevScreen::FindingPc) {
-                // 已入 Wi-Fi 但尚未连上 PC：顶部恒显 6 位配对码，底部状态区分
-                //   未配对(PairCode)  ="没有设备连接" + 提示在 PC 端输入此码；
-                //   已配对(FindingPc) ="正在等待连接" + 原机器上线后自动切正常页。
-                // 已配对仍显示码：PC 若清除了配对，用户可据此直接重配（兜底）。
-                const bool waiting = (dev_screen == DevScreen::FindingPc);
-                const float code_top = (float)WIN_H * 0.70f;
-                task_panel.renderDate("配对码", (float)WIN_H * 0.80f, 34.f,
-                                      WIN_W, WIN_H);
-                task_panel.renderClock(identity.pairCode(), code_top, 96.f,
-                                       WIN_W, WIN_H);
-                task_panel.renderDate(waiting ? "正在等待连接" : "没有设备连接",
-                                      code_top - 132.f, 38.f, WIN_W, WIN_H);
-                if (waiting) {
-                    task_panel.renderDate("电脑端 DutyOn 启动后将自动连接",
-                                          code_top - 190.f, 26.f, WIN_W, WIN_H);
-                } else {
-                    // 输码入口写明 PC 菜单路径，分两行防缩字过小
-                    task_panel.renderDate("电脑端 DutyOn：右键宠物头像",
-                                          code_top - 190.f, 26.f, WIN_W, WIN_H);
-                    task_panel.renderDate("设备 → 配对设备 输入此配对码",
-                                          code_top - 228.f, 26.f, WIN_W, WIN_H);
-                }
-                // Wi-Fi 刚入网数秒内顶部提示“连接成功”（此后由右上角 Wi-Fi
-                // 信号条常绿表示已入网；是否连上 PC 由旁边的显示器图标表示）
-                if (Clock::now() < wifi_ok_until)
-                    task_panel.renderDate("✓ Wi-Fi 连接成功",
-                                          (float)WIN_H * 0.90f, 30.f, WIN_W, WIN_H);
+                // 已入 Wi-Fi 但尚未连上 PC：恒显 6 位配对码。已配对(FindingPc)
+                // 仍显示码：PC 若清除了配对，用户可据此直接重配（兜底）。
+                task_panel.renderPairing(
+                    identity.pairCode(), dev_screen == DevScreen::FindingPc,
+                    Clock::now() < wifi_ok_until, WIN_W, WIN_H);
             }
 
-            // ---- 时钟/日期/任务列表纵向位置（横屏右列 vs 竖屏上下）----
-            const float clock_size =
-                (device_mode == "multi") ? 56.f : 92.f;
-            const float clock_lh = task_panel.clockLineHeight(clock_size);
-            const float date_size = 30.f;
-            const float date_lh = date_size * 1.35f;
-            float clock_top, date_top, task_top;
-            if (landscape) {
-                // 横屏右列自上而下：时钟 → 日期 → 任务列表
-                clock_top = (float)WIN_H - 40.f;
-                date_top = clock_top - clock_lh - 14.f;
-                task_top = date_top - date_lh - 18.f;
-            } else {
-                // 竖屏：时钟贴顶（multi 稍下沉避让角色头顶）；日期贴屏幕底；
-                // 任务面板顶边 = 面板高度（卡片底贴屏幕底）
-                clock_top = (float)WIN_H -
-                            ((device_mode == "multi") ? 26.f : 22.f);
-                date_top = date_lh + 14.f;
-                task_top = panel_h;
-            }
+            // ---- 正常画面：时间栏 + 任务牌 / 语音区（布局与
+            //      tools/ui-preview/ui_preview.cpp 保持一致）----
+            const bool normal = (dev_screen == DevScreen::Normal);
+            const bool multi = (device_mode == "multi");
+            const bool large_clock = !multi && !voice_active;
+            const float below_header =
+                (float)WIN_H - task_panel.headerHeight(large_clock, landscape);
 
-            // ---- 任务列表（multi；仅正常画面且已就绪；语音模式不显示）----
-            if (dev_screen == DevScreen::Normal && device_mode == "multi" &&
-                pc_ready && voice_sess == VoiceSess::None)
-                task_panel.render(current_status, WIN_W, WIN_H, task_top,
-                                  region_x, region_w);
+            // 有任务等确认：屏幕四边泛珊瑚色光（相框模式不响应任务状态）
+            if (normal && pc_ready && !photo_showing &&
+                device_mode != "frame" &&
+                current_status.overall_state == "alert")
+                task_panel.renderAlertEdge(WIN_W, WIN_H);
 
-            // ---- 语音交互面板（底部/右列下半，与任务列表互斥；语音模式
-            //      常驻——待机只画唤醒提示行，会话中画指令列表）----
-            if (dev_screen == DevScreen::Normal && voice_active) {
+            // 任务牌（multi；竖屏贴底、横屏接在时间栏下；语音会话中让位）
+            if (normal && multi && pc_ready && voice_sess == VoiceSess::None)
+                task_panel.render(current_status, WIN_W, WIN_H,
+                                  landscape ? below_header : panel_h, region_x,
+                                  region_w);
+            // 单任务：只亮出最要紧的一张牌（都空闲则不画）
+            if (normal && device_mode == "single" && pc_ready)
+                task_panel.renderFocus(current_status, WIN_W, WIN_H,
+                                       landscape ? below_header - 8.f : 150.f,
+                                       region_x, region_w);
+
+            // 语音指令区（底部/右列下半，与任务牌互斥；语音模式常驻——
+            // 待机只画唤醒提示行，会话中画指令列表）
+            if (normal && voice_active) {
                 const bool standby = (voice_sess == VoiceSess::None);
                 const char* hint =
-                    voice_sess == VoiceSess::Playing
-                        ? I18n::t("voice.playing")
-                        : standby
-                              ? (voice.available()
-                                     ? I18n::t("voice.wake")
-                                     : I18n::t("voice.unsupported"))
-                              : (voice_names.empty()
-                                     ? I18n::t("voice.unsupported")
-                                     : I18n::t("voice.hint"));
-                // 卡片贴（region）底边：area_top = 面板总高（同任务列表约定）；
-                // 待机不传指令列表 = 只画提示行（与 panel_h 测量一致）
+                    voice_sess == VoiceSess::Playing ? I18n::t("voice.playing")
+                    : standby
+                        ? (voice.available() ? I18n::t("voice.wake")
+                                             : I18n::t("voice.unsupported"))
+                        : (voice_names.empty() ? I18n::t("voice.unsupported")
+                                               : I18n::t("voice.hint"));
                 static const std::vector<std::string> kNoCmds;
                 task_panel.renderVoicePanel(standby ? kNoCmds : voice_names,
                                             voice_highlight, hint, WIN_W, WIN_H,
                                             panel_h, region_x, region_w);
             }
 
-            // ---- 时钟 + 日期文本（仅正常画面；优先 PC 下发时间，设备本地
-            //      钟不可信，断连兜底本地时间）。相框照片满屏时隐藏，避免叠字。
-            //      语音模式独立运行（无 PC）时 clock_epoch 恒 0——设备无 RTC，
-            //      本地时间不可信，未同步过时间就不画，避免显示错误时钟
-            if (dev_screen == DevScreen::Normal && !photo_showing &&
+            // 时间栏（优先 PC 下发时间；设备无 RTC，本地钟不可信，断连才兜底
+            // 本地时间）。相框照片满屏时隐藏；语音模式独立运行（无 PC）且
+            // 从未同步过时间时不画，避免显示错误时钟
+            if (normal && !photo_showing &&
                 (device_mode != "voice" || clock_epoch > 0)) {
                 char time_buf[16] = {};
-                char date_buf[40] = {};
+                char date_buf[24] = {};
+                char week_buf[16] = {};
                 static const char* kWeek[] = {"日", "一", "二", "三",
                                               "四", "五", "六"};
-                time_t local_sec = 0;  // 本地日期用（含时区偏移的 epoch）
+                time_t local_sec = 0;  // 含时区偏移的 epoch
                 if (clock_epoch > 0) {
                     const double t =
                         clock_epoch +
@@ -3318,27 +3250,18 @@ int main() {
                     strftime(time_buf, sizeof(time_buf), "%H:%M:%S",
                              localtime(&local_sec));
                 }
-                // 日期（年月日+星期）：local_sec 已是含时区偏移的 epoch，
-                // 用 gmtime 取其"本地"日历分量
+                // local_sec 已含时区偏移，用 gmtime 取其"本地"日历分量
                 struct tm tmv = {};
                 gmtime_r(&local_sec, &tmv);
-                snprintf(date_buf, sizeof(date_buf),
-                         "%d年%d月%d日 星期%s", tmv.tm_year + 1900,
-                         tmv.tm_mon + 1, tmv.tm_mday, kWeek[tmv.tm_wday]);
-
-                task_panel.renderClock(time_buf, clock_top, clock_size,
-                                       WIN_W, WIN_H, region_x, region_w);
-                // 日期：横屏右列恒显示（时钟下方）；竖屏仅单任务/相框
-                //（竖屏 multi 底部是任务列表、voice 底部是语音面板，
-                // 均会重叠 → 隐藏）
-                if (landscape || (device_mode != "multi" &&
-                                  device_mode != "voice")) {
-                    task_panel.renderDate(date_buf, date_top, date_size,
-                                          WIN_W, WIN_H, region_x, region_w);
-                }
+                snprintf(date_buf, sizeof(date_buf), "%d月%d日", tmv.tm_mon + 1,
+                         tmv.tm_mday);
+                snprintf(week_buf, sizeof(week_buf), "星期%s",
+                         kWeek[tmv.tm_wday]);
+                task_panel.renderHeader(time_buf, date_buf, week_buf,
+                                        large_clock, landscape, WIN_W, WIN_H,
+                                        region_x, region_w);
             }
-            // 右上角连接状态图标（两段链路分开）：Wi-Fi 信号条=设备是否入网
-            //（入网绿/未入网红），旁边显示器图标=是否已连上 PC（连上绿/未连灰）
+            // 右上角两段链路：Wi-Fi（设备入网）与电脑（已连上 PC）
             task_panel.renderNetStatus(wifi.state() == WifiState::Online,
                                        pc_ready, WIN_W, WIN_H);
             // 软件亮度：整屏压暗叠层（brightness<100 时生效）

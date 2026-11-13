@@ -2,7 +2,7 @@
 
 // ---------------------------------------------------------------------------
 // IDE 类型标识（从 src-tauri/src/models.rs 的 IdeKind 移植）。
-// 序列化为小写字符串 "trae"/"qoder"/"cursor"/"codex"/"opencode"。
+// 序列化为小写字符串 "trae"/"qoder"/"cursor"/"codex"/"opencode"/"claude"。
 // ---------------------------------------------------------------------------
 
 #include <optional>
@@ -16,6 +16,7 @@ enum class IdeKind {
     Cursor,
     Codex,
     OpenCode,
+    Claude,  // Claude Code（CLI / 桌面应用 / IDE 扩展共用 ~/.claude/settings.json）
 };
 
 inline const char* ideKindStr(IdeKind k) {
@@ -25,6 +26,7 @@ inline const char* ideKindStr(IdeKind k) {
         case IdeKind::Cursor: return "cursor";
         case IdeKind::Codex: return "codex";
         case IdeKind::OpenCode: return "opencode";
+        case IdeKind::Claude: return "claude";
     }
     return "";
 }
@@ -36,6 +38,7 @@ inline std::optional<IdeKind> ideKindFromStr(const std::string& s) {
     if (s == "cursor") return IdeKind::Cursor;
     if (s == "codex") return IdeKind::Codex;
     if (s == "opencode") return IdeKind::OpenCode;
+    if (s == "claude") return IdeKind::Claude;
     return std::nullopt;
 }
 

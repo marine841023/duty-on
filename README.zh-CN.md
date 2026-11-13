@@ -40,7 +40,7 @@
 ## 它是什么？
 
 同时开着好几个 IDE 跑 AI 任务，还要不停 Alt-Tab 检查它们是在干活、干完了、还是卡在等你确认？
-「开工啦」把所有 **Trae** / Qoder / Cursor / Codex / OpenCode 会话的实时状态浓缩在一个表情上：
+「开工啦」把所有 **Trae** / Qoder / Cursor / Codex / OpenCode / Claude Code 会话的实时状态浓缩在一个表情上：
 
 - 💤 **睡觉**：所有 IDE 空闲时，精灵闭眼睡觉，飘出 ZZZ
 - ⚡ **忙碌**：有 AI 任务正在执行时，精灵睁眼专注工作
@@ -99,7 +99,7 @@ powershell .userdata/deploy-cross.ps1
 - **🎬 自定义 GIF 角色**：任意 **GIF / PNG / JPG / WebP / MP4 / WebM** 创建专属桌宠，
   每个状态（💤 / ⚡ / 🔔）分别上传动画，随时替换
 - **自定义 Live2D 模型**：任意 Cubism 4 模型放进 `~/.dutyon/live2d/` 即可在菜单切换
-- **多 IDE 监控**：同时监控多个 **Trae** / Qoder / Cursor / Codex / OpenCode 实例，
+- **多 IDE 监控**：同时监控多个 **Trae** / Qoder / Cursor / Codex / OpenCode / Claude Code 实例，
   5 种 IDE 各有原生 Hook 集成
 - **状态栏**：精灵下方显示所有 IDE 项目及状态，点击项目名跳转对应 IDE 窗口
 - **迷你模式**：一键缩小为 130×210 桌面角落小伙伴
@@ -159,6 +159,11 @@ Codex 使用 `$CODEX_HOME/hooks.json`（未设置时为 `~/.codex/hooks.json`）
 检测以本机 Hook 事件为准，进程存在只用于辅助判断退出，无法证明某个会话仍在工作。
 实现与限制见 [Hook Review](docs/hook-review.md)。
 
+Claude Code（CLI、桌面应用、IDE 扩展）从 `~/.claude/settings.json` 读取 Hook
+（设置了 `CLAUDE_CONFIG_DIR` 时为 `$CLAUDE_CONFIG_DIR/settings.json`）；精灵只合并自己的
+条目，其余设置原样保留。已在运行的会话需重启后生效。按 Esc 中断不会触发任何 Hook，
+被中断的回合会保持忙碌，直到约一分钟后 Claude Code 发出空闲通知。
+
 ## 工作原理
 
 ```
@@ -216,7 +221,7 @@ A: 在。两版本共用 `~/.dutyon/config.json` 与形象/模型目录。
 - **DRM/GBM + GLES3** — 设备端无 X11 直渲
 - **Live2D Cubism Native SDK** — Live2D 模型渲染（两端共用）
 - **cpp-httplib + nlohmann/json + cpr** — HTTP 服务器与设备轮询
-- **Trae / Qoder / Cursor / Codex / OpenCode Hooks** — 5 种 IDE 事件钩子
+- **Trae / Qoder / Cursor / Codex / OpenCode / Claude Code Hooks** — 6 种 IDE 事件钩子
 
 ## 许可证
 
@@ -224,4 +229,4 @@ A: 在。两版本共用 `~/.dutyon/config.json` 与形象/模型目录。
 
 ## 云服务
 
-Linux + Docker 云服务已上线 [dutyon.megrezsoft.com](https://dutyon.megrezsoft.com)，提供安装包下载、OTA、账号和用户私有内容管理。官方分发包已预置此 HTTPS 主地址，详见[部署与 API 文档](server/README.md)。图片生成角色和声音克隆后续接入。
+Linux + Docker 云服务已上线 [dutyon.megrezsoft.com](https://dutyon.megrezsoft.com)，提供安装包下载、OTA、账号和用户私有内容管理。官方分发包已预置此 HTTPS 主地址，详见[部署与 API 文档](server/README.md)。网页云空间支持按角色管理动画与声音，设置双向同步；图片生成角色和声音克隆已提供流程预览（演示数据），生成后台接入中。

@@ -34,6 +34,12 @@ fs::path codexHome() {
     return override_home && *override_home ? fs::path(override_home) : homeDir() / ".codex";
 }
 
+// Claude Code 的用户配置目录（CLAUDE_CONFIG_DIR 覆盖默认的 ~/.claude）
+fs::path claudeHome() {
+    const wchar_t* override_home = _wgetenv(L"CLAUDE_CONFIG_DIR");
+    return override_home && *override_home ? fs::path(override_home) : homeDir() / ".claude";
+}
+
 // 当前平台的桥接脚本名（Windows 走 PowerShell）
 const char* bridgeFilename() { return "trae-hook-bridge.ps1"; }
 
@@ -409,6 +415,7 @@ nlohmann::json InstallResult::toJson() const {
     opt("cursorHooksPath", cursor_hooks_path, j);
     opt("codexHooksPath", codex_hooks_path, j);
     opt("opencodePluginPath", opencode_plugin_path, j);
+    opt("claudeHooksPath", claude_hooks_path, j);
     return j;
 }
 
@@ -418,6 +425,7 @@ nlohmann::json InstalledStatus::toJson() const {
         {"bridgeExists", bridge_exists},   {"qoderHooksExist", qoder_hooks_exist},
         {"cursorHooksExist", cursor_hooks_exist}, {"codexHooksExist", codex_hooks_exist},
         {"opencodePluginExist", opencode_plugin_exist},
+        {"claudeHooksExist", claude_hooks_exist},
     };
 }
 
@@ -548,6 +556,29 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
         }
     }
 
+    // ---- Claude Code: <配置目录>/settings.json（Nested，无 version）----
+    // 显式 shell:powershell：Claude Code 在 Windows 默认用 Git Bash 跑 hook，
+    // 双引号内的反斜杠路径交给 bash 解析不可靠；PowerShell 由它直接拉起，
+    // 不依赖 Git Bash 是否安装。settings.json 的其他键（env、permissions 等）
+    // 由合并逻辑原样保留。
+    std::optional<std::string> claude_path_str;
+    const fs::path claude_dir = claudeHome();
+    if (fs::exists(claude_dir)) {
+        const fs::path claude_hooks_path = claude_dir / "settings.json";
+        const std::string claude_cmd = hookCommand("claude", "");
+        std::string err;
+        auto w = mergeHooksIntoFile(
+            claude_hooks_path, bc::kClaudeHookEvents, bc::kClaudeHookEventsCount,
+            [&](const char*) { return claude_cmd; }, "powershell",
+            /*add_version=*/false, /*strip_version=*/false, HookFormat::Nested, err);
+        if (err.empty()) {
+            if (w.has_value()) warnings.push_back("Claude Code: " + *w);
+            claude_path_str = claude_hooks_path.u8string();
+        } else {
+            warnings.push_back("Claude Code settings.json merge failed: " + err);
+        }
+    }
+
     // ---- OpenCode: JS 插件（~/.config/opencode 存在才写，避免凭空生成目录树）----
     std::optional<std::string> opencode_path_str;
     const fs::path plugins_dir = fs::path(home) / bc::kOpencodePluginSubdir;
@@ -582,6 +613,7 @@ InstallResult installHooks(const std::string& hooks_source_dir) {
     r.cursor_hooks_path = cursor_path_str;
     r.codex_hooks_path = codex_path_str;
     r.opencode_plugin_path = opencode_path_str;
+    r.claude_hooks_path = claude_path_str;
     r.needs_enable = true;
     return r;
 }
@@ -621,6 +653,7 @@ InstalledStatus isHooksInstalled() {
                            contains_pet(fs::path(home) / ".qoder-cn" / "settings.json");
     st.cursor_hooks_exist = contains_pet(cursor_hooks_path);
     st.codex_hooks_exist = contains_pet(codex_hooks_path);
+    st.claude_hooks_exist = contains_pet(claudeHome() / "settings.json");
     // OpenCode 无 hook 配置；"已安装" = 我们的插件文件存在且带 DutyOn 标记
     // （而非任何同名文件）
     if (auto content = readFileIfExists(opencode_plugin_path)) {
@@ -630,7 +663,8 @@ InstalledStatus isHooksInstalled() {
 
     st.installed = st.bridge_exists &&
                    (st.hooks_exist || st.qoder_hooks_exist || st.cursor_hooks_exist ||
-                    st.codex_hooks_exist || st.opencode_plugin_exist);
+                    st.codex_hooks_exist || st.opencode_plugin_exist ||
+                    st.claude_hooks_exist);
     return st;
 }
 

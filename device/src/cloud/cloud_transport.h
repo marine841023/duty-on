@@ -42,6 +42,7 @@ public:
     Result Post(const std::string& p,const std::string& b,const std::string& t) { return Post(p,{},b,t); }
     Result Post(const std::string& p,const httplib::Headers& h,const std::string& b,const std::string& t) { return request(L"POST",p,h,b,t,{}); }
     Result Put(const std::string& p,const httplib::Headers& h,const std::string& b,const std::string& t) { return request(L"PUT",p,h,b,t,{}); }
+    Result Delete(const std::string& p,const httplib::Headers& h) { return request(L"DELETE",p,h,std::string(),"",Receiver()); }
 private:
     static std::wstring wide(const std::string& s) {
         int n=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,s.data(),int(s.size()),nullptr,0);
