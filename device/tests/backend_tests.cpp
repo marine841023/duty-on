@@ -323,6 +323,48 @@ void claudeTests() {
     check(sm.sessionCount() == 0, "closing a window that was seen still removes its session");
 }
 
+// 提醒两轮上限：首轮 + 一次重提醒后仍无响应 -> 抑制 alert 回落 working；
+// 新确认重新武装；确认清掉后重置。
+void alertRoundCapTests() {
+    uint64_t now = 100000;
+    StateManager sm([&] { return now; });
+    sm.handleHookEvent(event("UserPromptSubmit"));
+    sm.handleHookEvent(event("PreToolUse", "s1", "Bash", "a"));
+    sm.handleHookEvent(event("PermissionRequest", "s1", "Bash", "a"));
+    check(sm.petStatus().overall_state == "alert", "pending confirmation must alert");
+    check(sm.petStatus().has_confirmation, "alert must expose confirmation");
+    const auto seq0 = sm.petStatus().alert_seq;
+
+    now += bc::kAlertReminder - 1; sm.checkAndRemindAlert();
+    check(sm.petStatus().alert_seq == seq0, "reminder must respect interval");
+    ++now; sm.checkAndRemindAlert();
+    check(sm.petStatus().alert_seq == seq0 + 1, "second round must remind once");
+    check(sm.petStatus().overall_state == "alert", "within cap must stay alert");
+    now += bc::kAlertReminder; sm.checkAndRemindAlert();
+    check(sm.petStatus().overall_state == "working", "after two rounds with no response must fall back to working");
+    check(!sm.petStatus().has_confirmation, "suppressed alert must not expose confirmation");
+    check(sm.snapshotJson()["hasConfirmation"] == false, "snapshot must carry suppressed confirmation flag");
+    check(sm.petStatus().alert_seq == seq0 + 1, "suppressed alert must not remind again");
+    now += bc::kAlertReminder; sm.checkAndRemindAlert();
+    check(sm.petStatus().alert_seq == seq0 + 1, "fallback must stop periodic reminders");
+    check(status(sm) == "confirmation-needed", "confirmation must remain actionable in session list");
+
+    sm.handleHookEvent(event("PermissionRequest", "s1", "Bash", "b"));
+    check(sm.petStatus().overall_state == "alert", "new confirmation must re-arm alert");
+    check(sm.petStatus().has_confirmation, "re-armed alert must expose confirmation");
+    const auto seq1 = sm.petStatus().alert_seq;
+    now += bc::kAlertReminder; sm.checkAndRemindAlert();
+    check(sm.petStatus().alert_seq == seq1 + 1, "re-armed alert must remind second round");
+    now += bc::kAlertReminder; sm.checkAndRemindAlert();
+    check(sm.petStatus().overall_state == "working", "re-armed alert must also cap at two rounds");
+
+    sm.handleHookEvent(event("PostToolUse", "s1", "Bash", "b"));
+    sm.handleHookEvent(event("PostToolUse", "s1", "Bash", "a"));
+    check(!sm.petStatus().has_confirmation, "resolved confirmations must clear flag");
+    sm.handleHookEvent(event("PermissionRequest", "s1", "Bash", "c"));
+    check(sm.petStatus().overall_state == "alert", "after resolution a new confirmation must alert again");
+}
+
 #ifdef _WIN32
 namespace fs = std::filesystem;
 json readJson(const fs::path& path) { std::ifstream in(path); return json::parse(in); }
@@ -432,6 +474,7 @@ int main(int argc, char** argv) {
         stateTests();
         actorTests();
         claudeTests();
+        alertRoundCapTests();
 #ifdef _WIN32
         check(argc == 2, "pass hooks source directory");
         installerTests(argv[1]);

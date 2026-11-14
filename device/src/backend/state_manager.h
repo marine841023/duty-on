@@ -197,6 +197,9 @@ private:
     PetState overall_state_ = PetState::Sleeping;
     uint64_t last_alert_time_ = 0;
     uint64_t alert_seq_ = 0; // 新确认和定时重提醒均递增，供 PC/设备可靠消费
+    bool has_confirmation_ = false; // 任一会话 confirmation-needed（recompute 维护）
+    int alert_rounds_ = 0;      // 本轮 alert 已播放的提醒轮数（首轮流=1）
+    bool alert_suppressed_ = false; // 达 kAlertMaxRounds 仍无响应：抑制 alert 回落 working
     std::optional<std::string> last_signature_;
     uint64_t last_event_at_ = 0;
     uint64_t version_ = 0;

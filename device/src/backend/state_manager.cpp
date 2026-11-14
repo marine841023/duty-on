@@ -265,6 +265,9 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
         if (actor.confirmations.emplace(key, Confirmation{bound_tool, message, async_question}).second) {
             ++alert_seq_;
             last_alert_time_ = now;
+            // 新请求重新武装提醒：即使上一轮已因无响应被抑制，也重新给两轮
+            alert_rounds_ = 1;
+            alert_suppressed_ = false;
         }
     };
     // Claude prompts without a call ID are bound by tool name or not at all;
@@ -420,17 +423,25 @@ void StateManager::removeSession(const std::string& session_id) {
 }
 
 void StateManager::recomputeStateLocked() {
-    PetState new_state = PetState::Sleeping;
+    bool has_conf = false;
+    bool any_working = false;
     for (const auto& [id, s] : sessions_) {
-        if (s.status == SessionStatus::ConfirmationNeeded) {
-            new_state = PetState::Alert;
-            break;
-        }
+        if (s.status == SessionStatus::ConfirmationNeeded) has_conf = true;
         if (s.status == SessionStatus::Working || s.status == SessionStatus::Thinking ||
             s.status == SessionStatus::ToolUse) {
-            new_state = PetState::Working;
+            any_working = true;
         }
     }
+    has_confirmation_ = has_conf;
+    // 确认全部清掉 = 本轮 alert 结束，重置轮数与抑制
+    if (!has_conf) {
+        alert_rounds_ = 0;
+        alert_suppressed_ = false;
+    }
+    // 待确认优先 alert；但提醒达上限仍无响应时抑制 alert，回落 working
+    PetState new_state = PetState::Sleeping;
+    if (has_conf) new_state = alert_suppressed_ ? PetState::Working : PetState::Alert;
+    else if (any_working) new_state = PetState::Working;
 
     const PetState old_state = overall_state_;
     overall_state_ = new_state;
@@ -445,6 +456,8 @@ void StateManager::recomputeStateLocked() {
     }
     if (old_state != new_state && new_state == PetState::Alert) {
         last_alert_time_ = nowMs();
+        alert_rounds_ = 1;  // 首轮提醒
+        alert_suppressed_ = false;
         version_++;  // 对应 Rust 的 alert_tx.send
         cv_.notify_all();
     }
@@ -548,6 +561,8 @@ nlohmann::json StateManager::snapshotJson() {
     return {
         {"overallState", petStateStr(overall_state_)},
         {"alertSeq", alert_seq_},
+        // 权威待确认标志：含"提醒两轮无响应后抑制"，设备端据此回落 working
+        {"hasConfirmation", has_confirmation_ && !alert_suppressed_},
         {"sessions", arr},
         {"lastEventAt", last_event_at_},
         {"timestamp", nowMs()},
@@ -566,9 +581,9 @@ dutyon::PetStatus StateManager::petStatus() {
         si.status = sessionStatusStr(s.status);
         si.ide = s.ide.has_value() ? ideKindStr(*s.ide) : "";
         si.alert_message = s.alert_message.value_or("");
-        if (s.status == SessionStatus::ConfirmationNeeded) ps.has_confirmation = true;
         ps.sessions.push_back(std::move(si));
     }
+    ps.has_confirmation = has_confirmation_ && !alert_suppressed_;
     ps.session_count = (int)ps.sessions.size();
     return ps;
 }
@@ -638,12 +653,19 @@ void StateManager::checkAndRemindAlert() {
     if (overall_state_ != PetState::Alert) return;
     const uint64_t now = nowMs();
     const uint64_t since = now >= last_alert_time_ ? now - last_alert_time_ : 0;
-    if (since >= bc::kAlertReminder) {
+    if (since < bc::kAlertReminder) return;
+    if (alert_rounds_ < bc::kAlertMaxRounds) {
         last_alert_time_ = now;
+        ++alert_rounds_;
         ++alert_seq_;
         last_signature_.reset();  // 使 update 也重新发出
         version_++;
         cv_.notify_all();
+    } else {
+        // 已播满两轮仍无响应：抑制 alert，回落 working（确认仍挂列表可响应）
+        alert_suppressed_ = true;
+        last_signature_.reset();
+        recomputeStateLocked();
     }
 }
 

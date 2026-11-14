@@ -82,6 +82,10 @@ static std::optional<PetStatus> FetchStatus(cpr::Session& session, int* http_cod
                 s.sessions.push_back(std::move(si));
             }
         }
+        // 新后端下发权威 hasConfirmation（含提醒两轮无响应后的抑制）；
+        // 旧后端无此字段时保留上面按会话状态的推导
+        if (j.contains("hasConfirmation") && j["hasConfirmation"].is_boolean())
+            s.has_confirmation = j["hasConfirmation"].get<bool>();
         return s;
     } catch (...) {
         return std::nullopt;

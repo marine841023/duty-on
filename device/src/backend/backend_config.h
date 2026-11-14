@@ -38,6 +38,9 @@ constexpr uint64_t kSessionTimeout = 10 * 60 * 1000;  // 静默 10 分钟删除�
 // 有 pending 工具的会话降级/删除超时放宽到此值。
 constexpr uint64_t kToolRunningTimeout = 15 * 60 * 1000;
 constexpr uint64_t kAlertReminder = 60 * 1000;        // alert 状态下每分钟重提醒
+// 提醒最多播放两轮（首轮 + 一次重提醒）；仍无响应则抑制 alert、回落 working，
+// 避免待确认被搁置时宠物无限期停在 alert 反复打扰。
+constexpr int kAlertMaxRounds = 2;
 constexpr uint64_t kCleanupIntervalMs = 30 * 1000;    // 清理定时器节拍
 
 // ===== 系统监控 =====
