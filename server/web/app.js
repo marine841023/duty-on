@@ -76,16 +76,7 @@ function tickClock() {
 tickClock();
 setInterval(tickClock, 1000);
 
-const CHARACTERS = ['nico', 'nietzsche', 'nito', 'ni-j', 'nipsilon'];
-let charIndex = 0;
-$('scr-stage').addEventListener('click', () => {
-  charIndex = (charIndex + 1) % CHARACTERS.length;
-  const img = $('scr-char');
-  img.classList.add('swap');
-  const next = new Image();
-  next.onload = () => { img.src = next.src; img.classList.remove('swap'); };
-  next.src = '/img/' + CHARACTERS[charIndex] + '.png';
-});
+// 首屏人物固定为庄方宜·工作中 GIF（见 index.html #scr-char），不做轮换，所有访客看到同一形象。
 
 // ---------------------------------------------------------------- 接口
 let token = '';

@@ -162,7 +162,7 @@ h1 { font-size: clamp(38px, 5.6vw, 64px); line-height: 1.16; font-weight: 800; l
 .scr-net .wifi b:nth-child(3) { height: 10px; } .scr-net .wifi b:nth-child(4) { height: 13px; }
 .scr-stage {
   position: relative; flex: 1; min-height: 0; display: grid; place-items: end center;
-  background: none; border: 0; padding: 0; cursor: pointer; border-radius: 12px;
+  background: none; border: 0; padding: 0; cursor: default; border-radius: 12px;
 }
 .scr-glow {  /* 舞台光：身后一团 + 脚下一摊，颜色跟整体状态走 */
   position: absolute; inset: 0; --glow: var(--ink-rgb); --level: .26;
@@ -174,8 +174,7 @@ h1 { font-size: clamp(38px, 5.6vw, 64px); line-height: 1.16; font-weight: 800; l
 .screen[data-state="sleeping"] .scr-glow { --level: .10; animation-duration: 6s; }
 .screen[data-state="alert"] .scr-glow { --glow: 255, 95, 82; --level: .34; animation-duration: 1.4s; }
 @keyframes glow { 0%, 100% { opacity: .78; } 50% { opacity: 1; } }
-.scr-stage img { position: relative; max-width: 78%; max-height: 96%; width: auto; height: auto; transition: opacity .25s; }
-.scr-stage img.swap { opacity: 0; }
+.scr-stage img { position: relative; max-width: 78%; max-height: 96%; width: auto; height: auto; }
 
 /* ---- 值班牌 ---- */
 .tiles { display: grid; gap: 5px; margin-top: 8px; }
@@ -190,7 +189,8 @@ h1 { font-size: clamp(38px, 5.6vw, 64px); line-height: 1.16; font-weight: 800; l
   flex: none; width: 16px; height: 16px; border-radius: 4px; border: 1px solid currentColor;
   font: 600 10px/14px var(--sans); text-align: center; opacity: .75;
 }
-.tile .state { margin-left: auto; flex: none; font-size: 13px; }
+/* 状态文字直接落在项目行气泡里：重置掉从云空间 .state 卡片继承来的气泡样式 */
+.tile .state { margin-left: auto; flex: none; font-size: 13px; padding: 0; border: 0; border-radius: 0; background: none; }
 .tile[data-status="idle"] { color: var(--dim); } .tile[data-status="idle"] .state { color: var(--faint); }
 .tile[data-status="thinking"] .state { color: var(--thinking); }
 .tile[data-status="tool"] .state { color: var(--tool); }
