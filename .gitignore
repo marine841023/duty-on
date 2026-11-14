@@ -2,6 +2,8 @@
 device/build/
 # 交叉编译输出（Windows 宿主 → aarch64；同上，构建产物不入库）
 device/build-cross/
+# 后端单元测试的 CMake 构建输出（Windows 宿主，产物不入库）
+device/build-backend-tests/
 # 交叉编译 sysroot（从设备拉回的 EGL/GBM/DRM 头文件与 .so，含专有库）及
 # 传输归档 —— 设备特定，不入库；重建方法见 device/cmake/aarch64-toolchain.cmake 注释
 device/sysroot/
@@ -18,6 +20,7 @@ device/third_party/
 # IDE / Editor
 .vscode/
 .idea/
+.claude/
 *.swp
 Thumbs.db
 
@@ -30,6 +33,8 @@ Thumbs.db
 
 # Scratch files from debugging sessions
 *.tmp
+# 浏览器/UI 评审会话的临时截图
+_review_tmp/
 # ImGui runtime window-layout dump
 imgui.ini
 
