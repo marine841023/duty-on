@@ -69,6 +69,14 @@ public:
         return device_version_;
     }
 
+    // 设备最近一次轮询的来源 IP（req.remote_addr，与版本同请求刷新）：
+    // 设备正式运行走 WiFi 在线，程序同步据此用真实 IP，而非写死的 USB
+    // 管理口 192.168.7.1。空 = 尚无设备轮询
+    std::string deviceAddress() const {
+        std::lock_guard<std::mutex> lk(ver_mtx_);
+        return device_addr_;
+    }
+
     // 欢迎信号：设备成功连接时由 PC 主循环递增（deviceOnline false→true 边沿）。
     // 随 /api/status 下发 welcomeSeq，设备端检测到该序号增大即播放一次
     //「欢迎」动作 + 专属音频（首次同步不回放到位，避免开机误播）。
@@ -91,6 +99,7 @@ private:
     std::atomic<long long> welcome_seq_{0};        // 欢迎信号递增序号（连接边沿）
     mutable std::mutex ver_mtx_;                  // 保护 device_version_
     std::string device_version_;                  // 设备上报的程序版本
+    std::string device_addr_;                     // 设备轮询来源 IP（同 ver_mtx_ 保护）
 };
 
 } // namespace dutyon::backend

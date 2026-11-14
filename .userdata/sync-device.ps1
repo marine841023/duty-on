@@ -16,10 +16,15 @@ param(
     [string]$Repo = 'd:\src\traeSprite',
     [string]$LogFile = '',
     [string]$Version = '',
+    # 默认 USB 管理口（手动 CLI 兜底）；PC 自动同步会传 -Device root@<设备真实
+    # WiFi IP>（设备正式运行走 WiFi 在线，非 USB 直连）
     [string]$Device = 'root@192.168.7.1'
 )
 
-$ErrorActionPreference = 'Stop'
+# 必须 Continue：原生命令（ssh/scp/cmake）的 stderr 在 Stop 下会变终止性错误，
+# 脚本会在写 RESULT=FAIL 前崩溃（日志停在 PROGRESS=5，进度窗只见笼统失败）。
+# 每步均有显式 $LASTEXITCODE 检查，Continue 不影响失败判定。
+$ErrorActionPreference = 'Continue'
 if ($Version -and $Version -notmatch '^[0-9a-f]{16}$') { throw 'Invalid source version' }
 
 function Log([string]$msg) {
@@ -38,8 +43,9 @@ $bin = Join-Path $buildDir 'dutyon-pet'
 
 # ---- 1. SSH 探活（设备不可达时干净失败，进度窗 4 秒后自动关）----
 Log 'PROGRESS=5 remote'
-ssh @sshOpts $Device 'echo ok' *> $null
-if ($LASTEXITCODE -ne 0) { Fail 'device unreachable' }
+# 捕获 stderr 进失败原因（区分超时/密钥拒绝），便于进度窗与日志定位
+$probe = (ssh @sshOpts $Device 'echo ok' 2>&1 | Out-String) -replace '\s+', ' '
+if ($LASTEXITCODE -ne 0) { Fail "device unreachable: $($probe.Trim())" }
 
 # ---- 2. 本地交叉构建（增量；首次/工具链变更时自动 configure）----
 $ninja = Join-Path $buildDir 'build.ninja'

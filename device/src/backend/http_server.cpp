@@ -433,6 +433,7 @@ void HttpServer::registerRoutes() {
                 {
                     std::lock_guard<std::mutex> lk(ver_mtx_);
                     device_version_ = req.get_header_value("X-DutyOn-Version");
+                    device_addr_ = req.remote_addr;  // 同步用真实 WiFi IP
                 }
             }
         }

@@ -244,9 +244,10 @@ static const wchar_t* syncStageLabel(const std::string& k) {
 // 后台推送更新：跑 sync-device.ps1 -Version <hash>，独立置顶窗口显示进度。
 // 全程在工作线程内（含进度窗口创建/消息泵/销毁），不阻塞渲染主循环。
 static void launchDeviceSync(const std::string& repo,
-                             const std::string& version) {
+                             const std::string& version,
+                             const std::string& device_addr) {
     if (g_syncing.exchange(true)) return;  // 已有同步在跑
-    std::thread([repo, version]() {
+    std::thread([repo, version, device_addr]() {
         namespace fs = std::filesystem;
         const fs::path script = fs::path(repo) / ".userdata" / "sync-device.ps1";
         std::error_code ec;
@@ -265,6 +266,14 @@ static void launchDeviceSync(const std::string& repo,
             L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" +
             scriptW + L"\" -Repo \"" + repoW + L"\" -LogFile \"" + log +
             L"\" -Version \"" + verW + L"\"";
+        // 设备正式运行走 WiFi 在线：用实时连接捕获的真实 IP 覆盖脚本默认的
+        // USB 管理口（192.168.7.1）。remote_addr 为 IPv4-mapped IPv6 时去前缀
+        if (!device_addr.empty()) {
+            std::string ip = device_addr;
+            if (ip.rfind("::ffff:", 0) == 0) ip = ip.substr(7);
+            const std::wstring devW(ip.begin(), ip.end());
+            cmd += L" -Device \"root@" + devW + L"\"";
+        }
 
         STARTUPINFOW si{sizeof(si)};
         PROCESS_INFORMATION pi{};
@@ -331,8 +340,28 @@ static void launchDeviceSync(const std::string& repo,
             dlg.update(100, L"更新完成，设备已重启");
             printf("[Sync] device update done (version=%s)\n", version.c_str());
         } else {
-            dlg.update(shown, timedOut ? L"更新超时，请检查设备连接"
-                                       : L"更新失败，请重试或检查设备");
+            std::wstring msg = timedOut ? L"更新超时，请检查设备连接"
+                                        : L"更新失败，请重试或检查设备";
+            // 脚本 RESULT=FAIL:<原因> → 映射成简短中文提示（详情在日志）
+            const std::string tag = "RESULT=FAIL:";
+            const auto pos = tail.rfind(tag);
+            if (!timedOut && pos != std::string::npos) {
+                std::string reason = tail.substr(pos + tag.size());
+                const auto nl = reason.find_first_of("\r\n");
+                if (nl != std::string::npos) reason.resize(nl);
+                printf("[Sync] fail reason: %s\n", reason.c_str());
+                if (reason.rfind("device unreachable", 0) == 0)
+                    msg = L"设备不可达：检查 WiFi 或 SSH 密钥授权";
+                else if (reason.rfind("cross build", 0) == 0 ||
+                         reason.rfind("cross configure", 0) == 0)
+                    msg = L"电脑交叉编译设备程序失败";
+                else if (reason.rfind("scp", 0) == 0 ||
+                         reason.rfind("create staging", 0) == 0)
+                    msg = L"推送文件到设备失败";
+                else if (reason.rfind("deploy/restart", 0) == 0)
+                    msg = L"设备部署或重启失败";
+            }
+            dlg.update(shown, msg.c_str());
             printf("[Sync] device update FAILED (rc=%lu timedOut=%d)\n", rc,
                    timedOut ? 1 : 0);
         }
@@ -2018,7 +2047,7 @@ int main() {
         else if (id == "app:update") {
             switch (cloud.updateState()) {
             case CloudClient::UpdateState::kReady:
-                // 就绪：写 updater.cmd + 分离启动（等本进程退出 → 覆盖 →
+                // 就绪：写 updater.ps1 + 隐藏分离启动（等本进程退出 → 覆盖 →
                 // 重启），随后走正常退出路径释放 exe/dll 锁
                 if (cloud.applyUpdate()) {
                     api.quitApp();
@@ -2221,13 +2250,14 @@ int main() {
                 const std::string repo = cfg.device_repo;
                 if (!repo.empty() && !g_syncing.load()) {
                     const std::string dev_ver = backend.deviceVersion();
-                    std::thread([repo, dev_ver]() {
+                    const std::string dev_addr = backend.deviceAddress();
+                    std::thread([repo, dev_ver, dev_addr]() {
                         const std::string src = computeSourceVersion(repo);
                         if (!src.empty() && src != dev_ver) {
                             printf("[Sync] version mismatch (device=%s src=%s)"
                                    " -> auto update\n",
                                    dev_ver.c_str(), src.c_str());
-                            launchDeviceSync(repo, src);
+                            launchDeviceSync(repo, src, dev_addr);
                         } else {
                             printf("[Sync] version match (src=%s), skip\n",
                                    src.c_str());

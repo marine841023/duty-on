@@ -71,6 +71,10 @@ public:
     std::string deviceVersion() const {
         return http_ ? http_->deviceVersion() : std::string{};
     }
+    // 设备最近一次轮询的来源 IP（程序同步用真实 WiFi IP，而非写死 USB 管理口）；空 = 未知
+    std::string deviceAddress() const {
+        return http_ ? http_->deviceAddress() : std::string{};
+    }
 
     // ---- 设备配对（Wi-Fi 配对码方案；菜单「设备→配对设备」用）----
     // 待配对请求列表（设备已 POST pair-request，等用户输码确认）
