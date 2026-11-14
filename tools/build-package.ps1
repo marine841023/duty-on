@@ -87,7 +87,7 @@ Compress-Archive -Path $setupExe -DestinationPath $zipPath
 
 # --- 5. 应用内一键升级包（dutyon-cloud --publish 上传，客户端
 #        /api/app/version 检查 + /api/app/download 下载）---
-# 布局与安装目录一致（updater.cmd 在主进程退出后 xcopy /E /Y 全量覆盖）：
+# 布局与安装目录一致（updater.ps1 在主进程退出后 Copy-Item 全量覆盖）：
 #   dutyon-pet.exe / glfw3.dll / FrameworkShaders\ / assets\live2d\
 #   / assets\device\sounds\（对齐 dutyon.nsi 安装文件集）
 Write-Host "[5/5] 生成升级包 zip..." -ForegroundColor Cyan

@@ -1007,40 +1007,38 @@ bool CloudClient::applyUpdate() {
     std::error_code ec;
     if (!fs::is_directory(fs::path(staged), ec)) return false;
 
-    // updater.cmd：等本进程退出 → xcopy 覆盖 → 清理 → 重启 → 自删
+    // updater.ps1：Wait-Process 等本进程退出（基于进程句柄，无控制台/管道依赖）
+    // → Copy-Item 覆盖 exe 目录 → 重启；temp 目录由重启后的 cleanupUpdateLeftovers 清理。
     //（运行中的 exe/dll 被锁，必须等退出后由外部进程替换）
+    // 旧 cmd 方案以 tasklist|find 轮询等待：DETACHED_PROCESS 无控制台时管道 EOF 不送达，
+    // find 永久阻塞致升级卡死，timeout 亦无控制台可用；改用 PowerShell 一并规避。
     const std::string pid = std::to_string(GetCurrentProcessId());
-    std::ostringstream cmd;
-    cmd << "@echo off\r\n"
-        << ":wait\r\n"
-        << "tasklist /FI \"PID eq " << pid << "\" 2>nul | find \"" << pid
-        << "\" >nul 2>&1\r\n"
-        << "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)\r\n"
-        << "xcopy /E /Y \"" << staged << "\\*\" \""
-        << exe_dir.string() << "\\\" >nul 2>&1\r\n"
-        << "if errorlevel 1 exit /b 1\r\n"
-        << "rd /s /q \"" << dir << "\" >nul 2>&1\r\n"
-        << "start \"\" \"" << (exe_dir / "dutyon-pet.exe").string() << "\"\r\n"
-        << "del \"%~f0\" >nul 2>&1\r\n";
+    const std::string exe = (exe_dir / "dutyon-pet.exe").string();
+    std::wostringstream ps;
+    ps << L"$ErrorActionPreference = 'SilentlyContinue'\r\n"
+       << L"Wait-Process -Id " << toWide(pid) << L"\r\n"
+       << L"Copy-Item -Path '" << psQuote(staged + "\\*") << L"' -Destination '"
+       << psQuote(exe_dir.string()) << L"' -Recurse -Force\r\n"
+       << L"Start-Process -FilePath '" << psQuote(exe) << L"'\r\n";
 
-    const std::string cmd_path = dir + "\\updater.cmd";
+    const std::string ps_path = dir + "\\updater.ps1";
     {
-        std::ofstream f(cmd_path, std::ios::binary);
+        std::ofstream f(ps_path, std::ios::binary);
         if (!f) return false;
-        f << cmd.str();
+        f << "\xEF\xBB\xBF" << toUtf8(ps.str());  // UTF-8 BOM：PowerShell 5.1 据此识别编码
     }
 
-    // 分离启动（新进程组 + 隐藏窗口），随后本程序退出
-    std::wstring run = L"cmd.exe /c \"";
-    run += toWide(cmd_path);
+    // 隐藏窗口分离启动（新进程组）。不用 DETACHED_PROCESS——它会使 PowerShell 立即退出；
+    // 子进程不随本进程退出而终止，Wait-Process 等到本进程结束后再覆盖并重启。
+    std::wstring run = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"";
+    run += toWide(ps_path);
     run += L"\"";
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
     std::wstring mutable_cmd = run;
     if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW | DETACHED_PROCESS |
-                            CREATE_NEW_PROCESS_GROUP,
+                        CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
                         nullptr, toWide(dir).c_str(), &si, &pi))
         return false;
     CloseHandle(pi.hThread);

@@ -20,8 +20,8 @@
 // 升级（ZIP 全量替换）：
 //   checkUpdate → GET /api/app/version → semver 比较；startUpdateDownload
 //   → 下载 %TEMP%\dutyon-update\pkg.zip + sha256 校验 + PowerShell 解压到
-//   staged\；applyUpdate（主线程）→ 生成 updater.cmd（等待本进程退出 →
-//   xcopy 覆盖 exe 目录 → 重启程序）分离启动后返回 true，调用方走退出流程
+//   staged\；applyUpdate（主线程）→ 生成 updater.ps1（Wait-Process 等本进程退出 →
+//   Copy-Item 覆盖 exe 目录 → 重启程序）隐藏分离启动后返回 true，调用方走退出流程
 // ---------------------------------------------------------------------------
 #ifdef _WIN32
 
