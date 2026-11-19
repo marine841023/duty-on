@@ -1,10 +1,8 @@
 #pragma once
 
-// 设备端文字渲染（ARM Linux，GLES2 语法）：stb_truetype 按需烘焙字形 +
+// 设备与专属副屏共用文字渲染（GLES2 语法）：stb_truetype 按需烘焙字形 +
 // 单张图集纹理 + 四边形批量绘制，支持 UTF-8（含 CJK）。
-// PC 端走 ImGui 自有字体系统，本类仅设备端编译。
-
-#if !defined(_WIN32) || defined(DUTYON_UI_PREVIEW)
+// 普通桌宠窗口的菜单和面板使用 ImGui 自有字体系统。
 
 #include <string>
 
@@ -50,5 +48,3 @@ private:
 };
 
 } // namespace dutyon
-
-#endif // !_WIN32

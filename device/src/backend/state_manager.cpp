@@ -262,6 +262,8 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
             bound_tool.value_or("notification:" + ev.notification_type.value_or("unknown"));
         const std::string message = ev.tool_name ? "需要确认: " + *ev.tool_name :
             ev.message.value_or("需要你的确认");
+        if (ide == IdeKind::Trae && !bound_tool && !ev.request_id)
+            actor.trae_resumed_tools.clear();
         if (actor.confirmations.emplace(key, Confirmation{bound_tool, message, async_question}).second) {
             ++alert_seq_;
             last_alert_time_ = now;
@@ -275,7 +277,12 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
     auto claude_unpaired = [&](const Confirmation& c) {
         return claude && (!c.tool_key || (ev.tool_name && *c.tool_key == "name:" + *ev.tool_name));
     };
+    auto anonymous_trae_confirmation = [&](const auto& entry) {
+        return ide == IdeKind::Trae && !entry.second.tool_key &&
+            entry.first.compare(0, 13, "notification:") == 0;
+    };
     auto finish_tool = [&]() {
+        const bool trae_resumed = actor.trae_resumed_tools.erase(tool_key) != 0;
         auto pending = actor.pending_tools.find(tool_key);
         if (pending != actor.pending_tools.end()) actor.pending_tools.erase(pending);
         if (identified_tool) {
@@ -284,7 +291,8 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
             actor.completed_tools.insert(tool_key);
         }
         for (auto c = actor.confirmations.begin(); c != actor.confirmations.end();) {
-            if ((c->second.tool_key == tool_key || claude_unpaired(c->second)) &&
+            if ((c->second.tool_key == tool_key || claude_unpaired(c->second) ||
+                 (trae_resumed && anonymous_trae_confirmation(*c))) &&
                 (!c->second.asynchronous || name == "PostToolUseFailure")) c = actor.confirmations.erase(c);
             else ++c;
         }
@@ -295,7 +303,13 @@ void StateManager::handleHookEventLocked(const HookEvent& ev) {
         actor.status = name == "UserPromptSubmit" ? SessionStatus::Thinking : SessionStatus::Idle;
     } else if (name == "PreToolUse") {
         if (!(identified_tool && actor.completed_tools.count(tool_key))) {
-            if (!identified_tool || !actor.pending_tools.count(tool_key)) actor.pending_tools.insert(tool_key);
+            // An old or unmatched completion cannot prove that TRAE moved past
+            // an anonymous prompt. Require a new call and its matching finish.
+            const bool new_call = actor.pending_tools.count(tool_key) == 0;
+            if (new_call && ide == IdeKind::Trae &&
+                std::any_of(actor.confirmations.begin(), actor.confirmations.end(), anonymous_trae_confirmation))
+                actor.trae_resumed_tools.insert(tool_key);
+            if (!identified_tool || new_call) actor.pending_tools.insert(tool_key);
             if (ask_user_tool || confirm_tool) add_confirmation();
             actor.status = SessionStatus::ToolUse;
         }

@@ -145,6 +145,8 @@ private:
         SessionStatus status = SessionStatus::Idle;
         std::multiset<std::string> pending_tools;
         std::map<std::string, Confirmation> confirmations;
+        // Calls started after the latest anonymous TRAE confirmation.
+        std::set<std::string> trae_resumed_tools;
         std::set<std::string> completed_tools;
         std::set<std::string> resolved_requests;
         std::optional<std::string> turn_id;

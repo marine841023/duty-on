@@ -132,6 +132,25 @@ UserConfig UserConfigStore::load() {
         cfg.active_character_id = j["activeCharacterId"].get<std::string>();
     if (j.contains("deviceMode") && j["deviceMode"].is_string())
         cfg.device_mode = j["deviceMode"].get<std::string>();
+    if (j.contains("secondaryCursorBlock") && j["secondaryCursorBlock"].is_boolean())
+        cfg.secondary_cursor_block = j["secondaryCursorBlock"].get<bool>();
+    if (j.contains("secondaryDisplayMode") && j["secondaryDisplayMode"].is_string()) {
+        const auto mode = j["secondaryDisplayMode"].get<std::string>();
+        if (mode == "usb" || mode == "windows") cfg.secondary_display_mode = mode;
+    }
+    if (auto displays = j.find("secondaryDisplays"); displays != j.end() && displays->is_object()) {
+        for (auto it = displays->begin(); it != displays->end(); ++it) {
+            if (!it->is_object()) continue;
+            SecondaryDisplaySettings settings;
+            if (auto placement = it->find("placement"); placement != it->end()) {
+                if (*placement == "left") settings.placement = SecondaryPlacement::Left;
+                if (*placement == "right") settings.placement = SecondaryPlacement::Right;
+            }
+            if (auto show = it->find("showMetrics"); show != it->end() && show->is_boolean())
+                settings.show_metrics = show->get<bool>();
+            cfg.secondary_displays.emplace(it.key(), settings);
+        }
+    }
     if (j.contains("frameSource") && j["frameSource"].is_string())
         cfg.frame_source = j["frameSource"].get<std::string>();
     if (j.contains("frameFolder") && j["frameFolder"].is_string())
@@ -153,6 +172,10 @@ UserConfig UserConfigStore::load() {
         cfg.device_repo = j["deviceRepo"].get<std::string>();
     if (j.contains("soundMute") && j["soundMute"].is_boolean())
         cfg.sound_mute = j["soundMute"].get<bool>();
+    if (j.contains("pcAudioOutput") && j["pcAudioOutput"].is_string())
+        cfg.pc_audio_output = j["pcAudioOutput"].get<std::string>();
+    if (j.contains("pcAudioVolume") && validInt(j["pcAudioVolume"]))
+        cfg.pc_audio_volume = std::clamp(j["pcAudioVolume"].get<int>(), 0, 100);
     if (j.contains("stateAudio") && j["stateAudio"].is_object()) {
         for (auto kit = j["stateAudio"].begin(); kit != j["stateAudio"].end();
              ++kit) {
@@ -283,6 +306,25 @@ void UserConfigStore::saveDeviceMode(const std::string& mode) {
     updateConfig([&](json& j) { j["deviceMode"] = mode; });
 }
 
+void UserConfigStore::saveSecondaryCursorBlock(bool enabled) {
+    updateConfig([&](json& config) { config["secondaryCursorBlock"] = enabled; });
+}
+
+void UserConfigStore::saveSecondaryDisplaySettings(const std::string& id, SecondaryDisplaySettings settings) {
+    updateConfig([&](json& j) {
+        auto& displays = j["secondaryDisplays"];
+        if (!displays.is_object()) displays = json::object();
+        const char* placement = settings.placement == SecondaryPlacement::Left ? "left" :
+                                settings.placement == SecondaryPlacement::Right ? "right" : "auto";
+        displays[id] = {{"placement", placement}, {"showMetrics", settings.show_metrics}};
+    });
+}
+
+void UserConfigStore::saveSecondaryDisplayMode(const std::string& mode) {
+    if (mode != "usb" && mode != "windows") return;
+    updateConfig([&](json& config) { config["secondaryDisplayMode"] = mode; });
+}
+
 void UserConfigStore::saveFrameSource(const std::string& source) {
     // 相框播放源（motion=动作轮播 / folder=指定文件夹随机播放）
     updateConfig([&](json& j) { j["frameSource"] = source; });
@@ -343,6 +385,14 @@ void UserConfigStore::saveStateAudio(const std::string& key,
 void UserConfigStore::saveSoundMute(bool mute) {
     // 完全静音；/api/status 每次轮询读文件下发
     updateConfig([&](json& j) { j["soundMute"] = mute; });
+}
+
+void UserConfigStore::savePcAudioOutput(const std::string& id) {
+    updateConfig([&](json& j) { j["pcAudioOutput"] = id; });
+}
+
+void UserConfigStore::savePcAudioVolume(int percent) {
+    updateConfig([&](json& j) { j["pcAudioVolume"] = std::clamp(percent, 0, 100); });
 }
 
 void UserConfigStore::saveStateAudioMuted(const std::string& key,

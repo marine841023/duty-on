@@ -9,6 +9,7 @@
 <title>Duty On 开工啦 · 下载与云空间</title>
 <link rel="icon" href="/img/icon.png">
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/secondary-display.css">
 <script src="/app.js" defer></script>
 <script src="/gen.js" defer></script>
 </head>
@@ -23,6 +24,7 @@
   </a>
   <nav class="nav" aria-label="页面导航">
     <a href="#download">下载</a>
+    <a href="#secondary-display">副屏</a>
     <a href="#space">云空间</a>
   </nav>
   <div class="inks" role="radiogroup" aria-label="主题色">
@@ -76,6 +78,32 @@
     <p class="muted">正在获取最新版本…</p>
   </div>
   <p class="fine">硬件屏用同一份源码交叉编译，说明见 <a href="https://github.com/marine841023/duty-on/tree/v2.0-dev/device" rel="noopener">device 目录</a>。</p>
+</section>
+
+<section class="block secondary-guide" id="secondary-display" aria-labelledby="secondary-title">
+  <div class="block-head">
+    <div><p class="secondary-kicker">SECONDARY DISPLAY</p><h2 id="secondary-title">给桌宠一块副屏</h2></div>
+    <p class="muted">先在图灵官方工具中选硬件模式，再到 Duty On 的「设备 → 副屏设备 → 副屏模式」选择对应输出。</p>
+  </div>
+  <div class="secondary-modes">
+    <article class="secondary-card">
+      <span class="secondary-kicker">01 / DIRECT USB</span>
+      <h3>直连模式（USB）</h3>
+      <p>兼容的 TURZX 屏直接接收桌宠画面，不加入 Windows 桌面。</p>
+      <p class="secondary-step"><b>怎么开：</b>在图灵官方工具选「普通模式」，然后选 Duty On 的「直连模式（USB）」。当前输出为 720 × 1280。</p>
+    </article>
+    <article class="secondary-card">
+      <span class="secondary-kicker">02 / WINDOWS</span>
+      <h3>Windows 副屏模式</h3>
+      <p>全屏显示桌宠。横屏够宽时，一边放桌宠，另一边放系统监控。</p>
+      <p class="secondary-step"><b>怎么开：</b>选「桌面模式」、安装显示驱动并启用扩展显示；在 Duty On 选择 Windows 副屏模式，开启「TURZX 桌宠专属屏」。</p>
+    </article>
+  </div>
+  <div class="secondary-details">
+    <p><b>鼠标留在主屏。</b>在 Windows 专属副屏开启「禁止鼠标进入」，整块副屏都受保护。按住 <kbd>Ctrl</kbd> + <kbd>Alt</kbd> 可临时进入。</p>
+    <p><b>画面随屏幕调整。</b>标准 16:9 保留完整桌宠画面。超宽屏可选靠左或靠右，余下空间足够时显示系统监控。</p>
+  </div>
+  <p class="fine">Wi-Fi 配对请到「设备 → 无线设备」。PC 和 Windows 副屏的提示音，可在「声音管理」里单独选输出设备和音量。</p>
 </section>
 
 <section class="block" id="space">

@@ -176,7 +176,32 @@ if ($Ide -eq 'claude' -and $projectDir -match '^(.+?)[\\/]\.claude[\\/]worktrees
 
 $projectName = ''
 if (-not [string]::IsNullOrEmpty($projectDir)) {
+  try {
+    $directory = Get-Item -LiteralPath $projectDir -Force -ErrorAction Stop
+    for ($linkDepth = 0; $directory.PSIsContainer -and $directory.Target -and $linkDepth -lt 8; $linkDepth++) {
+      $target = @($directory.Target)[0]
+      if (-not [IO.Path]::IsPathRooted($target)) { $target = Join-Path $directory.Parent.FullName $target }
+      $directory = Get-Item -LiteralPath $target -Force -ErrorAction Stop
+    }
+    if ($directory.PSIsContainer) {
+      if ($directory.Parent) {
+        $actualDirectory = Get-ChildItem -LiteralPath $directory.Parent.FullName -Directory -Force -ErrorAction Stop |
+          Where-Object { $_.Name -eq $directory.Name } | Select-Object -First 1
+        if ($actualDirectory) { $directory = $actualDirectory }
+      }
+      $projectDir = $directory.FullName
+    }
+  } catch {}
   $projectName = ($projectDir.TrimEnd('\', '/') -split '[\\/]')[-1]
+  try {
+    $nameFile = Get-Item -LiteralPath (Join-Path $projectDir '.dutyon-project.json') -ErrorAction Stop
+    if (-not $nameFile.PSIsContainer -and $nameFile.Length -le 4096) {
+      $projectSettings = [IO.File]::ReadAllText($nameFile.FullName, [Text.Encoding]::UTF8) | ConvertFrom-Json -ErrorAction Stop
+      if ($projectSettings.name -is [string] -and $projectSettings.name.Trim() -match '^[^\p{C}]{1,128}$') {
+        $projectName = $projectSettings.name.Trim()
+      }
+    }
+  } catch {}
 }
 if ($Ide -eq 'cursor') {
   Write-BridgeLog "cursor normalized event=$($event.hook_event_name) tool=$($event.tool_name) session=$($event.session_id) project=$projectName"

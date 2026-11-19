@@ -13,6 +13,8 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
+[Official downloads](https://dutyon.megrezsoft.com/#download) · [GitHub releases](https://github.com/marine841023/duty-on/releases/latest) · [Gitee releases](https://gitee.com/megrezsoft/duty-on/releases) · [v2.0.21 notes](docs/release-notes/v2.0.21.md)
+
 ### 🚀 v2.0 — Native C++ desktop pet + hardware companion screen
 
 > **Made for Chinese Trae users** — native Trae CN / TraeCode CN window-title
@@ -45,6 +47,15 @@ Current source and cloud release: **v2.0.16** — [changes and validation](docs/
 </div>
 
 ---
+
+## Put Duty On on a second screen
+
+| Mode | Use it for | Setup |
+| --- | --- | --- |
+| **Direct USB** | Sending the pet directly to a supported TURZX screen without extending the Windows desktop. | Select **Normal Mode** in the vendor's tool and **Direct USB** under **Device → Secondary Display → Display Mode**. Current support uses a fixed 720 × 1280 output. |
+| **Windows secondary display** | A full-screen pet on an extended display, with optional PC metrics on wider screens. | Select **Desktop Mode** in the vendor's tool, install its display driver, extend the Windows desktop, then select the Windows mode and enable the dedicated TURZX screen in Duty On. |
+
+On a dedicated Windows screen, **Block Mouse Entry** keeps the pointer out of the entire display. Hold **Ctrl + Alt** to enter temporarily. The layout can place the pet to either side, with system metrics in the spare space when it fits. Wi-Fi pairing remains under **Device → Wireless Device**.
 
 ## What is it?
 

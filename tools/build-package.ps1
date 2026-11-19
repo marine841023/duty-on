@@ -9,7 +9,9 @@
 # 说明：NSIS 工具链在 tools\nsis\nsis-3\（tauri 官方 GitHub 镜像的 NSIS 3
 #       便携版，首次运行自动下载）；ZIP 外层包装用于规避 SmartScreen
 #       对未签名 exe 的拦截（项目分发约定）。
-param([string]$Version = "")
+param(
+    [string]$Version = ""
+)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent       # 仓库根
@@ -102,6 +104,7 @@ Copy-Item "$root\hooks\trae-hook-bridge.ps1" "$stage\hooks" -Force
 Copy-Item "$root\device\build\Release\FrameworkShaders\*" "$stage\FrameworkShaders" -Recurse -Force
 Copy-Item "$root\frontend\assets\live2d\*" "$stage\assets\live2d" -Recurse -Force
 Copy-Item "$root\frontend\assets\device\sounds\*" "$stage\assets\device\sounds" -Recurse -Force
+Copy-Item "$root\frontend\assets\device\font-noto-sc.otf" "$stage\assets\device" -Force
 $updateZip = Join-Path $dist "DutyOn-update-v${Version}.zip"
 if (Test-Path $updateZip) { Remove-Item $updateZip -Force }
 Compress-Archive -Path "$stage\*" -DestinationPath $updateZip

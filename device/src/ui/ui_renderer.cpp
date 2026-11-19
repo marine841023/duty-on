@@ -32,8 +32,7 @@
 #include <imgui_impl_opengl3.h>
 #include <stb_image.h>      // 缩略图解码（PNG / GIF 首帧）；降采样用
                             // live2d_renderer.h 的 HalveRGBA
-#define STB_TRUETYPE_IMPLEMENTATION  // 头顶特效字形光栅化（烘焙精灵；
-#include <stb_truetype.h>            // imgui 内置副本已改名 imstbtt_* 无冲突）
+#include <stb_truetype.h>
 #include <map>
 #endif
 
@@ -640,8 +639,14 @@ enum MenuView {
     kMenuIntegration, // 集成：开机自启动 + IDE 集成 Hook 状态
     kMenuCharManage,  // 自定义角色管理列表
     kMenuCharEdit,    // 单个自定义角色的状态动画编辑
+    kMenuAudioOutput, // Windows 播放设备
+    kMenuAudioVolume,
     kMenuSound,       // 设备声音管理：完全静音 / 按状态静音
     kMenuCloud,       // 云端账户：登录/同步/恢复/退出 + 一键更新入口
+    kMenuWirelessDevice,
+    kMenuSecondaryDevice,
+    kMenuSecondaryMode,
+    kMenuSecondaryLayout,
 };
 
 struct UIRenderer::Impl {
@@ -1494,9 +1499,13 @@ bool UIRenderer::init(int display_w, int display_h) {
     return true;
 }
 
-void UIRenderer::beginFrame() {
+void UIRenderer::beginFrame(bool manage_cursor) {
     if (impl_->imgui_ready) {
         glfwGetWindowSize(impl_->window, &impl_->win_w, &impl_->win_h);
+        if (!manage_cursor || glfwGetInputMode(impl_->window, GLFW_CURSOR) == GLFW_CURSOR_HIDDEN)
+            ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+        else
+            ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
@@ -1599,6 +1608,11 @@ void UIRenderer::openMenuView(const std::string& view) {
     else if (view == "visibility" || view == "display") impl_->menu_view = kMenuDisplay;
     else if (view == "integration") impl_->menu_view = kMenuIntegration;
     else if (view == "cloud") impl_->menu_view = kMenuCloud;
+    else if (view == "device") impl_->menu_view = kMenuDevice;
+    else if (view == "wireless-device") impl_->menu_view = kMenuWirelessDevice;
+    else if (view == "secondary-device") impl_->menu_view = kMenuSecondaryDevice;
+    else if (view == "secondary-mode") impl_->menu_view = kMenuSecondaryMode;
+    else if (view == "secondary-layout") impl_->menu_view = kMenuSecondaryLayout;
     else impl_->menu_view = kMenuMain;  // "main" / 未知值
 }
 
@@ -2336,6 +2350,284 @@ void UIRenderer::renderHeadEffect(const PetStatus& s) {
 // 条目绘制见 UIRenderer::Impl::MenuRow / MenuLabel / MenuDivider / MotionCell
 // ---------------------------------------------------------------------------
 
+std::vector<ContextMenuItem> UIRenderer::mainMenuItems(bool visible) const {
+    auto hint = [this](const std::string& action) {
+        return menu_hint ? menu_hint(action) : std::string();
+    };
+    auto view = [](int target, const char* key, const std::string& status = "") {
+        return ContextMenuItem{"view:" + std::to_string(target), I18n::t(key), status};
+    };
+    ContextMenuItem divider;
+    divider.separator = true;
+    return {
+        view(kMenuModels, "menu.switchModel"),
+        view(kMenuMotionPlay, "menu.playMotion"),
+        view(kMenuSettings, "menu.actionSettings"),
+        view(kMenuDisplay, "menu.display"),
+        view(kMenuLanguage, "menu.language"),
+        divider,
+        view(kMenuDevice, "menu.device", I18n::t(device_online_
+            ? "menu.deviceOnline" : "menu.deviceOffline")),
+        view(kMenuSound, "menu.soundManage", hint("sound-status")),
+        view(kMenuIntegration, "menu.integration", hint("integration-status")),
+        view(kMenuCloud, "menu.cloud", cloud_logged_in_
+            ? (cloud_username_.empty() ? I18n::t("menu.cloudLoggedIn") : cloud_username_)
+            : I18n::t("menu.cloudLoggedOut")),
+        divider,
+        {"app:update", I18n::t("menu.checkUpdate"), hint("app:update")},
+        {visible ? "minimize" : "restore",
+            I18n::t(visible ? "menu.minimize" : "menu.showWindow")},
+        {"quit", I18n::t("menu.quit")}
+    };
+}
+
+std::vector<ContextMenuItem> UIRenderer::trayMenu(bool visible) {
+    if (on_menu_open) on_menu_open();
+    auto checked = [this](const std::string& action) {
+        return menu_is_checked && menu_is_checked(action);
+    };
+    auto hint = [this](const std::string& action) {
+        return menu_hint ? menu_hint(action) : std::string();
+    };
+    auto collect = [this](const std::string& key) {
+        return menu_collect ? menu_collect(key) : std::vector<MenuEntry>();
+    };
+    auto command = [](const std::string& action, const char* key,
+                      bool selected = false, const std::string& status = "") {
+        return ContextMenuItem{action, I18n::t(key), status, selected};
+    };
+    auto label = [](const std::string& text) {
+        ContextMenuItem item;
+        item.label = text;
+        item.enabled = false;
+        return item;
+    };
+    auto submenu = [](const char* key, std::vector<ContextMenuItem> children,
+                      const std::string& status = "") {
+        ContextMenuItem item;
+        item.label = I18n::t(key);
+        item.hint = status;
+        item.children = std::move(children);
+        return item;
+    };
+    ContextMenuItem divider;
+    divider.separator = true;
+    auto colors = [&]() {
+        std::vector<ContextMenuItem> items;
+        const char* values[] = {"amber", "ice", "white", "green", "pink"};
+        const char* keys[] = {"menu.colorAmber", "menu.colorIce", "menu.colorWhite",
+                              "menu.colorGreen", "menu.colorPink"};
+        for (size_t index = 0; index < 5; ++index)
+            items.push_back(command(std::string("clock-color:") + values[index],
+                                    keys[index], clock_color_ == values[index]));
+        return items;
+    };
+    auto motions = [&](const std::string& state) {
+        std::vector<ContextMenuItem> items;
+        for (const auto& entry : collect(state.empty() ? "motions" : "motions:" + state))
+            items.push_back({state.empty() ? "motion:" + entry.id
+                                          : "assign:" + state + ":" + entry.id,
+                             entry.label, "", entry.checked});
+        if (items.empty()) items.push_back(label("(no motions)"));
+        return items;
+    };
+    auto items = mainMenuItems(visible);
+    for (auto& item : items) {
+        if (item.action.rfind("view:", 0) != 0) continue;
+        const int view = std::atoi(item.action.c_str() + 5);
+        auto& children = item.children;
+        item.action.clear();
+        switch (view) {
+        case kMenuModels: {
+            children.push_back(command("open-models-dir", "menu.uploadLive2D"));
+            children.push_back(command("charnew", "menu.newChar"));
+            children.push_back(divider);
+            const auto models = collect("models");
+            for (const auto& entry : models)
+                children.push_back({entry.id, entry.label, "", entry.checked});
+            if (models.empty()) children.push_back(label("(no models)"));
+            std::vector<ContextMenuItem> characters;
+            for (const auto& entry : collect("charmanage")) {
+                ContextMenuItem character;
+                character.label = entry.label;
+                const std::string character_id = entry.id.substr(9);
+                for (const char* state : {"sleeping", "working", "alert"}) {
+                    character.children.push_back(command("charset:" + character_id + ":" + state,
+                        (std::string("settings.") + state).c_str(), false,
+                        hint("charfile:" + character_id + ":" + state)));
+                    const std::string audio = hint("charaudio:" + character_id + ":" + state);
+                    character.children.push_back(command("charaudio:" + character_id + ":" + state,
+                        "menu.audioBinding", false, audio));
+                    if (!audio.empty())
+                        character.children.push_back(command("charaudioclear:" + character_id + ":" + state,
+                            "menu.audioClear"));
+                    character.children.push_back(divider);
+                }
+                character.children.push_back(command("chardelete:" + character_id, "menu.deleteChar"));
+                characters.push_back(std::move(character));
+            }
+            if (!characters.empty()) {
+                children.push_back(divider);
+                children.push_back(submenu("menu.manageChar", std::move(characters)));
+            }
+            break;
+        }
+        case kMenuMotionPlay:
+            children = motions("");
+            break;
+        case kMenuSettings:
+            children.push_back(label(hint("character-name")));
+            for (const char* state : {"sleeping", "working", "alert", "welcome"}) {
+                children.push_back(submenu((std::string("settings.") + state).c_str(),
+                    motions(state), hint(std::string("assign:") + state)));
+                const std::string audio = hint(std::string("stateaudio:") + state);
+                children.push_back(command(std::string("stateaudio:") + state,
+                    "menu.audioBinding", false, audio.empty() ? I18n::t("menu.audioDefault") : audio));
+                children.push_back(command(std::string("stateaudiopreview:") + state, "menu.audioPreview"));
+                if (!audio.empty())
+                    children.push_back(command(std::string("stateaudioclear:") + state, "menu.audioClear"));
+                children.push_back(divider);
+            }
+            children.push_back(submenu("menu.themeColor", colors()));
+            break;
+        case kMenuDisplay:
+            if (!checked("dedicated")) children.push_back(command("center", "menu.centerWindow"));
+            children.push_back(command("flip", "menu.flipHorizontal", checked("flip")));
+            children.push_back(command("mini", "menu.miniMode", checked("mini")));
+            children.push_back(divider);
+            children.push_back(command("vis-monitor", "menu.systemMonitor", checked("vis-monitor")));
+            children.push_back(divider);
+            children.push_back(command("vis-projects", "monitor.projectList", checked("vis-projects")));
+            break;
+        case kMenuLanguage:
+            for (const auto& [code, name] : I18n::languages())
+                children.push_back({"lang:" + code, name, "", checked("lang:" + code)});
+            break;
+        case kMenuDevice: {
+            children.push_back(submenu("menu.wirelessDevice", {
+                command("pair-input", "menu.pairDevice")},
+                I18n::t(checked("wireless-online") ? "menu.deviceOnline" : "menu.deviceOffline")));
+            std::vector<ContextMenuItem> secondary = {
+                submenu("menu.secondaryMode", {
+                    command("secondary-mode:usb", "menu.secondaryUsb", checked("secondary-mode:usb")),
+                    command("secondary-mode:windows", "menu.secondaryWindows", checked("secondary-mode:windows")),
+                    divider,
+                    label(I18n::t("menu.secondaryHardwareHint"))},
+                    I18n::t(checked("secondary-mode:windows") ? "menu.secondaryWindows" : "menu.secondaryUsb"))};
+            if (checked("dedicated-available"))
+                secondary.push_back(command("dedicated", "menu.dedicatedDisplay", checked("dedicated")));
+            if (checked("secondary-layout-available")) {
+                secondary.push_back(submenu("menu.secondaryLayout", {
+                    command("secondary-layout:auto", "menu.secondaryAuto", checked("secondary-layout:auto")),
+                    command("secondary-layout:left", "menu.secondaryLeft", checked("secondary-layout:left")),
+                    command("secondary-layout:right", "menu.secondaryRight", checked("secondary-layout:right"))}));
+                secondary.push_back(command("secondary-monitor", "menu.secondaryMonitor",
+                                            checked("secondary-monitor")));
+            }
+            secondary.push_back(command("secondary-cursor-block", "menu.secondaryCursorBlock",
+                                        checked("secondary-cursor-block"), "Ctrl+Alt"));
+            children.push_back(submenu("menu.secondaryDevice", std::move(secondary)));
+            children.push_back(divider);
+            if (!device_online_) {
+                children.push_back(label(I18n::t("menu.deviceOffline")));
+                break;
+            }
+            std::vector<ContextMenuItem> modes;
+            const char* values[] = {"single", "multi", "frame", "voice"};
+            const char* keys[] = {"menu.modeSingle", "menu.modeMulti", "menu.modeFrame", "menu.modeVoice"};
+            std::string mode_hint;
+            for (size_t index = 0; index < 4; ++index) {
+                modes.push_back(command(std::string("device-mode:") + values[index],
+                    keys[index], device_mode_ == values[index]));
+                if (device_mode_ == values[index]) mode_hint = I18n::t(keys[index]);
+            }
+            children.push_back(submenu("menu.mode", std::move(modes), mode_hint));
+            if (device_mode_ == "frame") {
+                std::vector<ContextMenuItem> sources = {
+                    command("frame-source:motion", "menu.frameMotion", frame_source_ != "folder"),
+                    command("frame-source:folder", "menu.framePhotos", frame_source_ == "folder",
+                        frame_photo_count_ > 0 ? std::to_string(frame_photo_count_) + " " +
+                            I18n::t("menu.framePhotoCount") : I18n::t("menu.frameNoFolder")),
+                    command("frame-source:pick", "menu.framePickFolder")};
+                if (!frame_folder_.empty()) sources.push_back(label(frame_folder_));
+                sources.push_back(divider);
+                sources.push_back(label(I18n::t("menu.frameHint")));
+                children.push_back(submenu("menu.frameSource", std::move(sources),
+                    I18n::t(frame_source_ == "folder" ? "menu.framePhotos" : "menu.frameMotion")));
+            }
+            auto color_items = colors();
+            std::string color_hint;
+            for (const auto& color : color_items)
+                if (color.checked) color_hint = color.label;
+            children.push_back(submenu("menu.clockColor", std::move(color_items), color_hint));
+            std::vector<ContextMenuItem> brightness;
+            for (int value : {30, 50, 70, 85, 100})
+                brightness.push_back({"device-brightness:" + std::to_string(value),
+                    std::to_string(value) + "%", "", device_brightness_ == value});
+            children.push_back(submenu("menu.brightness", std::move(brightness),
+                std::to_string(device_brightness_) + "%"));
+            std::vector<ContextMenuItem> volume;
+            for (int value : {0, 25, 50, 75, 100})
+                volume.push_back({"device-volume:" + std::to_string(value),
+                    std::to_string(value) + "%", "", device_volume_ == value});
+            children.push_back(submenu("menu.volume", std::move(volume),
+                std::to_string(device_volume_) + "%"));
+            std::vector<ContextMenuItem> rotations;
+            for (int degrees : {0, 90, 180, 270})
+                rotations.push_back(command("device-rotate:" + std::to_string(degrees),
+                    ("menu.rot" + std::to_string(degrees)).c_str(), device_screen_rotation_ == degrees));
+            children.push_back(submenu("menu.screenRotate", std::move(rotations),
+                I18n::t(("menu.rot" + std::to_string(device_screen_rotation_)).c_str())));
+            break;
+        }
+        case kMenuSound: {
+            std::vector<ContextMenuItem> outputs;
+            for (const auto& entry : collect("audio-outputs"))
+                outputs.push_back(ContextMenuItem{entry.id, entry.label, "", entry.checked});
+            if (!outputs.empty())
+                children.push_back(submenu("menu.soundOutput", std::move(outputs), hint("audio-output")));
+            std::vector<ContextMenuItem> volumes;
+            for (const auto& entry : collect("audio-volumes"))
+                volumes.push_back(ContextMenuItem{entry.id, entry.label, "", entry.checked});
+            if (!volumes.empty())
+                children.push_back(submenu("menu.soundVolume", std::move(volumes), hint("audio-volume")));
+            children.push_back(command("sound-mute", "menu.soundMuteAll", checked("sound-mute")));
+            children.push_back(divider);
+            bool any_audio = false;
+            for (const char* state : {"sleeping", "working", "alert"}) {
+                const std::string audio = hint(std::string("stateaudio:") + state);
+                if (audio.empty()) continue;
+                any_audio = true;
+                children.push_back(command(std::string("sound-mute-state:") + state,
+                    (std::string("settings.") + state).c_str(),
+                    checked(std::string("sound-muted:") + state), audio));
+            }
+            if (!any_audio) children.push_back(label(I18n::t("menu.soundNoBinding")));
+            break;
+        }
+        case kMenuIntegration:
+            children.push_back(command("install-hooks", "menu.installHooks", false, hint("hook-status")));
+            children.push_back(divider);
+            children.push_back(command("autostart", "menu.autoLaunch", checked("autostart")));
+            break;
+        case kMenuCloud:
+            if (cloud_logged_in_) {
+                children.push_back(command("cloud:sync", "menu.cloudSync", false, hint("cloud:sync")));
+                children.push_back(command("cloud:restore", "menu.cloudRestore", false, hint("cloud:restore")));
+                children.push_back(divider);
+                children.push_back(command("cloud:logout", "menu.cloudLogout"));
+            } else {
+                children.push_back(command("cloud:login", "menu.cloudLogin"));
+                children.push_back(label(I18n::t("menu.cloudIntro")));
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    return items;
+}
+
 void UIRenderer::renderMenu() {
     if (!impl_->imgui_ready || !impl_->menu_open) return;
     auto* p = impl_;
@@ -2402,80 +2694,34 @@ void UIRenderer::renderMenu() {
         bool desired_set = false;  // 切换形象视图显式算自然高；其余视图按光标实测
         switch (p->menu_view) {
         case kMenuMain: {
-            // ==== 主菜单（对齐 1.x #menu-main-view）====
-            if (p->MenuRow("models", I18n::t("menu.switchModel"), false, false,
-                        nullptr, true).clicked)
-                go(kMenuModels);
-            if (p->MenuRow("play", I18n::t("menu.playMotion"), false, false,
-                        nullptr, true).clicked)
-                go(kMenuMotionPlay);
-            if (p->MenuRow("settings", I18n::t("menu.actionSettings"), false, false,
-                        nullptr, true).clicked)
-                go(kMenuSettings);
-            // 显示：左右翻转 / 迷你模式 + 监控项显隐（统一收纳；隐藏提至一级）
-            if (p->MenuRow("display", I18n::t("menu.display"), false, false,
-                        nullptr, true).clicked)
-                go(kMenuDisplay);
-            if (p->MenuRow("lang", I18n::t("menu.language"), false, false,
-                        nullptr, true).clicked)
-                go(kMenuLanguage);
-            // ---- 硬件显示端 + 声音管理 + 系统集成：均带右侧状态 ----
-            p->MenuDivider();
-            if (p->MenuRow("device", I18n::t("menu.device"), false, false,
-                        device_online_ ? I18n::t("menu.deviceOnline")
-                                       : I18n::t("menu.deviceOffline"),
-                        true).clicked)
-                go(kMenuDevice);
-            // 声音管理（设备端状态音频+静音开关），紧随设备入口；右侧显示静音状态
-            if (p->MenuRow("sound", I18n::t("menu.soundManage"),
-                        false, false, hint_of("sound-status").c_str(),
-                        true).clicked)
-                go(kMenuSound);
-            if (p->MenuRow("integration", I18n::t("menu.integration"), false, false,
-                        hint_of("integration-status").c_str(), true).clicked)
-                go(kMenuIntegration);
-            // 云端账户：登录/同步/恢复（子页）；右侧显示用户名或未登录
-            if (p->MenuRow("cloud", I18n::t("menu.cloud"), false, false,
-                        cloud_logged_in_
-                            ? (cloud_username_.empty()
-                                   ? I18n::t("menu.cloudLoggedIn")
-                                   : cloud_username_.c_str())
-                            : I18n::t("menu.cloudLoggedOut"),
-                        true).clicked)
-                go(kMenuCloud);
-            p->MenuDivider();
-            // 应用内一键更新（未配置服务器时 hint 为空，行仍可点 → 提示配置）
-            if (p->MenuRow("update", I18n::t("menu.checkUpdate"), false, false,
-                        hint_of("app:update").c_str(), false).clicked) {
-                activate("app:update");
-                closeMenu();
-            }
-            // 隐藏：缩到系统托盘（托盘图标左键单击/双击唤回）
-            if (p->MenuRow("hide", I18n::t("menu.minimize"), false, false,
-                        nullptr, false).clicked) {
-                activate("minimize");
-                closeMenu();
-            }
-            if (p->MenuRow("quit", I18n::t("menu.quit"), false, true, nullptr,
-                        false).clicked) {
-                activate("quit");
-                closeMenu();
+            for (const auto& item : mainMenuItems()) {
+                if (item.separator) {
+                    p->MenuDivider();
+                    continue;
+                }
+                const bool is_view = item.action.rfind("view:", 0) == 0;
+                if (p->MenuRow(item.action.c_str(), item.label.c_str(), false,
+                               item.action == "quit", item.hint.c_str(), is_view).clicked) {
+                    if (is_view) go(std::atoi(item.action.c_str() + 5));
+                    else {
+                        activate(item.action);
+                        closeMenu();
+                    }
+                }
             }
             break;
         }
         case kMenuDevice: {
-            // ==== 设备子页：配对设备 / 模式 / 时钟颜色 / 亮度 / 同步程序 ====
             if (p->MenuRow("back", I18n::t("menu.back"), false, false,
                         nullptr, false).clicked)
                 go(kMenuMain);
-            // 配对设备：直接弹出深色配对弹窗（见 platform/pair_code_dialog.h，
-            // 未配对=输码 / 已配对=状态+解除配对+清除 Wi-Fi），不进子页。
-            // 始终可达：新设备未配对时 device_online_ 为假，仍需能输码配对。
-            if (p->MenuRow("device-pair", I18n::t("menu.pairDevice"), false,
-                        false, nullptr, false).clicked) {
-                activate("pair-input");
-                closeMenu();
-            }
+            if (p->MenuRow("wireless-device", I18n::t("menu.wirelessDevice"), false,
+                        false, I18n::t(checked("wireless-online")
+                            ? "menu.deviceOnline" : "menu.deviceOffline"), true).clicked)
+                go(kMenuWirelessDevice);
+            if (p->MenuRow("secondary-device", I18n::t("menu.secondaryDevice"), false,
+                        false, nullptr, true).clicked)
+                go(kMenuSecondaryDevice);
             p->MenuDivider();
             if (!device_online_) {
                 p->MenuLabel(I18n::t("menu.deviceOffline"));
@@ -2528,6 +2774,82 @@ void UIRenderer::renderMenu() {
             if (p->MenuRow("drotate", I18n::t("menu.screenRotate"), false, false,
                         rotate_hint, true).clicked)
                 go(kMenuDeviceRotate);
+            break;
+        }
+        case kMenuWirelessDevice: {
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                        nullptr, false).clicked)
+                go(kMenuDevice);
+            p->MenuLabel(I18n::t("menu.wirelessDevice"));
+            if (p->MenuRow("device-pair", I18n::t("menu.pairDevice"), false,
+                        false, nullptr, false).clicked) {
+                activate("pair-input");
+                closeMenu();
+            }
+            break;
+        }
+        case kMenuSecondaryDevice: {
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                        nullptr, false).clicked)
+                go(kMenuDevice);
+            p->MenuLabel(I18n::t("menu.secondaryDevice"));
+            if (p->MenuRow("secondary-mode", I18n::t("menu.secondaryMode"), false,
+                        false, checked("secondary-mode:windows") ? "Windows" : "USB", true).clicked)
+                go(kMenuSecondaryMode);
+            if (checked("dedicated-available") &&
+                p->MenuRow("dedicated", I18n::t("menu.dedicatedDisplay"),
+                        checked("dedicated"), false, nullptr, false).clicked) {
+                activate("dedicated");
+                closeMenu();
+            }
+            if (checked("secondary-layout-available")) {
+                if (p->MenuRow("secondary-layout", I18n::t("menu.secondaryLayout"), false,
+                            false, nullptr, true).clicked)
+                    go(kMenuSecondaryLayout);
+                if (p->MenuRow("secondary-monitor", I18n::t("menu.secondaryMonitor"),
+                            checked("secondary-monitor"), false, nullptr, false).clicked)
+                    activate("secondary-monitor");
+            }
+            if (p->MenuRow("secondary-cursor-block", I18n::t("menu.secondaryCursorBlock"),
+                        checked("secondary-cursor-block"), false, "Ctrl+Alt", false).clicked)
+                activate("secondary-cursor-block");
+            break;
+        }
+        case kMenuSecondaryLayout: {
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false, nullptr, false).clicked)
+                go(kMenuSecondaryDevice);
+            p->MenuLabel(I18n::t("menu.secondaryLayout"));
+            const char* commands[] = {"secondary-layout:auto", "secondary-layout:left", "secondary-layout:right"};
+            const char* labels[] = {"menu.secondaryAuto", "menu.secondaryLeft", "menu.secondaryRight"};
+            for (int i = 0; i < 3; ++i) {
+                if (p->MenuRow(commands[i], I18n::t(labels[i]), checked(commands[i]),
+                            false, nullptr, false).clicked)
+                    activate(commands[i]);
+            }
+            break;
+        }
+        case kMenuSecondaryMode: {
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                        nullptr, false).clicked)
+                go(kMenuSecondaryDevice);
+            p->MenuLabel(I18n::t("menu.secondaryMode"));
+            if (p->MenuRow("secondary-usb", I18n::t("menu.secondaryUsb"),
+                        checked("secondary-mode:usb"), false, nullptr, false).clicked)
+                activate("secondary-mode:usb");
+            if (p->MenuRow("secondary-windows", I18n::t("menu.secondaryWindows"),
+                        checked("secondary-mode:windows"), false, nullptr, false).clicked)
+                activate("secondary-mode:windows");
+            p->MenuDivider();
+            ImGui::PushFont(p->font_10);
+            ImGui::PushStyleColor(ImGuiCol_Text, p->kMenuFaint);
+            ImGui::Indent(12.0f * S);
+            ImGui::PushTextWrapPos(ImGui::GetWindowSize().x - 16.0f * S);
+            ImGui::TextUnformatted(I18n::t(checked("secondary-mode:windows")
+                ? "menu.secondaryWindowsHint" : "menu.secondaryUsbHint"));
+            ImGui::PopTextWrapPos();
+            ImGui::Unindent(12.0f * S);
+            ImGui::PopStyleColor();
+            ImGui::PopFont();
             break;
         }
         case kMenuDeviceMode: {
@@ -2677,6 +2999,15 @@ void UIRenderer::renderMenu() {
                         nullptr, false).clicked)
                 go(kMenuMain);
             p->MenuLabel(I18n::t("menu.soundManage"));
+#ifdef _WIN32
+            if (p->MenuRow("audio-output", I18n::t("menu.soundOutput"), false,
+                           false, nullptr, true).clicked)
+                go(kMenuAudioOutput);
+            const auto volume = hint_of("audio-volume");
+            if (p->MenuRow("audio-volume", I18n::t("menu.soundVolume"), false,
+                           false, volume.c_str(), true).clicked)
+                go(kMenuAudioVolume);
+#endif
             if (p->MenuRow("snd-mute-all", I18n::t("menu.soundMuteAll"),
                         checked("sound-mute"), false, nullptr,
                         false).clicked)
@@ -2700,6 +3031,35 @@ void UIRenderer::renderMenu() {
                     activate("sound-mute-state:" + std::string(kSndStates[i]));
             }
             if (!any_audio) p->MenuLabel(I18n::t("menu.soundNoBinding"));
+            break;
+        }
+        case kMenuAudioOutput: {
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                           nullptr, false).clicked)
+                go(kMenuSound);
+            p->MenuLabel(I18n::t("menu.soundOutput"));
+            if (checked("wireless-online")) p->MenuLabel(I18n::t("menu.soundWirelessOnline"));
+            if (menu_collect) {
+                for (const auto& entry : menu_collect("audio-outputs")) {
+                    if (p->MenuRow(entry.id.c_str(), entry.label.c_str(), entry.checked,
+                                   false, nullptr, false).clicked)
+                        activate(entry.id);
+                }
+            }
+            break;
+        }
+        case kMenuAudioVolume: {
+            if (p->MenuRow("back", I18n::t("menu.back"), false, false,
+                           nullptr, false).clicked)
+                go(kMenuSound);
+            p->MenuLabel(I18n::t("menu.soundVolume"));
+            if (menu_collect) {
+                for (const auto& entry : menu_collect("audio-volumes")) {
+                    if (p->MenuRow(entry.id.c_str(), entry.label.c_str(), entry.checked,
+                                   false, nullptr, false).clicked)
+                        activate(entry.id);
+                }
+            }
             break;
         }
         case kMenuModels: {
@@ -2963,6 +3323,12 @@ void UIRenderer::renderMenu() {
             if (p->MenuRow("back", I18n::t("menu.back"), false, false, nullptr, false).clicked)
                 go(kMenuMain);
             p->MenuLabel(I18n::t("menu.display"));
+            if (!checked("dedicated") &&
+                p->MenuRow("center", I18n::t("menu.centerWindow"), false,
+                            false, nullptr, false).clicked) {
+                activate("center");
+                closeMenu();
+            }
             if (p->MenuRow("flip", I18n::t("menu.flipHorizontal"), checked("flip"),
                         false, nullptr, false).clicked)
                 activate("flip");
@@ -3255,7 +3621,7 @@ UIRenderer::UIRenderer() : impl_(new Impl()) {}
 UIRenderer::~UIRenderer() { delete impl_; }
 bool UIRenderer::init(GLFWwindow*) { return true; }
 bool UIRenderer::init(int, int) { return true; }
-void UIRenderer::beginFrame() {}
+void UIRenderer::beginFrame(bool) {}
 void UIRenderer::forwardMouseButton(int, int, int) {}
 void UIRenderer::forwardCursorPos(double, double) {}
 void UIRenderer::forwardScroll(double, double) {}
@@ -3265,6 +3631,7 @@ void UIRenderer::renderMetrics(const SysMetrics&) {}
 void UIRenderer::renderStatus(const PetStatus&) {}
 void UIRenderer::renderHeadEffect(const PetStatus&) {}
 void UIRenderer::renderMenu() {}
+std::vector<ContextMenuItem> UIRenderer::trayMenu(bool) { return {}; }
 void UIRenderer::renderDockBar(const PetStatus&) {}
 float UIRenderer::dockBarHeight(const PetStatus&) const { return 0.0f; }
 void UIRenderer::endFrame() {}

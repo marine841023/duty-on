@@ -225,6 +225,8 @@ Section "install"
   ; PC 端「动作设定·试听」未绑定自定义时播放系统默认音频（find_sounds_dir）
   SetOutPath "$INSTDIR\assets\device\sounds"
   File /r "..\..\frontend\assets\device\sounds\*.*"
+  SetOutPath "$INSTDIR\assets\device"
+  File "..\..\frontend\assets\device\font-noto-sc.otf"
 
   ; 开机自启（按选项页勾选状态）
   SetOutPath "$INSTDIR"

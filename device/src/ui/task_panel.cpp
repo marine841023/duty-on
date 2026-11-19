@@ -1,10 +1,11 @@
-#if !defined(_WIN32) || defined(DUTYON_UI_PREVIEW)
-
 // 设备端界面绘制。设计说明见 task_panel.h。
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "ui/task_panel.h"
 
-#ifdef DUTYON_UI_PREVIEW
+#ifdef _WIN32
 #include <GL/glew.h>
 #else
 #include <GLES3/gl3.h>
@@ -14,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <ctime>
 #include <vector>
 
 #include "render/text_renderer.h"
@@ -211,6 +213,16 @@ constexpr int kMaxRows = 6;
 constexpr float kNameSize = 30.f;
 constexpr float kStatusSize = 24.f;
 constexpr float kPi = 3.1415927f;
+constexpr float kClockSize = 80.f;
+constexpr float kClockLargeSize = 116.f;
+constexpr float kClockLandscapeSize = 72.f;
+constexpr float kClockLandscapeLargeSize = 96.f;
+constexpr float kHeaderHeight = 124.f;
+constexpr float kHeaderLargeHeight = 170.f;
+
+float screenScale(int screen_w, int screen_h) {
+    return std::max(1, std::min(screen_w, screen_h)) / 480.0f;
+}
 
 }  // namespace
 
@@ -220,13 +232,20 @@ struct TaskPanel::Impl {
     Color ink = rgb(0xD49E52);  // 主题色（setClockColor）
     GLuint shape_prog = 0, glow_prog = 0;
     bool programs_tried = false;
-    int sw = 1, sh = 1;  // 当前帧屏幕尺寸（每个公开入口先 begin()）
+    float sw = 1.0f, sh = 1.0f;
+    int pixel_w = 1, pixel_h = 1;
+    float scale = 1.0f;
 
     TextRenderer& digits() { return clock_font.isLoaded() ? clock_font : text; }
 
-    void begin(int screen_w, int screen_h) {
-        sw = screen_w;
-        sh = screen_h;
+    void begin(int& screen_w, int& screen_h) {
+        pixel_w = screen_w;
+        pixel_h = screen_h;
+        scale = screenScale(screen_w, screen_h);
+        sw = screen_w / scale;
+        sh = screen_h / scale;
+        screen_w = (int)std::lround(sw);
+        screen_h = (int)std::lround(sh);
         if (!programs_tried) {
             programs_tried = true;
             shape_prog = linkProgram(kShapeVert, kShapeFrag);
@@ -300,10 +319,13 @@ struct TaskPanel::Impl {
     void put(TextRenderer& f, const std::string& s, float x, float y_top, float size, Color c,
              bool bold = false) {
         if (!f.isLoaded() || s.empty()) return;
+        x *= scale;
+        y_top *= scale;
+        size *= scale;
         if (bold)
-            f.drawBold(s, x, y_top, size, c.r, c.g, c.b, c.a, sw, sh, size * 0.022f);
+            f.drawBold(s, x, y_top, size, c.r, c.g, c.b, c.a, pixel_w, pixel_h, size * 0.022f);
         else
-            f.draw(s, x, y_top, size, c.r, c.g, c.b, c.a, sw, sh);
+            f.draw(s, x, y_top, size, c.r, c.g, c.b, c.a, pixel_w, pixel_h);
     }
     // 垂直居中于 cy
     void putMid(TextRenderer& f, const std::string& s, float x, float cy, float size, Color c,
@@ -494,15 +516,91 @@ void TaskPanel::setClockColor(const std::string& name) {
         if (name == k.name) impl_->ink = k.c;
 }
 
+TaskScreenLayout TaskPanel::screenLayout(const std::string& mode, int screen_w,
+                                         int screen_h, int session_count,
+                                         float voice_height, bool responsive) const {
+    TaskScreenLayout layout;
+    layout.landscape = screen_w >= screen_h;
+    layout.character_w = layout.landscape ? screen_h : screen_w;
+    if (responsive) {
+        const float scale = screenScale(screen_w, screen_h);
+        float min_info = 260.f;
+        if (mode == "single" || mode == "multi") {
+            for (const char* state : {"confirmation-needed", "thinking", "tool-use", "working", "idle"})
+                min_info = std::max(min_info, 154.f + impl_->text.measureWidth(I18n::t(styleFor(state).i18n_key), kStatusSize));
+        }
+        const int character_w = std::min(screen_h, screen_w - (int)std::ceil(min_info * scale));
+        layout.landscape = screen_w * 3 >= screen_h * 4 && character_w >= screen_h * 0.70f;
+        layout.character_w = layout.landscape ? character_w : screen_w;
+    }
+    layout.character_h = screen_h;
+    layout.region_x = layout.landscape ? layout.character_w : 0;
+    layout.region_w = screen_w - layout.region_x;
+    const bool large_clock = mode != "multi" && mode != "voice";
+    const float panel_height = mode == "voice" ? voice_height
+        : mode == "multi" ? heightForSessions(session_count, screen_w, screen_h) : 0.0f;
+    if (!layout.landscape && (mode == "multi" || mode == "voice")) {
+        layout.character_y = (int)panel_height;
+        layout.character_h = std::max(1, screen_h - layout.character_y -
+            (int)headerHeight(false, false, screen_w, screen_h));
+    }
+    if (responsive && !layout.landscape && large_clock && screen_w * 5 > screen_h * 4) {
+        const float scale = screenScale(screen_w, screen_h);
+        layout.character_y = (int)(64.f * scale); // room for the date below the pet
+        layout.character_h = std::max(1, screen_h - layout.character_y -
+            (int)((mode == "single" ? 232.f : 170.f) * scale));
+    }
+    layout.panel_top = layout.landscape
+        ? screen_h - headerHeight(large_clock, true, screen_w, screen_h)
+        : mode == "single" ? headerHeight(true, false, screen_w, screen_h) : panel_height;
+    return layout;
+}
+
+void TaskPanel::renderScreen(const PetStatus& status, const std::string& mode,
+                             int screen_w, int screen_h, const TaskScreenLayout& layout,
+                             double clock_epoch, int utc_offset_min,
+                             bool show_clock, bool show_tasks) {
+    if (show_tasks && mode != "frame" && status.overall_state == "alert")
+        renderAlertEdge(screen_w, screen_h);
+    if (show_tasks && mode == "multi")
+        render(status, screen_w, screen_h, layout.panel_top,
+               layout.region_x, layout.region_w);
+    if (show_tasks && mode == "single")
+        renderFocus(status, screen_w, screen_h,
+                    layout.panel_top - (layout.landscape ? 8.0f * screenScale(screen_w, screen_h) : 0.0f),
+                    layout.region_x, layout.region_w);
+    if (!show_clock) return;
+    const time_t seconds = clock_epoch > 0.0
+        ? (time_t)(clock_epoch + utc_offset_min * 60.0) : std::time(nullptr);
+    std::tm calendar{};
+#ifdef _WIN32
+    if (clock_epoch > 0.0) gmtime_s(&calendar, &seconds);
+    else localtime_s(&calendar, &seconds);
+#else
+    if (clock_epoch > 0.0) gmtime_r(&seconds, &calendar);
+    else localtime_r(&seconds, &calendar);
+#endif
+    char time_text[16]{};
+    char date_text[24]{};
+    char weekday_text[24]{};
+    static const char* weekdays[] = {"日", "一", "二", "三", "四", "五", "六"};
+    std::strftime(time_text, sizeof(time_text), "%H:%M:%S", &calendar);
+    std::snprintf(date_text, sizeof(date_text), "%d月%d日",
+                  calendar.tm_mon + 1, calendar.tm_mday);
+    std::snprintf(weekday_text, sizeof(weekday_text), "星期%s", weekdays[calendar.tm_wday]);
+    renderHeader(time_text, date_text, weekday_text, mode != "multi" && mode != "voice",
+                 layout.landscape, screen_w, screen_h, layout.region_x, layout.region_w);
+}
+
 // ---------------------------------------------------------------------------
 // 舞台光
 // ---------------------------------------------------------------------------
 void TaskPanel::renderBackdrop(const std::string& overall_state, int screen_w, int screen_h, int vx,
-                               int vy, int vw, int vh) {
+                               int vy, int vw, int vh, bool use_current_viewport) {
     auto* p = impl_;
     if (screen_w <= 0 || screen_h <= 0 || vw <= 0 || vh <= 0) return;
+    if (!use_current_viewport) glViewport(0, 0, screen_w, screen_h);
     p->begin(screen_w, screen_h);
-    glViewport(0, 0, screen_w, screen_h);
     const float t = p->now();
     Color c = p->ink;
     float level, period;
@@ -518,19 +616,87 @@ void TaskPanel::renderBackdrop(const std::string& overall_state, int screen_w, i
         period = 6.0f;
     }
     const float k = 0.82f + 0.18f * std::sin(t * 2.f * kPi / period);
-    const float cx = vx + vw * 0.5f;
+    const float cx = (vx + vw * 0.5f) / p->scale;
     // 身后的大光团 + 脚下的一摊光
-    p->glow(cx, vy + vh * 0.52f, vw * 0.62f, vh * 0.56f, withAlpha(c, level * k * 0.62f));
-    p->glow(cx, vy + vh * 0.09f, vw * 0.46f, vh * 0.085f, withAlpha(c, level * k * 1.5f));
+    p->glow(cx, (vy + vh * 0.52f) / p->scale, vw * 0.62f / p->scale,
+            vh * 0.56f / p->scale, withAlpha(c, level * k * 0.62f));
+    p->glow(cx, (vy + vh * 0.09f) / p->scale, vw * 0.46f / p->scale,
+            vh * 0.085f / p->scale, withAlpha(c, level * k * 1.5f));
+}
+
+void TaskPanel::renderSecondaryMetrics(const SysMetrics* metrics, SecondaryMetrics detail,
+                                       int screen_w, int screen_h, bool bottom) {
+    auto* p = impl_;
+    if (detail == SecondaryMetrics::Hidden || !p->text.isLoaded() || screen_w <= 0 || screen_h <= 0)
+        return;
+    // Scale from the full height of a side panel, or from the width of a bottom panel.
+    const float unit = bottom ? std::min(screen_w / 720.f, screen_h / 160.f) : screen_h / 480.f;
+    p->begin(screen_w, screen_h);
+    const float s = unit / p->scale;
+    auto percent = [](float value) { return std::to_string((int)std::lround(std::clamp(value, 0.f, 100.f))) + "%"; };
+    auto usage = [&](unsigned long long used, unsigned long long total) {
+        return total ? percent((float)(100.0 * used / total)) : std::string("—");
+    };
+    auto rate = [](unsigned long long value) {
+        char text[32];
+        if (value >= (1ULL << 30)) std::snprintf(text, sizeof(text), "%.1f GB/s", value / 1073741824.0);
+        else if (value >= (1ULL << 20)) std::snprintf(text, sizeof(text), "%.1f MB/s", value / 1048576.0);
+        else std::snprintf(text, sizeof(text), "%.0f KB/s", value / 1024.0);
+        return std::string(text);
+    };
+    struct Reading { const char* label; std::string value; const char* longest = "100%"; };
+    std::vector<Reading> readings = {
+        {I18n::t("monitor.cpu"), metrics ? percent(metrics->cpu_usage) : "—"},
+        {I18n::t("monitor.ram"), metrics ? usage(metrics->mem_used, metrics->mem_total) : "—"},
+    };
+    if (detail == SecondaryMetrics::Full && metrics) {
+        if (metrics->has_gpu)
+            readings.push_back({I18n::t("monitor.gpu"), percent(metrics->gpu_usage)});
+        if (metrics->vram_total)
+            readings.push_back({I18n::t("monitor.vram"), usage(metrics->vram_used, metrics->vram_total)});
+        readings.push_back({I18n::t("secondary.download"), rate(metrics->net_rx_rate), "1024.0 MB/s"});
+        readings.push_back({I18n::t("secondary.upload"), rate(metrics->net_tx_rate), "1024.0 MB/s"});
+    }
+    auto draw = [&](bool full) {
+        const int columns = full || bottom ? 2 : 1;
+        const int count = full ? (int)readings.size() : 2;
+        const int rows = (count + columns - 1) / columns;
+        const float gap = 12.f * s;
+        const float grid_w = std::min(p->sw - 28.f * s, (columns == 1 ? 320.f : 600.f) * s);
+        const float w = (grid_w - gap * (columns - 1)) / columns;
+        const float h = (bottom ? 104.f : full ? 96.f : 116.f) * s;
+        const float grid_h = rows * h + (rows - 1) * gap;
+        if (w <= 32.f * s || grid_h > p->sh - 20.f * s) return false;
+        const float room = w - 28.f * s;
+        for (int i = 0; i < count; ++i) {
+            const auto& reading = readings[i];
+            if (p->text.measureWidth(reading.label, 16.f * s) > room ||
+                p->text.measureWidth(reading.longest, 20.f * s) > room ||
+                p->text.measureWidth(reading.value, 20.f * s) > room) return false;
+        }
+        for (int i = 0; i < count; ++i) {
+            const float x = (p->sw - grid_w) * 0.5f + (i % columns) * (w + gap);
+            const float top = (p->sh + grid_h) * 0.5f - (i / columns) * (h + gap);
+            const auto& reading = readings[i];
+            p->shape(x, top - h, x + w, top, 12.f * s, kTileTop, kTileBot, 1.f, kHairline);
+            const float label = p->fit(p->text, reading.label, room, 20.f * s);
+            const float value = p->fit(p->text, reading.value, room, (full ? 32.f : 48.f) * s);
+            p->put(p->text, reading.label, x + 14.f * s, top - 12.f * s, label, kDim);
+            p->putMid(p->text, reading.value, x + 14.f * s, top - h * 0.63f, value, kPaper, true);
+        }
+        return true;
+    };
+    if (detail != SecondaryMetrics::Full || !draw(true)) draw(false);
 }
 
 // ---------------------------------------------------------------------------
 // 时间栏
 // ---------------------------------------------------------------------------
-float TaskPanel::headerHeight(bool large, bool landscape) const {
-    if (!landscape) return large ? 150.f : 104.f;
-    const float size = large ? 80.f : 60.f;
-    return 40.f + impl_->digits().lineHeight(size) + 44.f;
+float TaskPanel::headerHeight(bool large, bool landscape, int screen_w, int screen_h) const {
+    const float scale = screenScale(screen_w, screen_h);
+    if (!landscape) return (large ? kHeaderLargeHeight : kHeaderHeight) * scale;
+    const float size = large ? kClockLandscapeLargeSize : kClockLandscapeSize;
+    return (40.f + impl_->digits().lineHeight(size) + 44.f) * scale;
 }
 
 void TaskPanel::renderHeader(const std::string& hms, const std::string& date,
@@ -539,7 +705,8 @@ void TaskPanel::renderHeader(const std::string& hms, const std::string& date,
     auto* p = impl_;
     if (screen_w <= 0 || screen_h <= 0 || hms.size() < 5) return;
     p->begin(screen_w, screen_h);
-    if (region_w < 0) region_w = screen_w;
+    region_x = (int)std::lround(region_x / p->scale);
+    region_w = region_w < 0 ? screen_w : (int)std::lround(region_w / p->scale);
     TextRenderer& df = p->digits();
     if (!df.isLoaded()) return;
 
@@ -562,7 +729,7 @@ void TaskPanel::renderHeader(const std::string& hms, const std::string& date,
 
     if (landscape) {
         // 右列：时间左对齐，日期一行在下
-        float size = large ? 80.f : 60.f;
+        float size = large ? kClockLandscapeLargeSize : kClockLandscapeSize;
         while (size > 28.f && timeWidth(size) > region_w - 32.f) size -= 2.f;
         const float top = (float)screen_h - 40.f;
         drawTime(rx0 + 16.f, top, size);
@@ -573,7 +740,7 @@ void TaskPanel::renderHeader(const std::string& hms, const std::string& date,
         p->put(p->text, line, rx0 + 18.f, top - df.lineHeight(size) - 4.f, dsize, kDim);
     } else if (large) {
         // 单任务/相框：时间居中置顶，日期贴屏幕底（角色占满中间）
-        float size = 100.f;
+        float size = kClockLargeSize;
         while (size > 40.f && timeWidth(size) > region_w - 48.f) size -= 2.f;
         drawTime((rx0 + rx1) * 0.5f - timeWidth(size) * 0.5f, (float)screen_h - 42.f, size);
         const std::string line = date.empty()      ? weekday
@@ -582,7 +749,7 @@ void TaskPanel::renderHeader(const std::string& hms, const std::string& date,
         p->putCentered(p->text, line, rx0 + 20.f, rx1 - 20.f, 52.f, 26.f, kDim);
     } else {
         // 多任务：时间在左，星期/日期两行在右（连接图标正下方）
-        const float size = 64.f;
+        const float size = kClockSize;
         const float end_x = drawTime(rx0 + 20.f, (float)screen_h - 18.f, size);
         const float right = rx1 - 18.f;
         float wsize = 26.f, dsize = 22.f;
@@ -599,9 +766,10 @@ void TaskPanel::renderHeader(const std::string& hms, const std::string& date,
 // ---------------------------------------------------------------------------
 // 任务牌
 // ---------------------------------------------------------------------------
-float TaskPanel::heightForSessions(int session_count) {
+float TaskPanel::heightForSessions(int session_count, int screen_w, int screen_h) {
     const int rows = std::max(1, std::min(session_count, kMaxRows));
-    return rows * kRowPitch - (kRowPitch - kTileH) + kListTopGap + kListBottom;
+    return (rows * kRowPitch - (kRowPitch - kTileH) + kListTopGap + kListBottom) *
+           screenScale(screen_w, screen_h);
 }
 
 void TaskPanel::render(const PetStatus& status, int screen_w, int screen_h, float area_top,
@@ -609,7 +777,9 @@ void TaskPanel::render(const PetStatus& status, int screen_w, int screen_h, floa
     auto* p = impl_;
     if (screen_w <= 0 || screen_h <= 0 || area_top <= 0) return;
     p->begin(screen_w, screen_h);
-    if (region_w < 0) region_w = screen_w;
+    area_top /= p->scale;
+    region_x = (int)std::lround(region_x / p->scale);
+    region_w = region_w < 0 ? screen_w : (int)std::lround(region_w / p->scale);
     const float x0 = region_x + kMargin, x1 = region_x + region_w - kMargin;
     const float top = area_top - kListTopGap;
     const float t = p->now();
@@ -668,7 +838,9 @@ void TaskPanel::renderFocus(const PetStatus& status, int screen_w, int screen_h,
     const int i = Impl::focusIndex(status);
     if (i < 0) return;
     p->begin(screen_w, screen_h);
-    if (region_w < 0) region_w = screen_w;
+    area_top /= p->scale;
+    region_x = (int)std::lround(region_x / p->scale);
+    region_w = region_w < 0 ? screen_w : (int)std::lround(region_w / p->scale);
     p->tile(status.sessions[i], region_x + kMargin, region_x + region_w - kMargin, area_top,
             p->now());
 }
@@ -684,12 +856,13 @@ constexpr float kHintGap = 10.f;
 constexpr float kVoiceBottom = 12.f;
 }  // namespace
 
-float TaskPanel::voicePanelHeight(int command_count) {
+float TaskPanel::voicePanelHeight(int command_count, int screen_w, int screen_h) {
     auto* p = impl_;
     if (!p->text.isLoaded()) return 0.f;
     const int rows = command_count > 0 ? (command_count + 4) / 5 : 0;
-    return p->text.lineHeight(kHintSize) + kHintGap + rows * kPillH +
-           (rows > 1 ? (rows - 1) * kPillGap : 0.f) + kVoiceBottom;
+    return (p->text.lineHeight(kHintSize) + kHintGap + rows * kPillH +
+            (rows > 1 ? (rows - 1) * kPillGap : 0.f) + kVoiceBottom) *
+           screenScale(screen_w, screen_h);
 }
 
 float TaskPanel::renderVoicePanel(const std::vector<std::string>& commands, int highlight,
@@ -698,7 +871,9 @@ float TaskPanel::renderVoicePanel(const std::vector<std::string>& commands, int 
     auto* p = impl_;
     if (screen_w <= 0 || screen_h <= 0 || area_top <= 0.f || !p->text.isLoaded()) return 0.f;
     p->begin(screen_w, screen_h);
-    if (region_w < 0) region_w = screen_w;
+    area_top /= p->scale;
+    region_x = (int)std::lround(region_x / p->scale);
+    region_w = region_w < 0 ? screen_w : (int)std::lround(region_w / p->scale);
     const int n = (int)commands.size();
     const int rows = n > 0 ? (n + 4) / 5 : 0;
     const float panel_h = std::min(voicePanelHeight(n), area_top);
@@ -715,7 +890,7 @@ float TaskPanel::renderVoicePanel(const std::vector<std::string>& commands, int 
     p->circle(hx - 22.f, hcy, 4.f + 2.5f * beat, withAlpha(p->ink, 0.35f));
     p->circle(hx - 22.f, hcy, 4.f, p->ink);
     p->putMid(p->text, hint, hx, hcy, hsize, kPaper);
-    if (rows == 0) return panel_h;
+    if (rows == 0) return panel_h * p->scale;
 
     const float usable = x1 - x0;
     const float top = area_top - hint_h - kHintGap;
@@ -743,7 +918,7 @@ float TaskPanel::renderVoicePanel(const std::vector<std::string>& commands, int 
                       size, hi ? rgb(0x15120C) : kPaper, hi);
         }
     }
-    return panel_h;
+    return panel_h * p->scale;
 }
 
 // ---------------------------------------------------------------------------
@@ -930,5 +1105,3 @@ void TaskPanel::renderDim(int brightness, int screen_w, int screen_h) {
 }
 
 }  // namespace dutyon
-
-#endif  // !_WIN32 || DUTYON_UI_PREVIEW

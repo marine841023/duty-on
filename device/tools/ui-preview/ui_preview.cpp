@@ -2,7 +2,7 @@
 // 把各个画面渲染成 PNG，改界面时不用每次都烧到设备上看。
 //
 // 用法：ui_preview <正文字体> <时钟字体> <输出目录> [角色图片]
-// 布局部分与 main.cpp 的设备端分支保持一致（改那边时同步这里）。
+// 布局与正式程序直接共用 TaskPanel 的布局和绘制入口。
 
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
@@ -73,6 +73,9 @@ struct Scene {
     int voice_highlight = -1;
     std::string voice_hint;
     int brightness = 100;
+    bool secondary = false;
+    SecondaryDisplaySettings display_settings;
+    bool metrics_ready = true;
 };
 
 SessionInfo session(const char* name, const char* status, const char* ide) {
@@ -95,6 +98,42 @@ void finish(PetStatus& st) {
     st.session_count = (int)st.sessions.size();
 }
 
+void renderSecondary(TaskPanel& ui, const Scene& sc) {
+    const auto layout = secondaryDisplayLayout(sc.W, sc.H, sc.display_settings);
+    const auto& pet = layout.pet;
+    const auto screen = ui.screenLayout(sc.mode, pet.w, pet.h, (int)sc.status.sessions.size(), 0.f, true);
+    auto viewport = [&](const DisplayRegion& region) {
+        glViewport(region.x, sc.H - region.y - region.h, region.w, region.h);
+        glScissor(region.x, sc.H - region.y - region.h, region.w, region.h);
+    };
+    glEnable(GL_SCISSOR_TEST);
+    viewport(pet);
+    ui.renderBackdrop(sc.status.overall_state, pet.w, pet.h, screen.character_x, screen.character_y,
+                      screen.character_w, screen.character_h, true);
+    drawCharacter(sc.W, sc.H, pet.x + screen.character_x, sc.H - pet.y - pet.h + screen.character_y,
+                  screen.character_w, screen.character_h);
+    viewport(pet);
+    ui.renderScreen(sc.status, sc.mode, pet.w, pet.h, screen, 1794485527.0, 480);
+    if (layout.metrics != SecondaryMetrics::Hidden) {
+        SysMetrics metrics{};
+        metrics.cpu_usage = 28.f;
+        metrics.mem_total = 32;
+        metrics.mem_used = 18;
+        metrics.has_gpu = true;
+        metrics.gpu_usage = 63.f;
+        metrics.vram_total = 12;
+        metrics.vram_used = 3;
+        metrics.net_rx_rate = 13421772;
+        metrics.net_tx_rate = 86016;
+        viewport(layout.monitor);
+        ui.renderSecondaryMetrics(sc.metrics_ready ? &metrics : nullptr, layout.metrics,
+                                  layout.monitor.w, layout.monitor.h, layout.monitor.y > 0);
+    }
+    glDisable(GL_SCISSOR_TEST);
+    glViewport(0, 0, sc.W, sc.H);
+    ui.renderDim(sc.brightness, sc.W, sc.H);
+}
+
 void renderScene(TaskPanel& ui, const Scene& sc) {
     const int W = sc.W, H = sc.H;
     glViewport(0, 0, W, H);
@@ -102,6 +141,10 @@ void renderScene(TaskPanel& ui, const Scene& sc) {
     glClear(GL_COLOR_BUFFER_BIT);
     ui.setClockColor(sc.theme);
 
+    if (sc.secondary) {
+        renderSecondary(ui, sc);
+        return;
+    }
     if (sc.screen == "provision") {
         ui.renderProvision("DutyOn-7F3A", "k7m2x9qd", sc.failure, W, H);
     } else if (sc.screen == "joining") {
@@ -109,43 +152,20 @@ void renderScene(TaskPanel& ui, const Scene& sc) {
     } else if (sc.screen == "pairing") {
         ui.renderPairing("482915", sc.waiting, sc.wifi_just_ok, W, H);
     } else {
-        // ---- 与 main.cpp 设备端布局一致 ----
-        const bool landscape = W >= H;
-        const int left_w = landscape ? H : W;
-        const int region_x = landscape ? left_w : 0;
-        const int region_w = landscape ? W - left_w : W;
-        const bool multi = sc.mode == "multi", voice = sc.mode == "voice";
-        const bool large = !multi && !voice;
-        const float header_h = ui.headerHeight(large, landscape);
-        float panel_h = 0.f;
-        if (voice)
-            panel_h = ui.voicePanelHeight((int)sc.voice_cmds.size());
-        else if (multi)
-            panel_h =
-                TaskPanel::heightForSessions(sc.pc_ready ? (int)sc.status.sessions.size() : 0);
-        int vx = 0, vy = 0, vw = W, vh = H;
-        if (landscape) {
-            vw = left_w;
-        } else if (multi || voice) {
-            vy = (int)panel_h;
-            vh = H - (int)header_h - (int)panel_h;
-        }
-        ui.renderBackdrop(sc.pc_ready ? sc.status.overall_state : "sleeping", W, H, vx, vy, vw, vh);
-        drawCharacter(W, H, vx, vy, vw, vh);
-        if (sc.pc_ready && sc.status.overall_state == "alert") ui.renderAlertEdge(W, H);
+        const bool voice = sc.mode == "voice";
+        const float panel_h = voice ? ui.voicePanelHeight((int)sc.voice_cmds.size(), W, H) : 0.0f;
+        const auto layout = ui.screenLayout(sc.mode, W, H,
+            sc.pc_ready ? (int)sc.status.sessions.size() : 0, panel_h);
+        ui.renderBackdrop(sc.pc_ready && sc.mode != "frame" ? sc.status.overall_state : "sleeping",
+                          W, H, layout.character_x, layout.character_y,
+                          layout.character_w, layout.character_h);
+        drawCharacter(W, H, layout.character_x, layout.character_y,
+                       layout.character_w, layout.character_h);
         glViewport(0, 0, W, H);
-
-        const float below_header = (float)H - header_h;
-        if (multi && sc.pc_ready)
-            ui.render(sc.status, W, H, landscape ? below_header : panel_h, region_x, region_w);
-        if (large && sc.mode == "single" && sc.pc_ready)
-            ui.renderFocus(sc.status, W, H, landscape ? below_header - 8.f : 150.f, region_x,
-                           region_w);
         if (voice)
             ui.renderVoicePanel(sc.voice_cmds, sc.voice_highlight, sc.voice_hint, W, H, panel_h,
-                                region_x, region_w);
-        ui.renderHeader("14:52:07", "11月12日", "星期四", large, landscape, W, H, region_x,
-                        region_w);
+                                layout.region_x, layout.region_w);
+        ui.renderScreen(sc.status, sc.mode, W, H, layout, 1794485527.0, 480, true, sc.pc_ready);
     }
     ui.renderNetStatus(sc.wifi, sc.pc_ready, W, H);
     ui.renderDim(sc.brightness, W, H);
@@ -191,6 +211,14 @@ int main(int argc, char** argv) {
         s.name += "-landscape";
         s.W = 800;
         s.H = 480;
+        scenes.push_back(s);
+        s.name += "-1280";
+        s.W = 1280;
+        s.H = 720;
+        scenes.push_back(s);
+        s.name += "-portrait";
+        s.W = 720;
+        s.H = 1280;
         scenes.push_back(s);
     };
     {
@@ -278,6 +306,39 @@ int main(int argc, char** argv) {
         s.waiting = true;
         s.theme = "ice";
         add(s);
+    }
+
+    {
+        Scene s;
+        s.secondary = true;
+        s.status.sessions = {session("一个名字特别长的中文项目名称用来测试截断", "tool-use", "trae"),
+                             session("wewins3", "confirmation-needed", "trae")};
+        s.display_settings.show_metrics = true;
+        finish(s.status);
+        auto secondary = [&](const char* name, int w, int h) {
+            s.name = name;
+            s.W = w;
+            s.H = h;
+            scenes.push_back(s);
+        };
+        secondary("secondary-standard", 1280, 720);
+        secondary("secondary-standard-hidpi", 2560, 1440);
+        secondary("secondary-compact", 1600, 720);
+        secondary("secondary-full", 1920, 720);
+        secondary("secondary-half-left", 2560, 720);
+        secondary("secondary-short", 1920, 480);
+        secondary("secondary-square", 800, 800);
+        secondary("secondary-portrait", 720, 1280);
+        secondary("secondary-tall", 720, 1600);
+        s.metrics_ready = false;
+        secondary("secondary-awaiting-sample", 1920, 720);
+        s.metrics_ready = true;
+        s.display_settings.placement = SecondaryPlacement::Right;
+        secondary("secondary-half-right", 2560, 720);
+        s.display_settings.show_metrics = false;
+        secondary("secondary-right-empty", 2560, 720);
+        s.display_settings.placement = SecondaryPlacement::Auto;
+        secondary("secondary-centered", 2560, 720);
     }
 
     for (const Scene& sc : scenes) {

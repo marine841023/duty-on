@@ -61,6 +61,25 @@ try {
     project_path: 'D:/explicit/project', cwd: 'D:/different/cwd'});
   assert.equal(payload.project_path, 'D:/explicit/project');
   assert.equal(payload.source, 'compact');
+  const renamedProject = path.join(root, 'DutyOn');
+  fs.mkdirSync(renamedProject);
+  payload = run({session_id: 'renamed-project', hook_event_name: 'PreToolUse',
+    cwd: path.join(root, 'dutyon')});
+  assert.equal(payload.project_name, 'DutyOn', 'project name must preserve the directory spelling');
+  assert.equal(payload.project_path, renamedProject);
+  const oldProject = path.join(root, 'traeSprite');
+  fs.symlinkSync(renamedProject, oldProject, 'junction');
+  payload = run({session_id: 'renamed-project', hook_event_name: 'PreToolUse', cwd: oldProject});
+  assert.equal(payload.project_name, 'DutyOn', 'old directory junction must report its current target');
+  assert.equal(payload.project_path, renamedProject);
+  fs.unlinkSync(oldProject);
+  const projectSettings = path.join(renamedProject, '.dutyon-project.json');
+  fs.writeFileSync(projectSettings, JSON.stringify({name: '自定义项目名'}));
+  payload = run({session_id: 'named-project', hook_event_name: 'PreToolUse', cwd: renamedProject});
+  assert.equal(payload.project_name, '自定义项目名');
+  fs.writeFileSync(projectSettings, '{invalid');
+  payload = run({session_id: 'named-project', hook_event_name: 'PreToolUse', cwd: renamedProject});
+  assert.equal(payload.project_name, 'DutyOn', 'invalid name config must retain the directory name');
   payload = run({session_id: 's', hook_event_name: 'Stop'});
   assert.equal(payload.project_path, 'D:/fallback/codex', 'fallback must use only matching IDE env');
   payload = run({conversation_id: 'cursor-id', workspace_roots: ['D:/cursor/workspace'],

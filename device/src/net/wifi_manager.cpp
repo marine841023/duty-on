@@ -277,7 +277,7 @@ input:focus{outline:none;border-color:#4c8dff}
       << "<li>进入仓库的 <b>Releases</b> 页面</li>"
       << "<li>下载最新版本的 <b>DutyOn-vX.X.X.zip</b> 压缩包</li>"
       << "<li>解压后双击运行安装程序，按提示完成安装</li>"
-      << "<li>打开电脑端 DutyOn，右键宠物头像 → <b>设备</b> → <b>配对设备</b>，输入设备屏幕上显示的 <b>配对码</b></li>"
+      << "<li>打开电脑端 DutyOn，右键宠物头像 → <b>设备</b> → <b>无线设备</b> → <b>配对设备</b>，输入设备屏幕上显示的 <b>配对码</b></li>"
       << "</ol>"
       << "<a class=\"dlbtn\" href=\"https://gitee.com/megrezsoft/duty-on/releases\" target=\"_blank\" rel=\"noopener\">Gitee 下载（国内更快）</a>"
       << "<a class=\"dlbtn alt\" href=\"https://github.com/marine841023/duty-on/releases\" target=\"_blank\" rel=\"noopener\">GitHub 下载（Releases）</a>"

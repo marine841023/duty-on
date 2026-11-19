@@ -46,6 +46,7 @@ public:
     std::optional<dutyon::SysMetrics> takeMetrics();
     // 监控面板开关（面板关 = 采样循环纯 sleep 零开销）
     void setMonitorActive(bool active) { monitor_.setActive(active); }
+    void setSecondaryMonitorActive(bool active) { monitor_.setSecondaryActive(active); }
 
     // ---- 菜单动作（替代旧一次性 HTTP 调用）----
     // 1 开 / 0 关 / -1 查询失败（无注册表访问异常时不会出现）

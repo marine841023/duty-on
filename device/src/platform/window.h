@@ -3,6 +3,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include "ui/context_menu.h"
 
 namespace dutyon {
 
@@ -32,9 +33,10 @@ public:
     virtual int width() const = 0;
     virtual int height() const = 0;
 
-    // 整屏旋转（度：0/90/180/270）：设备端生效（逻辑 FBO + 旋转合成），
-    // 旋转后 width()/height() 返回新的逻辑尺寸；PC 端空实现
+    // 整屏旋转（度：0/90/180/270）：设备用 FBO 合成，Windows 专属屏用驱动方向。
+    // 旋转后 width()/height() 返回供布局使用的新尺寸。
     virtual void setRotation(int deg) { (void)deg; }
+    virtual int rotation() const { return 0; }
 
     // 物理（上屏）尺寸与旋转合成回读（快照调试用）：
     // rotation 0 时物理 = 逻辑；PC 端回退到 width()/height()
@@ -48,6 +50,17 @@ public:
 
     // Win32 HWND（仅 Windows 端实现；诊断/Win32 专用）
     virtual void* nativeWinHandle() const { return nullptr; }
+
+    virtual bool isDedicatedDisplay() const { return false; }
+    virtual const std::string& dedicatedDisplayId() const {
+        static const std::string none;
+        return none;
+    }
+    virtual bool hasDedicatedDisplay() const { return false; }
+    virtual void toggleDedicatedDisplay() {}
+    virtual void setDedicatedDisplayEnabled(bool enabled) { (void)enabled; }
+    virtual void setSecondaryCursorBlock(bool enabled) { (void)enabled; }
+    virtual void centerOnScreen() {}
 
     // ---- 窗口显隐 + 托盘气泡（PC 端；配对连接成功后自动隐藏并提示）----
     // 显示/隐藏整个宠物窗口（设备端恒可见，空实现）
@@ -90,6 +103,8 @@ public:
     // 右键角色区时触发（主程序里接 ui.openMenu() 切换）。
     // 参数为点击的客户区坐标。
     std::function<void(int, int)> on_context_menu;
+    std::function<std::vector<ContextMenuItem>()> on_tray_menu;
+    std::function<void(const std::string&)> on_tray_action;
     // 菜单外点击关闭：鼠标左键按下且位于窗口矩形之外时触发
     // （GLFW 收不到窗口外的事件，轮询 GetAsyncKeyState 兜底，同 1.x blur 关菜单）
     std::function<void()> on_outside_click;

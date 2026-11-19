@@ -5,11 +5,12 @@
 // 直接透出桌面。点击穿透用 WS_EX_TRANSPARENT | WS_EX_LAYERED 切换。
 //
 // 角色右键触发 on_context_menu，由 UIRenderer 用 ImGui 自绘菜单；
-// 托盘右键使用原生菜单，在角色窗口隐藏时仍可操作。
+// 托盘右键使用 Windows 原生弹出菜单。
 
 #ifdef _WIN32
 
 #include "platform/window.h"
+#include "platform/secondary_cursor_barrier_win32.h"
 
 #ifndef GLFW_EXPOSE_NATIVE_WIN32
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -21,11 +22,17 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <mmsystem.h>
+#include <cwctype>
 
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <cstdio>
 #include <cwchar>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -97,18 +104,31 @@ public:
 
         // 默认放到右下角
         positionBottomRight();
+        refreshDedicatedDisplay();
 
         // 样式/位置就绪后才显示：此时已带 WS_EX_TOOLWINDOW，不会在任务栏
         // 留下按钮（后台运行，仅托盘图标可见）
         glfwShowWindow(window_);
 
-        printf("[Win32Window] %dx%d transparent window created\n", width, height);
+        printf("[Win32Window] %dx%d window created (%s)\n", width_, height_,
+               dedicated_active_ ? "dedicated display" : "transparent desktop pet");
         return true;
     }
 
     bool pollEvents() override {
         if (glfwWindowShouldClose(window_)) return false;
         glfwPollEvents();
+        if (!pending_tray_action_.empty()) {
+            const std::string action = std::move(pending_tray_action_);
+            pending_tray_action_.clear();
+            if (on_tray_action) on_tray_action(action);
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (display_changed_ || now - display_check_ >= std::chrono::seconds(1)) {
+            display_changed_ = false;
+            display_check_ = now;
+            refreshDedicatedDisplay();
+        }
         handleDrag();
         pollOutsideClick();
         return !quit_requested_;
@@ -133,6 +153,7 @@ public:
     }
 
     void setClickThrough(bool through) override {
+        if (dedicated_active_) through = false;
         if (through == click_through_) return;
         click_through_ = through;
         printf("[ClickThrough] %s\n", through ? "ON (穿透)" : "OFF (可交互)");
@@ -155,6 +176,60 @@ public:
 
     bool isClickThrough() const override { return click_through_; }
 
+    bool isDedicatedDisplay() const override { return dedicated_active_; }
+
+    bool hasDedicatedDisplay() const override { return dedicated_available_; }
+    const std::string& dedicatedDisplayId() const override { return dedicated_display_id_; }
+
+    void toggleDedicatedDisplay() override {
+        setDedicatedDisplayEnabled(!dedicated_active_);
+    }
+
+    void setDedicatedDisplayEnabled(bool enabled) override {
+        dedicated_requested_ = enabled;
+        if (hwnd_) {
+            refreshDedicatedDisplay();
+            setVisible(true);
+        }
+    }
+
+    void setSecondaryCursorBlock(bool enabled) override {
+        secondary_cursor_block_ = enabled;
+        if (enabled && dedicated_active_)
+            secondary_cursor_barrier_.setBounds(dedicated_bounds_);
+        else
+            secondary_cursor_barrier_.stop();
+    }
+
+    void centerOnScreen() override {
+        if (dedicated_active_) return;
+        int left, top, right, bottom;
+        workArea(left, top, right, bottom);
+        center_work_area_ = {left, top, right, bottom};
+        exitDockInternal();
+        setVisible(true);
+        center_requested_ = true;
+    }
+
+    int rotation() const override { return screen_rotation_; }
+
+    void setRotation(int degrees) override {
+        if (degrees != 0 && degrees != 90 && degrees != 180 && degrees != 270) return;
+        if (!dedicated_active_) {
+            screen_rotation_ = degrees;
+            return;
+        }
+        DedicatedMonitor target;
+        EnumDisplayMonitors(nullptr, nullptr, findDedicatedMonitor,
+                            reinterpret_cast<LPARAM>(&target));
+        if (target.found && applyDisplayRotation(target.device, degrees)) {
+            screen_rotation_ = degrees;
+            refreshDedicatedDisplay();
+        } else {
+            showBalloon("DutyOn", "屏幕旋转失败，请确认副屏已连接并处于扩展显示模式。");
+        }
+    }
+
     // ---- 边缘吸附（1.x edge-dock）----
     bool isEdgeDocked() const override { return dock_active_; }
 
@@ -169,7 +244,7 @@ public:
     void exitEdgeDock() override { exitDockInternal(); }
 
     void debugEnterDock(int edge) override {
-        if (dock_active_ || !hwnd_) return;
+        if (dedicated_active_ || dock_active_ || !hwnd_) return;
         RECT rc;
         if (!GetWindowRect(hwnd_, &rc)) return;
         dock_edge_ = edge == 0 ? 0 : 1;
@@ -183,6 +258,7 @@ public:
     }
 
     void shutdown() override {
+        secondary_cursor_barrier_.stop();
         if (click_thread_run_.exchange(false)) {
             if (click_thread_.joinable()) click_thread_.join();
         }
@@ -197,6 +273,11 @@ public:
         if (ghost_) {
             DestroyWindow(ghost_);
             ghost_ = nullptr;
+        }
+        restoreDisplayRefresh();
+        if (precise_timer_active_) {
+            timeEndPeriod(1);
+            precise_timer_active_ = false;
         }
         if (window_) {
             glfwDestroyWindow(window_);
@@ -218,6 +299,10 @@ public:
         if (!window_) return;
         if (visible == !hidden_) return;  // 幂等：状态未变不重复操作
         hidden_ = !visible;
+        if (dedicated_active_) {
+            glfwShowWindow(window_);
+            return;
+        }
         if (visible) {
             glfwShowWindow(window_);
             // GLFW_FOCUS_ON_SHOW=FALSE 已避免抢焦点；再钉一次顶层保证盖在上层
@@ -254,7 +339,7 @@ public:
     }
 
     void resizeKeepBottom(int new_w, int new_h, bool keep_right) override {
-        if (!hwnd_) return;
+        if (!hwnd_ || dedicated_active_) return;
         if (new_w == width_ && new_h == height_) return;
         RECT rc;
         GetWindowRect(hwnd_, &rc);
@@ -269,7 +354,7 @@ public:
     }
 
     void resizeKeepTop(int new_w, int new_h, bool keep_right) override {
-        if (!hwnd_) return;
+        if (!hwnd_ || dedicated_active_) return;
         if (new_w == width_ && new_h == height_) return;
         RECT rc;
         GetWindowRect(hwnd_, &rc);
@@ -295,7 +380,7 @@ public:
     }
 
     void placeAt(int x, int bottom_y) override {
-        if (!hwnd_) return;
+        if (!hwnd_ || dedicated_active_) return;
         // 有效性：恢复矩形中心必须落在某台显示器上（显示器拔掉/布局
         // 改动后旧坐标可能在屏幕外——放弃恢复，沿用默认右下角，同 1.x
         // is_position_on_screen 语义）
@@ -353,6 +438,204 @@ public:
     }
 
 private:
+    struct DedicatedMonitor {
+        RECT bounds{};
+        wchar_t device[CCHDEVICENAME]{};
+        std::string id;
+        bool found = false;
+    };
+
+    static BOOL CALLBACK findDedicatedMonitor(HMONITOR monitor, HDC, LPRECT,
+                                              LPARAM context) {
+        MONITORINFOEXW info{};
+        info.cbSize = sizeof(info);
+        if (!GetMonitorInfoW(monitor, &info) || (info.dwFlags & MONITORINFOF_PRIMARY))
+            return TRUE;
+        for (DWORD index = 0;; ++index) {
+            DISPLAY_DEVICEW device{};
+            device.cb = sizeof(device);
+            if (!EnumDisplayDevicesW(info.szDevice, index, &device, 0)) break;
+            std::wstring identity = device.DeviceID;
+            for (auto& character : identity) character = std::towupper(character);
+            if (identity.find(L"MONITOR\\TUR0000\\") != 0 &&
+                identity.find(L"DISPLAY\\TUR0000\\") != 0)
+                continue;
+            auto* target = reinterpret_cast<DedicatedMonitor*>(context);
+            target->bounds = info.rcMonitor;
+            wcscpy_s(target->device, info.szDevice);
+            DISPLAY_DEVICEW monitor_interface{};
+            monitor_interface.cb = sizeof(monitor_interface);
+            if (EnumDisplayDevicesW(info.szDevice, index, &monitor_interface, EDD_GET_DEVICE_INTERFACE_NAME) &&
+                monitor_interface.DeviceID[0]) {
+                identity = monitor_interface.DeviceID;
+                for (auto& character : identity) character = std::towupper(character);
+            }
+            const int bytes = WideCharToMultiByte(CP_UTF8, 0, identity.data(), (int)identity.size(),
+                                                  nullptr, 0, nullptr, nullptr);
+            target->id.resize(bytes);
+            if (bytes) WideCharToMultiByte(CP_UTF8, 0, identity.data(), (int)identity.size(),
+                                           target->id.data(), bytes, nullptr, nullptr);
+            target->found = true;
+            return FALSE;
+        }
+        return TRUE;
+    }
+
+    void refreshDedicatedDisplay() {
+        DedicatedMonitor target;
+        EnumDisplayMonitors(nullptr, nullptr, findDedicatedMonitor,
+                            reinterpret_cast<LPARAM>(&target));
+        dedicated_available_ = target.found;
+        dedicated_display_id_ = target.id;
+        const bool enabled = dedicated_requested_ && target.found;
+        if (enabled) {
+            if (!dedicated_active_) {
+                preferSmoothRefresh(target.device);
+                exitDockInternal();
+                GetWindowRect(hwnd_, &desktop_bounds_);
+                dedicated_active_ = true;
+                if (applyDisplayRotation(target.device, screen_rotation_)) {
+                    EnumDisplayMonitors(nullptr, nullptr, findDedicatedMonitor,
+                                        reinterpret_cast<LPARAM>(&target));
+                }
+                glfwSwapInterval(0);
+                precise_timer_active_ = timeBeginPeriod(1) == TIMERR_NOERROR;
+                dragging_ = false;
+                center_requested_ = false;
+                hideGhostPreview();
+                setClickThrough(false);
+                glfwSetInputMode(window_, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            }
+            if (!EqualRect(&dedicated_bounds_, &target.bounds)) {
+                dedicated_bounds_ = target.bounds;
+                if (secondary_cursor_block_) secondary_cursor_barrier_.setBounds(dedicated_bounds_);
+                width_ = target.bounds.right - target.bounds.left;
+                height_ = target.bounds.bottom - target.bounds.top;
+                SetWindowPos(hwnd_, HWND_TOPMOST, target.bounds.left, target.bounds.top,
+                             width_, height_, SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                DEVMODEW mode{};
+                mode.dmSize = sizeof(mode);
+                EnumDisplaySettingsW(target.device, ENUM_CURRENT_SETTINGS, &mode);
+                printf("[DedicatedDisplay] %ls %dx%d at (%ld,%ld), mode=%lux%lu@%luHz\n",
+                       target.device, width_, height_, target.bounds.left,
+                       target.bounds.top, mode.dmPelsWidth, mode.dmPelsHeight,
+                       mode.dmDisplayFrequency);
+            }
+            return;
+        }
+        secondary_cursor_barrier_.stop();
+        if (!dedicated_active_.exchange(false)) return;
+        glfwSwapInterval(1);
+        if (precise_timer_active_) {
+            timeEndPeriod(1);
+            precise_timer_active_ = false;
+        }
+        restoreDisplayRefresh();
+        dedicated_bounds_ = {};
+        glfwSetInputMode(window_, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        width_ = desktop_bounds_.right - desktop_bounds_.left;
+        height_ = desktop_bounds_.bottom - desktop_bounds_.top;
+        SetWindowPos(hwnd_, HWND_TOPMOST, desktop_bounds_.left, desktop_bounds_.top,
+                     width_, height_, SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        placeAt(desktop_bounds_.left, desktop_bounds_.bottom);
+        if (hidden_) glfwHideWindow(window_);
+        printf("[DedicatedDisplay] restored desktop pet (%s)\n",
+               target.found ? "tray switch" : "screen disconnected");
+    }
+
+    void preferSmoothRefresh(const wchar_t* device) {
+        DEVMODEW current{};
+        current.dmSize = sizeof(current);
+        if (!EnumDisplaySettingsW(device, ENUM_CURRENT_SETTINGS, &current)) return;
+        DWORD best_refresh = current.dmDisplayFrequency;
+        for (DWORD index = 0;; ++index) {
+            DEVMODEW candidate{};
+            candidate.dmSize = sizeof(candidate);
+            if (!EnumDisplaySettingsW(device, index, &candidate)) break;
+            if (candidate.dmPelsWidth == current.dmPelsWidth &&
+                candidate.dmPelsHeight == current.dmPelsHeight &&
+                candidate.dmBitsPerPel == current.dmBitsPerPel &&
+                candidate.dmDisplayOrientation == current.dmDisplayOrientation &&
+                candidate.dmDisplayFrequency > best_refresh &&
+                candidate.dmDisplayFrequency <= 60)
+                best_refresh = candidate.dmDisplayFrequency;
+        }
+        if (best_refresh == current.dmDisplayFrequency) return;
+        DEVMODEW preferred = current;
+        preferred.dmDisplayFrequency = best_refresh;
+        preferred.dmFields |= DM_DISPLAYFREQUENCY;
+        LONG result = ChangeDisplaySettingsExW(device, &preferred, nullptr, CDS_TEST, nullptr);
+        if (result == DISP_CHANGE_SUCCESSFUL)
+            result = ChangeDisplaySettingsExW(device, &preferred, nullptr, 0, nullptr);
+        printf("[DedicatedDisplay] refresh %lu -> %lu Hz, result=%ld\n",
+               current.dmDisplayFrequency, best_refresh, result);
+        if (result == DISP_CHANGE_SUCCESSFUL) {
+            rememberDisplayChange(device, current, preferred);
+        }
+    }
+
+    void rememberDisplayChange(const wchar_t* device, const DEVMODEW& previous,
+                               const DEVMODEW& applied) {
+        if (!changed_display_[0]) {
+            previous_display_mode_ = previous;
+            wcscpy_s(changed_display_, device);
+        }
+        applied_display_mode_ = applied;
+    }
+
+    bool applyDisplayRotation(const wchar_t* device, int degrees) {
+        DEVMODEW current{};
+        current.dmSize = sizeof(current);
+        if (!EnumDisplaySettingsW(device, ENUM_CURRENT_SETTINGS, &current)) return false;
+        const DWORD orientation = degrees == 90 ? DMDO_270 :
+            degrees == 270 ? DMDO_90 : degrees == 180 ? DMDO_180 : DMDO_DEFAULT;
+        if (current.dmDisplayOrientation == orientation) return true;
+        DEVMODEW preferred = current;
+        if ((current.dmDisplayOrientation % 2) != (orientation % 2)) {
+            preferred.dmPelsWidth = current.dmPelsHeight;
+            preferred.dmPelsHeight = current.dmPelsWidth;
+        }
+        preferred.dmDisplayOrientation = orientation;
+        preferred.dmFields |= DM_DISPLAYORIENTATION | DM_PELSWIDTH | DM_PELSHEIGHT;
+        LONG result = ChangeDisplaySettingsExW(device, &preferred, nullptr, CDS_TEST, nullptr);
+        if (result == DISP_CHANGE_SUCCESSFUL)
+            result = ChangeDisplaySettingsExW(device, &preferred, nullptr, 0, nullptr);
+        printf("[DedicatedDisplay] rotation %d -> %lux%lu@%luHz, result=%ld\n",
+               degrees, preferred.dmPelsWidth, preferred.dmPelsHeight,
+               preferred.dmDisplayFrequency, result);
+        if (result != DISP_CHANGE_SUCCESSFUL) return false;
+        rememberDisplayChange(device, current, preferred);
+        return true;
+    }
+
+    void restoreDisplayRefresh() {
+        if (!changed_display_[0]) return;
+        DedicatedMonitor target;
+        EnumDisplayMonitors(nullptr, nullptr, findDedicatedMonitor,
+                            reinterpret_cast<LPARAM>(&target));
+        DEVMODEW current{};
+        current.dmSize = sizeof(current);
+        if (target.found && wcscmp(target.device, changed_display_) == 0 &&
+            EnumDisplaySettingsW(changed_display_, ENUM_CURRENT_SETTINGS, &current) &&
+            current.dmDisplayFrequency == applied_display_mode_.dmDisplayFrequency &&
+            current.dmPelsWidth == applied_display_mode_.dmPelsWidth &&
+            current.dmPelsHeight == applied_display_mode_.dmPelsHeight &&
+            current.dmDisplayOrientation == applied_display_mode_.dmDisplayOrientation) {
+            current.dmDisplayFrequency = previous_display_mode_.dmDisplayFrequency;
+            current.dmDisplayOrientation = previous_display_mode_.dmDisplayOrientation;
+            current.dmPelsWidth = previous_display_mode_.dmPelsWidth;
+            current.dmPelsHeight = previous_display_mode_.dmPelsHeight;
+            current.dmFields |= DM_DISPLAYFREQUENCY | DM_DISPLAYORIENTATION |
+                                DM_PELSWIDTH | DM_PELSHEIGHT;
+            const LONG result = ChangeDisplaySettingsExW(changed_display_,
+                &current, nullptr, 0, nullptr);
+            printf("[DedicatedDisplay] restore mode %lux%lu@%luHz orientation=%lu, result=%ld\n",
+                   current.dmPelsWidth, current.dmPelsHeight,
+                   current.dmDisplayFrequency, current.dmDisplayOrientation, result);
+        }
+        changed_display_[0] = 0;
+    }
+
     // ---- Win32 样式：顶层、工具窗口（不出现在任务栏）、不激活 ----
     // 注意：不能在这里加 WS_EX_LAYERED —— 未调用 SetLayeredWindowAttributes/
     // UpdateLayeredWindow 的 layered 窗口不会被 DWM 合成到屏幕（GL 帧缓冲
@@ -382,47 +665,61 @@ private:
         tray_added_ = Shell_NotifyIconW(NIM_ADD, &nid) != FALSE;
     }
 
-    void showTrayMenu() {
-        POINT cursor;
-        if (!GetCursorPos(&cursor)) return;
+    static HMENU createTrayMenu(const std::vector<ContextMenuItem>& items,
+                               std::vector<std::string>& actions) {
         HMENU menu = CreatePopupMenu();
+        if (!menu) return nullptr;
+        for (const auto& item : items) {
+            if (item.separator) {
+                AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                continue;
+            }
+            std::string text = item.label;
+            for (size_t offset = 0; (offset = text.find('&', offset)) != std::string::npos;
+                 offset += 2)
+                text.insert(offset, 1, '&');
+            if (!item.hint.empty()) text += "\t" + item.hint;
+            const int length = MultiByteToWideChar(CP_UTF8, 0, text.data(),
+                                                   (int)text.size(), nullptr, 0);
+            std::wstring label((size_t)length, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, text.data(), (int)text.size(),
+                                label.data(), length);
+            UINT flags = MF_STRING | (item.checked ? MF_CHECKED : MF_UNCHECKED);
+            if (!item.enabled) flags |= MF_GRAYED;
+            if (!item.children.empty()) {
+                HMENU submenu = createTrayMenu(item.children, actions);
+                if (!submenu || !AppendMenuW(menu, flags | MF_POPUP,
+                                              reinterpret_cast<UINT_PTR>(submenu),
+                                              label.c_str())) {
+                    if (submenu) DestroyMenu(submenu);
+                    DestroyMenu(menu);
+                    return nullptr;
+                }
+            } else {
+                if (item.action.empty()) flags |= MF_GRAYED;
+                actions.push_back(item.action);
+                AppendMenuW(menu, flags, (UINT_PTR)actions.size(), label.c_str());
+            }
+        }
+        return menu;
+    }
+
+    void showTrayMenu() {
+        if (!on_tray_menu) return;
+        const auto items = on_tray_menu();
+        std::vector<std::string> actions;
+        HMENU menu = createTrayMenu(items, actions);
         if (!menu) return;
-        constexpr UINT toggle_visibility = 1;
-        constexpr UINT center_window = 2;
-        constexpr UINT exit_app = 3;
-        AppendMenuW(menu, MF_STRING, toggle_visibility,
-                    hidden_ ? L"显示" : L"隐藏");
-        AppendMenuW(menu, MF_STRING, center_window, L"移至屏幕正中");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, exit_app, L"退出");
-
-        dragging_ = false;
-        hideGhostPreview();
-        if (on_outside_click) on_outside_click();
+        POINT position{};
+        GetCursorPos(&position);
         SetForegroundWindow(hwnd_);
-        const UINT command = TrackPopupMenu(menu,
+        const UINT selected = TrackPopupMenu(menu,
             TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-            cursor.x, cursor.y, 0, hwnd_, nullptr);
-        PostMessage(hwnd_, WM_NULL, 0, 0);
+            position.x, position.y, 0, hwnd_, nullptr);
         DestroyMenu(menu);
-
-        switch (command) {
-        case toggle_visibility:
-            setVisible(hidden_);
-            break;
-        case center_window: {
-            int left, top, right, bottom;
-            workArea(left, top, right, bottom);
-            center_work_area_ = {left, top, right, bottom};
-            exitDockInternal();
-            setVisible(true);
-            center_requested_ = true;
-            break;
-        }
-        case exit_app:
-            quit_requested_ = true;
-            break;
-        }
+        PostMessage(hwnd_, WM_NULL, 0, 0);
+        if (selected > 0 && selected <= actions.size())
+            pending_tray_action_ = actions[selected - 1];
     }
 
     // ---- GLFW 回调 ----
@@ -442,7 +739,7 @@ private:
                     glfwGetCursorPos(w, &cx, &cy);
                     const bool drag =
                         !self->hit_test_drag || self->hit_test_drag((int)cx, (int)cy);
-                    if (drag) {
+                    if (drag && !self->dedicated_active_) {
                         POINT pt;
                         GetCursorPos(&pt);
                         RECT rc;
@@ -498,6 +795,12 @@ private:
 
     static LRESULT CALLBACK wndProcThunk(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         auto* self = reinterpret_cast<Win32Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+        if (self && (msg == WM_DISPLAYCHANGE || msg == WM_DEVICECHANGE))
+            self->display_changed_ = true;
+        if (self && self->dedicated_active_ && msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT) {
+            SetCursor(LoadCursor(nullptr, IDC_ARROW));
+            return TRUE;
+        }
         if (msg == WM_TRAYICON && self) {
             const UINT evt = LOWORD(lp);
             // 左键单击/双击托盘图标恢复显示。
@@ -518,7 +821,7 @@ private:
 
     // ---- 拖拽移动 + 边缘吸附（1.x 拖拽无位置吸附，越过边缘释放才停靠）----
     void handleDrag() {
-        if (!dragging_ || click_through_) return;
+        if (dedicated_active_ || !dragging_ || click_through_) return;
         POINT pt;
         GetCursorPos(&pt);
         // 吸附条被拖离边缘：恢复整窗，拖拽无缝继续（1.x leaveEdgeDock）
@@ -744,6 +1047,7 @@ private:
         while (click_thread_run_.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(15));
             if (!hwnd_) continue;
+            if (dedicated_active_) continue;
             if (dragging_.load(std::memory_order_relaxed) ||
                 dock_active_.load(std::memory_order_relaxed)) {
                 setClickThrough(false);
@@ -807,6 +1111,22 @@ private:
     bool tray_added_ = false;
     bool center_requested_ = false;
     RECT center_work_area_{};
+    std::atomic<bool> dedicated_active_{false};
+    std::string pending_tray_action_;
+    bool dedicated_requested_ = true;
+    bool dedicated_available_ = false;
+    std::string dedicated_display_id_;
+    bool display_changed_ = false;
+    RECT dedicated_bounds_{};
+    bool secondary_cursor_block_ = true;
+    SecondaryCursorBarrier secondary_cursor_barrier_;
+    RECT desktop_bounds_{};
+    DEVMODEW previous_display_mode_{};
+    DEVMODEW applied_display_mode_{};
+    wchar_t changed_display_[CCHDEVICENAME]{};
+    int screen_rotation_ = 0;
+    bool precise_timer_active_ = false;
+    std::chrono::steady_clock::time_point display_check_{};
     bool hidden_ = false;                 // 窗口是否被隐藏（setVisible）
     std::atomic<bool> dragging_{false};
     int drag_offset_x_ = 0, drag_offset_y_ = 0;

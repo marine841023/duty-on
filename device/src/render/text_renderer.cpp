@@ -1,11 +1,12 @@
-#if !defined(_WIN32) || defined(DUTYON_UI_PREVIEW)  // 设备端 GLES；预览工具用桌面 GL
-
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "render/text_renderer.h"
 
-#define STB_TRUETYPE_IMPLEMENTATION  // ui_renderer.cpp 的同名定义在 _WIN32 段，
-#include <stb_truetype.h>            // 与本文件互斥编译，无重复定义
+#define STB_TRUETYPE_IMPLEMENTATION
+#include <stb_truetype.h>
 
-#ifdef DUTYON_UI_PREVIEW
+#ifdef _WIN32
 #include <GL/glew.h>
 #else
 #include <GLES3/gl3.h>
@@ -405,5 +406,3 @@ void TextRenderer::drawBold(const std::string& text_utf8, float x, float y,
 }
 
 } // namespace dutyon
-
-#endif // !_WIN32 || DUTYON_UI_PREVIEW

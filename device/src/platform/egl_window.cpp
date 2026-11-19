@@ -44,6 +44,7 @@ public:
     }
 
     int physWidth() const override { return ctx_.physWidth(); }
+    int rotation() const override { return ctx_.rotation(); }
     int physHeight() const override { return ctx_.physHeight(); }
     bool logicalActive() const override { return ctx_.logicalActive(); }
     void presentComposite() override { ctx_.presentComposite(); }

@@ -28,6 +28,38 @@ std::string status(StateManager& sm) {
     return sm.snapshotJson()["sessions"].at(0)["status"].get<std::string>();
 }
 
+void traeConfirmationTests() {
+    StateManager sm([] { return 100000; });
+    auto send = [&](const char* name, const char* call = "", const char* agent = "") {
+        auto ev = event(name, "trae-session", *call ? "Bash" : "", call);
+        ev.ide = IdeKind::Trae;
+        if (*agent) ev.agent_id = agent;
+        if (ev.hook_event_name == "Notification") {
+            ev.notification_type = "permission_prompt";
+            ev.message = "Agent is waiting for your answer";
+        }
+        sm.handleHookEvent(ev);
+    };
+    send("UserPromptSubmit");
+    send("PreToolUse", "old-a");
+    send("PreToolUse", "old-b");
+    send("Notification");
+    check(status(sm) == "confirmation-needed", "anonymous TRAE notification must alert");
+    send("PostToolUse", "old-a");
+    send("PostToolUse", "old-b");
+    send("PostToolUse", "unmatched");
+    send("PreToolUse", "child", "child-agent");
+    send("PostToolUse", "child", "child-agent");
+    check(status(sm) == "confirmation-needed", "old, unmatched and child completions must leave the prompt");
+    send("PermissionRequest", "parallel");
+    send("PreToolUse", "resumed");
+    check(status(sm) == "confirmation-needed", "start alone must leave the prompt");
+    send("PostToolUse", "resumed");
+    check(status(sm) == "confirmation-needed", "explicit parallel permission must survive TRAE fallback");
+    send("PostToolUse", "parallel");
+    check(status(sm) == "thinking", "anonymous TRAE prompt must clear after same actor resumes");
+}
+
 void stateTests() {
     uint64_t now = 100000;
     StateManager sm([&] { return now; });
@@ -472,6 +504,7 @@ void installerTests(const std::string& hooks) {
 int main(int argc, char** argv) {
     try {
         stateTests();
+        traeConfirmationTests();
         actorTests();
         claudeTests();
         alertRoundCapTests();

@@ -137,7 +137,19 @@ fi
 
 project_name=""
 if [ -n "$project_dir" ]; then
+  resolved_project_dir=$(CDPATH= cd -P -- "$project_dir" 2>/dev/null && pwd -P)
+  if [ -n "$resolved_project_dir" ]; then project_dir="$resolved_project_dir"; fi
   project_name=$(basename "$project_dir")
+  name_file="$project_dir/.dutyon-project.json"
+  if [ -f "$name_file" ] && [ "$(wc -c < "$name_file")" -le 4096 ]; then
+    custom_name=""
+    if command -v jq >/dev/null 2>&1; then
+      custom_name=$(jq -er '.name | select(type == "string") | gsub("^\\s+|\\s+$"; "") | select(length > 0 and length <= 128) | select(test("[\\p{C}]") | not)' "$name_file" 2>/dev/null)
+    elif command -v python3 >/dev/null 2>&1; then
+      custom_name=$(python3 -c 'import json,sys,unicodedata; name=json.load(open(sys.argv[1],encoding="utf-8")).get("name"); name=name.strip() if isinstance(name,str) else ""; print(name if 0<len(name)<=128 and not any(unicodedata.category(char).startswith("C") for char in name) else "")' "$name_file" 2>/dev/null)
+    fi
+    if [ -n "$custom_name" ]; then project_name="$custom_name"; fi
+  fi
 fi
 
 # IDE kind: the explicit argument wins; fall back to the runner's env marker

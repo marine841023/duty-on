@@ -55,6 +55,16 @@ Windows Release 与 ARM 交叉编译通过，v2.0.14 已替换本机运行程序
 
 ## Codex 安装与排查
 
+### 项目显示名称
+
+桥接优先使用项目根目录 `.dutyon-project.json` 中的 `name` 作为显示名；本项目设置为 `DutyOn`。配置仅影响名称，不改变项目路径或会话身份。文件须为不超过 4 KiB 的 UTF-8 JSON，名称须为 1–128 个字符且不含控制字符；缺失或无效时回退至目录名称。Windows 桥接读取实际目录拼写，并解析目录联接，避免旧别名继续显示旧项目名。Shell 桥接同样读取显示名并解析符号链接。
+
+### 2026-11-16：旧工作目录导致 Hook 无法启动
+
+当前桌面会话仍使用 `D:\src\traeSprite`，实际仓库已迁移至 `D:\src\dutyon`，旧目录不存在。Codex 仍记录 Hook started/completed，但桥接日志没有 INVOKED，桌宠也未收到该会话；恢复旧路径为指向实际仓库的目录联接后，同一回合立即出现真实 PostToolUse、PreModelRequest、PostModelRequest 和 PreToolUse，均 POST ok，`/status` 中对应会话恢复为 working/tool-use。该验证没有注入模拟事件，也没有重启 Codex 或桌宠。
+
+项目改名或迁移后，应同步更新已有会话的工作目录；需要继续旧会话时，可保留旧路径到新目录的联接。排查不能只看 Hook 配置存在或 started/completed 通知，还要确认会话工作目录存在，以及桥接确实执行并成功送达。当前“已安装”检查无法检测其他进程持有的失效工作目录。
+
 1. 精灵的安装器将脚本复制到 `~/.dutyon/hooks/`，配置写入 `$CODEX_HOME/hooks.json`，未设置时为 `~/.codex/hooks.json`。启动精灵时须带相同 CODEX_HOME；当前仅在对应配置目录已存在时安装。
 2. 在 Codex CLI 的 `/hooks` 检查并信任新定义。官方信任绑定精确定义，修改命令/事件后需重新确认；应用不会自动写入信任。若 `features.hooks=false`，先开启。
 3. 重启 IDE/会话，依次验证提交问题、工具执行、用户输入、Stop 与 Interrupt。检查 `~/.dutyon/hooks/bridge.log`、`~/.dutyon/hook-received.log` 和 `/api/status`。

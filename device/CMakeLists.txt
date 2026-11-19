@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(dutyon-2.0 VERSION 2.0.20 LANGUAGES C CXX)
+project(dutyon-2.0 VERSION 2.0.21 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -211,6 +211,8 @@ set(SOURCES
     src/state/machine.cpp
     src/ui/i18n.cpp
     src/ui/ui_renderer.cpp
+    src/ui/task_panel.cpp
+    src/render/text_renderer.cpp
 )
 
 if(WIN32)
@@ -218,7 +220,10 @@ if(WIN32)
     # 内嵌后端（原 src-tauri Rust 后端的 C++ 移植：状态机/IDE 扫描/指标
     # 采样/hook 安装器/HTTP 服务器/服务聚合）
     list(APPEND SOURCES
+        src/audio/windows_audio_player.cpp
         src/platform/win32_window.cpp
+        src/platform/secondary_cursor_barrier_win32.cpp
+        src/platform/turzx_display_win32.cpp
         resources/app.rc
         src/debug_diag.cpp
         src/backend/state_manager.cpp
@@ -232,7 +237,6 @@ if(WIN32)
         src/cloud/cloud_client.cpp)
 else()
     # ApiClient（HTTP 轮询 PC 端 API）仅设备端使用；PC 端内嵌后端直连。
-    # text_renderer/task_panel = 下半屏任务列表（字形图集文字 + 面板）
     # Wi-Fi 配对码方案（替代 USB 配对）：
     #   net/wifi_manager   = AP/client 模式切换状态机 + 内嵌 captive portal(httplib:80)
     #   net/pc_discovery   = UDP 广播发现 PC（设备广播 DUTYON_DISCOVER）
@@ -247,9 +251,7 @@ else()
         src/net/device_identity.cpp
         src/platform/egl_window.cpp
         src/render/gles_context.cpp
-        src/render/photo_player.cpp
-        src/render/text_renderer.cpp
-        src/ui/task_panel.cpp)
+        src/render/photo_player.cpp)
 endif()
 
 add_executable(dutyon-pet ${SOURCES})
@@ -299,13 +301,21 @@ if(WIN32)
         gdi32
         psapi         # EnumProcessModules（崩溃诊断）
         comdlg32      # GetOpenFileNameW（自定义角色动画上传选择器）
-        winmm         # mciSendStringW（动作设定页状态音频试听）
+        winmm         # 副屏高精度定时器
+        ole32
+        mf
+        mfplat
+        mfuuid
+        bcrypt        # TURZX DES-CBC framing
     )
     # 子系统 WINDOWS：启动不弹控制台黑窗。入口仍是 main()，需显式指定
     # mainCRTStartup（否则链接器找 WinMain 报错）。调试要看 printf 日志时
     # 从控制台/重定向启动仍可拿到输出（stdout 句柄有效时 printf 正常写）
     set_target_properties(dutyon-pet PROPERTIES WIN32_EXECUTABLE TRUE)
     target_link_options(dutyon-pet PRIVATE "/ENTRY:mainCRTStartup")
+
+    add_executable(turzx_probe tools/turzx_probe.cpp)
+    target_link_libraries(turzx_probe PRIVATE setupapi hid winusb)
 
     # Cubism SDK 5 的 OpenGL shader 在运行时从文件加载（FrameworkShaders/*.vert|frag，
     # 相对路径由 live2d_renderer.cpp 的 FrameworkLoadFile 解析到 exe 同目录）。

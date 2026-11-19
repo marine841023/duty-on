@@ -553,7 +553,7 @@ void GifSprite::render() {
     }
     const float dx = minify ? (float)(int)((impl_->vp_w - dw) * 0.5f + 0.5f)
               : (impl_->vp_w - dw) * 0.5f;
-    const float dy = impl_->vp_h - dh;
+    const float dy = (impl_->vp_h - dh) * (center_v_ ? 0.5f : 1.0f);
     impl_->content = Rect{dx, dy, dw, dh};
 
     // 纹理：缩小时上传重采样结果（整幅）；不缩小时首帧全量上传、此后

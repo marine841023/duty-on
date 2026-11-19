@@ -38,6 +38,7 @@ public:
 
     // 监控面板开关（UI 直接调用；false 时采样循环纯 sleep）
     void setActive(bool active);
+    void setSecondaryActive(bool active) { secondary_active_ = active; }
 
     // 隐式激活：外部客户端轮询 /api/metrics 时调用（要指标显然就是想看，
     // 与 Rust 版语义一致：直接置 true，无超时回落）
@@ -57,6 +58,7 @@ private:
     std::thread thread_;
     std::atomic<bool> run_{false};
     std::atomic<bool> active_{false};
+    std::atomic<bool> secondary_active_{false};
 
     std::mutex mtx_;  // 保护 latest_ / consumer_seq_ / 采样基线
     std::optional<dutyon::SysMetrics> latest_;

@@ -3,6 +3,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include "ui/context_menu.h"
 
 // 前向声明避免暴露 GLFW/ImGui 头文件到公共接口
 struct GLFWwindow;
@@ -32,7 +33,7 @@ public:
     // 设备端初始化（无窗口句柄）
     bool init(int display_w, int display_h);
 
-    void beginFrame();
+    void beginFrame(bool manage_cursor = true);
 
     // 新监控样本到达时压入历史缓冲（折线图数据源）；
     // 主循环仅在 takeMetrics() 拿到新数据时调用，约 1.5s 一次
@@ -49,6 +50,7 @@ public:
 
     // 渲染右键菜单（isMenuOpen() 时；窗口右侧临时扩展区）
     void renderMenu();
+    std::vector<ContextMenuItem> trayMenu(bool visible);
 
     void endFrame();
 
@@ -205,6 +207,7 @@ public:
     // 简化：☰ 点击直接 openMenu()，无需跨帧标志
 
 private:
+    std::vector<ContextMenuItem> mainMenuItems(bool visible = true) const;
     struct Impl;
     Impl* impl_;
     // 硬件显示端状态（setDeviceStatus 注入；渲染线程同循环读，无并发）

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ui/secondary_display_layout.h"
+
 #include <map>
 #include <optional>
 #include <string>
@@ -47,6 +49,9 @@ struct UserConfig {
     // 硬件显示端模式：single=单任务（角色全屏+大时钟）/ multi=多任务
     //（角色+任务列表）/ frame=电子相框（角色全屏循环播放动作）
     std::string device_mode = "multi";
+    std::string secondary_display_mode = "auto";
+    bool secondary_cursor_block = true;
+    std::map<std::string, SecondaryDisplaySettings> secondary_displays;
     // 相框模式的播放源（deviceMode=frame 时才有意义）：motion=动作轮播
     //（现行行为，角色循环播放动作）/ folder=指定文件夹（PC 端本机
     // frameFolder 里的 JPG/PNG 逐张下发到设备随机播放）
@@ -73,6 +78,8 @@ struct UserConfig {
     std::map<std::string, std::map<std::string, std::string>> state_audio;
     // 设备端完全静音（soundMute）：true 时不播任何音频（含事件提示音）
     bool sound_mute = false;
+    std::string pc_audio_output;  // Windows endpoint ID; empty follows the system default.
+    int pc_audio_volume = 100;
     // 按状态静音（stateAudioMuted）：{ "<key>:<状态>": true }，key 同上
     std::map<std::string, bool> state_audio_muted;
     // 硬件屏旋转角（度：0/90/180/270，config.json screenRotation）：
@@ -152,6 +159,9 @@ public:
     static void saveCustomCharacters(const UserConfig& cfg);
     // 硬件显示端模式（single/multi/frame；PC 菜单选择后经 /api/status 下发）
     static void saveDeviceMode(const std::string& mode);
+    static void saveSecondaryDisplayMode(const std::string& mode);
+    static void saveSecondaryCursorBlock(bool enabled);
+    static void saveSecondaryDisplaySettings(const std::string& id, SecondaryDisplaySettings settings);
     // 相框播放源（motion/folder；同上经 /api/status 下发给设备）
     static void saveFrameSource(const std::string& source);
     // 相框照片文件夹绝对路径（仅 PC 本机使用：/api/frame/photo 据此读图）
@@ -168,6 +178,8 @@ public:
                                const std::string& file);
     // 设备端声音：完全静音开关
     static void saveSoundMute(bool mute);
+    static void savePcAudioOutput(const std::string& id);
+    static void savePcAudioVolume(int percent);
     // 设备端声音：按状态静音开关（key 为角色 id 或模型 key）
     static void saveStateAudioMuted(const std::string& key,
                                     const std::string& state, bool muted);

@@ -261,7 +261,7 @@ void SysMonitor::runLoop() {
     uint64_t last_tick = 0;
     while (run_) {
         std::this_thread::sleep_for(std::chrono::milliseconds(bc::kMonitorIntervalMs));
-        if (!active_) continue;  // 面板关闭：纯 sleep，零系统调用
+        if (!active_ && !secondary_active_) continue;  // 面板关闭：纯 sleep，零系统调用
 
         const auto now = std::chrono::steady_clock::now();
         const double elapsed =

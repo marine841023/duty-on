@@ -14,9 +14,11 @@
 // 用户数据复用 1.x：直接读写 ~/.dutyon/config.json（翻转/迷你/语言/
 // 动作设定/监控显隐/当前形象），模型来自 ~/.dutyon/live2d + 内置目录。
 
+#include <cmath>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <ctime>
 #include <thread>
@@ -27,7 +29,6 @@
 #include <shellapi.h>
 #include <shlobj.h>  // SHBrowseForFolderW（相框照片文件夹选择）
 #include <commdlg.h>  // GetOpenFileNameW（自定义角色动画上传）
-#include <mmsystem.h>  // mciSendStringW（状态音频试听）
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>  // glfwGetFramebufferSize（视口 DPI 换算）
 #else
@@ -36,6 +37,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -48,11 +50,16 @@
 #include "debug_diag.h"
 #include "config/user_config.h"
 #include "platform/window.h"
+#ifdef _WIN32
+#include "audio/windows_audio_player.h"
+#include "platform/turzx_display_win32.h"
+#endif
 #include "render/gif_sprite.h"
 #include "render/live2d_renderer.h"
 #include "state/machine.h"
 #include "ui/i18n.h"
 #include "ui/ui_renderer.h"
+#include "ui/task_panel.h"
 #ifdef _WIN32
 #include "backend/backend_service.h"  // 单进程后端（原 duty-on.exe 职责）
 #include "platform/sync_progress.h"   // 设备程序自动更新进度窗口
@@ -65,7 +72,6 @@
 #include "net/pc_discovery.h"         // UDP 广播发现 PC（替代 USB ARP 发现）
 #include "net/device_identity.h"      // device_id / pair_code / token 持久化
 #include "render/photo_player.h"      // 电子相框照片逐张流式播放
-#include "ui/task_panel.h"            // 下半屏任务列表（项目名 + 状态）
 #include "audio/sound_player.h"       // 事件提示音（开始/结束/提醒）
 #include "audio/voice_kws.h"          // 语音唤醒/关键词监听（子进程 KWS）
 #endif
@@ -609,6 +615,13 @@ int main() {
 
     // 1. 平台窗口（PC: GLFW 透明窗口 / 设备: EGL framebuffer）
     IPlatformWindow* window = createPlatformWindow();
+#ifdef _WIN32
+    const auto startup_config = UserConfigStore::load();
+    window->setSecondaryCursorBlock(startup_config.secondary_cursor_block);
+    const char* desktop_disabled = std::getenv("DUTYON_TURZX_DESKTOP");
+    window->setDedicatedDisplayEnabled(startup_config.secondary_display_mode != "usb" &&
+        !(desktop_disabled && std::strcmp(desktop_disabled, "0") == 0));
+#endif
     if (!window->init(
 #ifdef _WIN32
             BASE_WIN_W, initial_h
@@ -620,6 +633,13 @@ int main() {
         delete window;
         return 1;
     }
+
+#ifdef _WIN32
+    TurzxDisplay turzx_display;
+    const char* turzx_disabled = std::getenv("DUTYON_TURZX");
+    const bool turzx_allowed = !(turzx_disabled && std::strcmp(turzx_disabled, "0") == 0);
+    bool turzx_enabled = false;
+#endif
 
 #ifndef _WIN32
     // 直出模式：逻辑尺寸回填为实际选中的 DRM 模式尺寸（init 内已按
@@ -668,7 +688,10 @@ int main() {
         // 丑"。钳到 1.0 后 ≤1440p 的屏与 1.x 尺寸完全一致，观感连续。
         if (f < 1.0f) f = 1.0f;
         if (f > 2.0f) f = 2.0f;
-        const float s = xs * f;
+        const float s = window->isDedicatedDisplay()
+            ? std::clamp((std::min)(window->width(), window->height()) / 360.0f,
+                         1.0f, 4.0f)
+            : xs * f;
         if (s > ui_scale - 0.01f && s < ui_scale + 0.01f) return false;
         ui_scale = s;
         win_w = (int)(BASE_WIN_W * s);
@@ -766,10 +789,10 @@ int main() {
     int device_brightness = 100;
     // 音量（PC 菜单"设备→音量"下发，0-100）：SoundPlayer 软件缩放
     int device_volume = 80;
+#endif
     // 整屏旋转角（PC 菜单"设备→屏幕旋转"下发，0/90/180/270）：设备端逻辑
     // FBO + 旋转合成；断连后保持最近值
     int screen_rotation = 0;
-#ifndef _WIN32
     // 默认朝向 = 上次运行时保存的旋转角（持久化于 ~/.dutyon/config.json 的
     // screenRotation，见下方 PC 下发时的 saveScreenRotation）：开机即恢复，
     // 无需等 PC 重新连上再下发——满足"默认显示方向与上次断开时一致"。
@@ -781,14 +804,16 @@ int main() {
     }
     if (screen_rotation != 0) {
         window->setRotation(screen_rotation);
+#ifndef _WIN32
         WIN_W = window->width();
         WIN_H = window->height();
         MODEL_AREA_H = WIN_H / 2;
-        printf("[Mode] startup rotation -> %d (%dx%d)\n", screen_rotation,
-               WIN_W, WIN_H);
-    }
 #endif
+        printf("[Mode] startup rotation -> %d (%dx%d)\n", screen_rotation,
+               window->width(), window->height());
+    }
 
+#ifndef _WIN32
     // 提示音边沿检测基准（首帧仅记录不发声，避免开机误报）
     std::string snd_prev_overall;
     bool snd_prev_confirm = false;
@@ -855,9 +880,20 @@ int main() {
 
     // 5. UI 叠加层（PC: ImGui / 设备: 占位）
     UIRenderer ui;
+    TaskPanel task_panel;
 #ifdef _WIN32
     ui.init(static_cast<GLFWwindow*>(window->nativeHandle()));
     ui.setScale(ui_scale);  // init 内部只取了 DPI，补上分辨率归一系数
+    {
+        char executable[MAX_PATH]{};
+        GetModuleFileNameA(nullptr, executable, MAX_PATH);
+        const auto executable_dir = std::filesystem::path(executable).parent_path();
+        auto font_dir = executable_dir / "assets" / "device";
+        if (!std::filesystem::exists(font_dir / "font-noto-sc.otf"))
+            font_dir = (executable_dir / "../../../frontend/assets/device").lexically_normal();
+        task_panel.init((font_dir / "font-noto-sc.otf").string(),
+                        (font_dir / "font-clock.ttf").string());
+    }
 #else
     ui.init(WIN_W, MODEL_AREA_H);
 
@@ -879,7 +915,6 @@ int main() {
     DevScreen dev_screen = DevScreen::Normal;
 
     // 任务列表面板（下半屏）：字体加载失败时只画底色无文字，不阻断运行
-    TaskPanel task_panel;
     task_panel.init(kFontPath);
     // 事件提示音（后台线程播放；无可用声音设备时静默）
     SoundPlayer sound_player;
@@ -911,7 +946,11 @@ int main() {
 #ifdef _WIN32
     backend::BackendService backend;
     backend.start();
-    backend.setMonitorActive(cfg.monitor_enabled);  // 面板关 = 采样零开销
+    backend.setMonitorActive(cfg.monitor_enabled);
+    auto secondary_settings = [&]() {
+        const auto it = cfg.secondary_displays.find(window->dedicatedDisplayId());
+        return it != cfg.secondary_displays.end() ? it->second : SecondaryDisplaySettings{};
+    };
     auto& api = backend;  // 方法面与 ApiClient 兼容（takeStatus/菜单动作）
     // 云端账户 + 应用内更新（cloud/cloud_client.h）：恢复上次登录态（token
     // 90 天滑动）；worker 单线程 1s 节拍 = 60s 自动增量上传 + 请求类任务；
@@ -1034,6 +1073,13 @@ int main() {
     std::vector<UIRenderer::MenuEntry> motions_cache;  // 当前模型动作列表
     bool motions_dirty = true;
     std::string hook_hint_cache = "未检查";
+#ifdef _WIN32
+    WindowsAudioPlayer pc_audio;
+    std::vector<WindowsAudioPlayer::Output> pc_audio_outputs;
+    std::string pc_audio_previous_state;
+    uint64_t pc_audio_previous_alert = 0;
+    bool pc_audio_had_confirmation = false;
+#endif
     int autostart_cache = -1;  // 1 开 / 0 关 / -1 未知
 
     auto rebuild_motions = [&]() {
@@ -1063,6 +1109,9 @@ int main() {
 
     // 菜单打开时刷新（autostart / hook 走一次性 HTTP，模型目录重扫）
     auto refresh_menu_caches = [&]() {
+#ifdef _WIN32
+        pc_audio_outputs = pc_audio.outputs();
+#endif
         autostart_cache = api.getAutostart();
         const std::string j = api.getHooks();
         if (j.empty()) {
@@ -1080,6 +1129,23 @@ int main() {
 
     // ---- 右键菜单接线（ImGui 自绘，结构对齐 1.x index.html #context-menu）----
     ui.menu_is_checked = [&](const std::string& id) -> bool {
+        if (id == "dedicated-available") return window->hasDedicatedDisplay();
+        if (id == "dedicated") return window->isDedicatedDisplay();
+#ifdef _WIN32
+        if (id == "wireless-online") return backend.deviceOnline();
+        if (id == "secondary-cursor-block") return cfg.secondary_cursor_block;
+        if (id == "secondary-layout-available") return !window->dedicatedDisplayId().empty();
+        if (id == "secondary-monitor") return secondary_settings().show_metrics;
+        if (id == "secondary-layout:auto") return secondary_settings().placement == SecondaryPlacement::Auto;
+        if (id == "secondary-layout:left") return secondary_settings().placement == SecondaryPlacement::Left;
+        if (id == "secondary-layout:right") return secondary_settings().placement == SecondaryPlacement::Right;
+        if (id == "secondary-mode:windows")
+            return cfg.secondary_display_mode == "windows" ||
+                (cfg.secondary_display_mode == "auto" && window->isDedicatedDisplay());
+        if (id == "secondary-mode:usb")
+            return cfg.secondary_display_mode == "usb" ||
+                (cfg.secondary_display_mode == "auto" && !window->isDedicatedDisplay());
+#endif
         if (id == "vis-monitor") return ui.showMetrics;
         if (id == "vis-cpu") return ui.showCpu;
         if (id == "vis-ram") return ui.showRam;
@@ -1100,6 +1166,16 @@ int main() {
     };
 
     ui.menu_hint = [&](const std::string& id) -> std::string {
+#ifdef _WIN32
+        if (id == "audio-volume") return std::to_string(cfg.pc_audio_volume) + "%";
+        if (id == "audio-output") {
+            if (backend.deviceOnline()) return I18n::t("menu.soundWirelessOnline");
+            if (cfg.pc_audio_output.empty()) return I18n::t("menu.soundSystemDefault");
+            for (const auto& output : pc_audio_outputs)
+                if (output.id == cfg.pc_audio_output) return output.name;
+            return I18n::t("menu.soundOutputUnavailable");
+        }
+#endif
         if (id == "hook-status") return hook_hint_cache;
         // 集成状态（主菜单“集成”右侧）：Hook 已安装即视为已集成
         if (id == "integration-status")
@@ -1172,6 +1248,26 @@ int main() {
 
     // key: "models"=切换形象；"motions"=播放动作；"motions:<状态>"=动作设定
     ui.menu_collect = [&](const std::string& key) -> std::vector<UIRenderer::MenuEntry> {
+#ifdef _WIN32
+        if (key == "audio-volumes") {
+            std::vector<UIRenderer::MenuEntry> entries;
+            for (int percent = 0; percent <= 100; percent += 10) {
+                const auto value = std::to_string(percent);
+                entries.push_back({"audio-volume:" + value, value + "%",
+                                   cfg.pc_audio_volume == percent});
+            }
+            return entries;
+        }
+        if (key == "audio-outputs") {
+            std::vector<UIRenderer::MenuEntry> entries{
+                {"audio-output:", I18n::t("menu.soundSystemDefault"), cfg.pc_audio_output.empty()}
+            };
+            for (const auto& output : pc_audio_outputs)
+                entries.push_back({"audio-output:" + output.id, output.name,
+                                   output.id == cfg.pc_audio_output});
+            return entries;
+        }
+#endif
         if (key == "models") {
             std::vector<UIRenderer::MenuEntry> out;
             // 1.x getCharacters 顺序：内置模型在前，自定义形象在后；
@@ -1364,22 +1460,6 @@ int main() {
         return true;
     };
 
-    // 状态音频试听（PC 端）：MCI 异步播放已绑定文件。用 W 版兼容非 ASCII
-    // 路径；同一 alias 先停旧再开新，实现“重新试听”。MCI 不支持的格式
-    //（部分 ogg/flac/m4a）open 失败即静默忽略。
-    auto preview_audio_file = [](const std::string& utf8_path) {
-        mciSendStringW(L"stop dutyonprev", nullptr, 0, nullptr);
-        mciSendStringW(L"close dutyonprev", nullptr, 0, nullptr);
-        const int n = MultiByteToWideChar(CP_UTF8, 0, utf8_path.c_str(), -1,
-                                          nullptr, 0);
-        if (n <= 1) return;
-        std::wstring wp((size_t)n - 1, L'\0');
-        MultiByteToWideChar(CP_UTF8, 0, utf8_path.c_str(), -1, wp.data(), n);
-        const std::wstring cmd = L"open \"" + wp + L"\" alias dutyonprev";
-        if (mciSendStringW(cmd.c_str(), nullptr, 0, nullptr) != 0) return;
-        mciSendStringW(L"play dutyonprev", nullptr, 0, nullptr);
-    };
-
     // 系统默认音频文件名（未绑定自定义时试听播放；与设备端 SoundPlayer
     // 事件一致）：每个角色默认相同，即随包语音文件
     auto default_audio_file = [](const std::string& state) -> std::string {
@@ -1409,6 +1489,25 @@ int main() {
                 return p.generic_string();
         }
         return std::string();
+    };
+
+    auto play_pc_state_audio = [&](const std::string& state) {
+        std::string path;
+        const auto character = cfg.state_audio.find(cfg.active_character_id);
+        if (character != cfg.state_audio.end()) {
+            const auto file = character->second.find(state);
+            if (file != character->second.end() && !file->second.empty())
+                path = UserConfigStore::animationsDir() + "/" + file->second;
+        }
+        if (path.empty()) {
+            const auto dir = find_sounds_dir();
+            const auto file = default_audio_file(state);
+            if (!dir.empty() && !file.empty()) path = dir + "/" + file;
+        }
+        if (!path.empty()) {
+            pc_audio.setVolume(cfg.pc_audio_volume);
+            pc_audio.play(path, backend.deviceOnline() ? std::string() : cfg.pc_audio_output);
+        }
     };
 
     // 相框照片文件夹选择器（模态 shell 文件夹框；取消返回空）。路径以
@@ -1481,10 +1580,56 @@ int main() {
             UserConfigStore::saveMini(mini_mode);
         }
         // ---- 最小化：隐藏到系统托盘（托盘图标左键单击/双击唤回）----
+        else if (id == "center") {
+            window->centerOnScreen();
+        }
+        else if (id == "dedicated") {
+            window->toggleDedicatedDisplay();
+#ifdef _WIN32
+            if (recomputeScale()) ui.setScale(ui_scale);
+#endif
+        }
+        else if (id == "secondary-monitor" || id.rfind("secondary-layout:", 0) == 0) {
+            const auto& display_id = window->dedicatedDisplayId();
+            if (display_id.empty()) return;
+            auto& settings = cfg.secondary_displays[display_id];
+            if (id == "secondary-monitor") settings.show_metrics = !settings.show_metrics;
+            else if (id == "secondary-layout:left") settings.placement = SecondaryPlacement::Left;
+            else if (id == "secondary-layout:right") settings.placement = SecondaryPlacement::Right;
+            else settings.placement = SecondaryPlacement::Auto;
+            UserConfigStore::saveSecondaryDisplaySettings(display_id, settings);
+        }
+        else if (id == "secondary-cursor-block") {
+            cfg.secondary_cursor_block = !cfg.secondary_cursor_block;
+            window->setSecondaryCursorBlock(cfg.secondary_cursor_block);
+            UserConfigStore::saveSecondaryCursorBlock(cfg.secondary_cursor_block);
+        }
+        else if (id.rfind("secondary-mode:", 0) == 0) {
+#ifdef _WIN32
+            const std::string mode = id.substr(15);
+            if (mode != "usb" && mode != "windows") return;
+            ui.closeMenu();
+            cfg.secondary_display_mode = mode;
+            UserConfigStore::saveSecondaryDisplayMode(mode);
+            if (mode == "windows" && turzx_enabled) {
+                turzx_display.stop();
+                turzx_enabled = false;
+            }
+            window->setDedicatedDisplayEnabled(mode == "windows");
+            if (recomputeScale()) ui.setScale(ui_scale);
+            if (mode == "windows" && !window->hasDedicatedDisplay())
+                window->showBalloon("DutyOn", I18n::t("menu.secondaryWindowsHint"));
+            else if (mode == "usb" && !turzx_display.available())
+                window->showBalloon("DutyOn", I18n::t("menu.secondaryUsbHint"));
+#endif
+        }
         else if (id == "minimize") {
 #ifdef _WIN32
             window->setVisible(false);
 #endif
+        }
+        else if (id == "restore") {
+            window->setVisible(true);
         }
         // ---- 语言 ----
         else if (id.rfind("lang:", 0) == 0) {
@@ -1585,6 +1730,11 @@ int main() {
             // 用 atoi（解析失败返回 0，不抛异常），避免 stoi 遇非法输入崩溃
             const int deg = atoi(id.c_str() + 14);
             if (deg == 0 || deg == 90 || deg == 180 || deg == 270) {
+#ifdef _WIN32
+                window->setRotation(deg);
+                if (window->isDedicatedDisplay() && window->rotation() != deg) return;
+                if (recomputeScale()) ui.setScale(ui_scale);
+#endif
                 cfg.screen_rotation = deg;
                 UserConfigStore::saveScreenRotation(deg);
             }
@@ -1865,26 +2015,40 @@ int main() {
         // ---- 状态音频试听：已绑定→播绑定文件；未绑定→播系统默认音频 ----
         else if (id.rfind("stateaudiopreview:", 0) == 0) {
 #ifdef _WIN32
-            const std::string state = id.substr(18);
-            std::string path;
-            auto kit = cfg.state_audio.find(cfg.active_character_id);
-            if (kit != cfg.state_audio.end()) {
-                auto fit = kit->second.find(state);
-                if (fit != kit->second.end() && !fit->second.empty())
-                    path = UserConfigStore::animationsDir() + "/" + fit->second;
+            play_pc_state_audio(id.substr(18));
+#endif
+        }
+        else if (id.rfind("audio-volume:", 0) == 0) {
+#ifdef _WIN32
+            int percent = 0;
+            const auto end = id.data() + id.size();
+            const auto parsed = std::from_chars(id.data() + sizeof("audio-volume:") - 1,
+                                                end, percent);
+            if (parsed.ec == std::errc{} && parsed.ptr == end &&
+                percent >= 0 && percent <= 100 && percent != cfg.pc_audio_volume) {
+                cfg.pc_audio_volume = percent;
+                pc_audio.setVolume(percent);
+                UserConfigStore::savePcAudioVolume(percent);
             }
-            if (path.empty()) {  // 未绑定 → 系统默认音频（随包语音）
-                const std::string sdir = find_sounds_dir();
-                const std::string df = default_audio_file(state);
-                if (!sdir.empty() && !df.empty()) path = sdir + "/" + df;
+#endif
+        }
+        else if (id.rfind("audio-output:", 0) == 0) {
+#ifdef _WIN32
+            const auto endpoint = id.substr(sizeof("audio-output:") - 1);
+            if (endpoint != cfg.pc_audio_output) {
+                pc_audio.stop();
+                cfg.pc_audio_output = endpoint;
+                UserConfigStore::savePcAudioOutput(endpoint);
             }
-            if (!path.empty()) preview_audio_file(path);
 #endif
         }
         // ---- 设备声音管理：完全静音 / 按状态静音（经 /api/status 下发）----
         else if (id == "sound-mute") {
             cfg.sound_mute = !cfg.sound_mute;
             UserConfigStore::saveSoundMute(cfg.sound_mute);
+#ifdef _WIN32
+            if (cfg.sound_mute) pc_audio.stop();
+#endif
         } else if (id.rfind("sound-mute-state:", 0) == 0) {
             const std::string state = id.substr(17);
             const std::string mk = cfg.active_character_id + ":" + state;
@@ -2090,6 +2254,21 @@ int main() {
         else
             ui.openMenu();
     };
+    window->on_tray_menu = [&]() {
+        ui.closeMenu();
+#ifdef _WIN32
+        ui.setDeviceStatus(backend.deviceOnline() || window->isDedicatedDisplay() || turzx_display.available(), cfg.device_mode,
+                           cfg.effectiveColor(cfg.active_character_id),
+                           cfg.device_brightness, cfg.device_volume, cfg.screen_rotation);
+        ui.setFrameSource(cfg.frame_source, cfg.frame_folder,
+                          count_frame_photos(cfg.frame_folder));
+        ui.setCloudStatus(cloud.loggedIn(), cloud.username());
+#endif
+        return ui.trayMenu(window->isVisible());
+    };
+    window->on_tray_action = [&](const std::string& action) {
+        if (ui.menu_activate) ui.menu_activate(action);
+    };
     // 菜单外点击关闭（同 1.x blur 关菜单）
     window->on_outside_click = [&ui]() { ui.closeMenu(); };
 
@@ -2114,8 +2293,15 @@ int main() {
     };
 
 #ifdef _WIN32
+    float dedicated_canvas_x = 0.0f;
+    float dedicated_canvas_y = 0.0f;
+    float dedicated_canvas_w = 0.0f;
+    float dedicated_canvas_h = 0.0f;
+    TaskScreenLayout dedicated_layout;
+    SecondaryDisplayLayout secondary_layout;
     // 角色画布当前左边（menu-left 模式下角色区右锚）
     auto canvas_x_px = [&]() -> int {
+        if (window->isDedicatedDisplay()) return (int)dedicated_canvas_x;
         const float base_w = mini_mode ? (float)mini_win_w : (float)win_w;
         const float margin = mini_mode ? 5.0f * ui_scale : 10.0f * ui_scale;
         return (int)(menu_left_active
@@ -2156,7 +2342,6 @@ int main() {
 
     printf("Entering main loop...\n");
 
-    const auto frame_duration = std::chrono::milliseconds(1000 / FPS);
     auto last_frame = Clock::now();
 
     PetStatus current_status{};
@@ -2229,6 +2414,23 @@ int main() {
         // 7. 窗口事件（PC: 拖拽/边缘吸附/右键菜单/托盘；返回 false = 退出）
         if (!window->pollEvents()) break;
 #ifdef _WIN32
+        const bool should_send_usb = turzx_allowed && cfg.secondary_display_mode != "windows" &&
+            !window->isDedicatedDisplay();
+        if (should_send_usb != turzx_enabled) {
+            if (should_send_usb) turzx_display.start();
+            else turzx_display.stop();
+            turzx_enabled = should_send_usb;
+        }
+        {
+            static bool was_dedicated = window->isDedicatedDisplay();
+            if (was_dedicated != window->isDedicatedDisplay()) {
+                was_dedicated = window->isDedicatedDisplay();
+                ui.closeMenu();
+                menu_left_active = false;
+                menu_keep_top = false;
+                if (recomputeScale()) ui.setScale(ui_scale);
+            }
+        }
         // /api/quit 或菜单退出请求（HTTP 线程异步置位）
         if (backend.quitRequested()) {
             g_running = false;
@@ -2238,8 +2440,10 @@ int main() {
         // 右下角托盘气泡提示“我在这里哟”（托盘图标左键可恢复显示）
         {
             const bool online_now = backend.deviceOnline();
+            if (online_now != device_was_online) pc_audio.stop();
+            pc_audio.tick();
             if (online_now && !device_was_online) {
-                window->setVisible(false);
+                if (!window->isDedicatedDisplay()) window->setVisible(false);
                 window->showBalloon("Duty On 桌宠", "我在这里哟");
                 // 通知设备端播放一次「欢迎」动作 + 专属音频（PC 已隐藏，
                 // 桌宠实际在硬件屏上，欢迎在设备端呈现）
@@ -2449,7 +2653,25 @@ int main() {
 #endif
         if (auto status = api.takeStatus()) {
             current_status = std::move(*status);
-#ifndef _WIN32
+#ifdef _WIN32
+            const auto& state = current_status.overall_state;
+            std::string sound;
+            if (current_status.has_confirmation &&
+                (!pc_audio_had_confirmation || current_status.alert_seq != pc_audio_previous_alert)) {
+                sound = "alert";
+            } else if (!pc_audio_previous_state.empty() && state != pc_audio_previous_state) {
+                if (state == "working" || (state == "sleeping" && pc_audio_previous_state == "working"))
+                    sound = state;
+            }
+            pc_audio_had_confirmation = current_status.has_confirmation;
+            pc_audio_previous_alert = current_status.alert_seq;
+            pc_audio_previous_state = state;
+            if (!sound.empty() && !cfg.sound_mute) {
+                const auto muted = cfg.state_audio_muted.find(cfg.active_character_id + ":" + sound);
+                if (muted == cfg.state_audio_muted.end() || !muted->second)
+                    play_pc_state_audio(sound);
+            }
+#else
             // PC 下发的"重新配网"指令（换 WiFi 场景）：序号变化才执行（ack
             // 已由 ApiClient 发出）——清 Wi-Fi 凭据回配网模式，wifi 状态机
             // 自动把画面切回 WifiProvision；配对 token 保留，新网络入网后
@@ -2912,7 +3134,25 @@ int main() {
         // 菜单内容超出常规窗口高时，窗口向上增高的量（角色/状态栏同步
         // 下移，宠物屏幕位置不变）；仅在下方非吸附分支内计算，其余情况为 0
         float menu_top_offset = 0.0f;
-        if (window->isEdgeDocked()) {
+        secondary_layout = window->isDedicatedDisplay()
+            ? secondaryDisplayLayout(window->width(), window->height(), secondary_settings())
+            : SecondaryDisplayLayout{};
+        backend.setSecondaryMonitorActive(window->isVisible() &&
+            secondary_layout.metrics != SecondaryMetrics::Hidden);
+        if (window->isDedicatedDisplay()) {
+            const auto& pet = secondary_layout.pet;
+            dedicated_layout = task_panel.screenLayout(cfg.device_mode, pet.w, pet.h,
+                (int)current_status.sessions.size(), 0.0f, true);
+            dedicated_canvas_x = (float)(pet.x + dedicated_layout.character_x);
+            dedicated_canvas_y = (float)(pet.y + pet.h - dedicated_layout.character_y -
+                                         dedicated_layout.character_h);
+            dedicated_canvas_w = (float)dedicated_layout.character_w;
+            dedicated_canvas_h = (float)dedicated_layout.character_h;
+            ui.setLayout(0.0f, (float)(pet.x + dedicated_layout.region_x),
+                         (float)dedicated_layout.region_w, 8.0f * ui_scale, false);
+            ui.setContentTopOffset(0.0f);
+            ui.setMenuLeft(true);
+        } else if (window->isEdgeDocked()) {
             // 边缘吸附条：40px 宽细条，几何由窗口层管理；按内容高度校正
             //（项目数变化时条随之伸缩，垂直中心保持不变）
             window->updateDockBarHeight((int)ui.dockBarHeight(current_status));
@@ -2999,23 +3239,44 @@ int main() {
 #endif
 
         // 10. 渲染（边缘吸附时只画吸附条：角色/状态栏/监控/菜单全部隐藏）
-        glClearColor(0.f, 0.f, 0.f, 0.f);
+        glClearColor(0.f, 0.f, 0.f, window->isDedicatedDisplay() ? 1.f : 0.f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         const bool edge_docked = window->isEdgeDocked();
-        if (edge_docked) {
+        if (window->isDedicatedDisplay() && !window->isVisible()) {
+        } else if (edge_docked) {
             ui.beginFrame();
             ui.renderDockBar(current_status);
             ui.endFrame();
         } else {
 #ifdef _WIN32
-            // 角色画布（对齐 1.x #canvas-wrapper；迷你 120x130）；
-            // GL 视口原点在左下
-            {
-                GLFWwindow* glfw_win =
-                    static_cast<GLFWwindow*>(window->nativeHandle());
-                int fb_w = 0, fb_h = 0;
-                glfwGetFramebufferSize(glfw_win, &fb_w, &fb_h);
+            GLFWwindow* glfw_win = static_cast<GLFWwindow*>(window->nativeHandle());
+            int fb_w = 0, fb_h = 0;
+            glfwGetFramebufferSize(glfw_win, &fb_w, &fb_h);
+            auto framebuffer_region = [&](const DisplayRegion& region) {
+                const double sx = fb_w / (double)(std::max)(1, window->width());
+                const double sy = fb_h / (double)(std::max)(1, window->height());
+                const int left = (int)std::lround(region.x * sx);
+                const int right = (int)std::lround((region.x + region.w) * sx);
+                const int top = (int)std::lround(region.y * sy);
+                const int bottom = (int)std::lround((region.y + region.h) * sy);
+                return DisplayRegion{left, fb_h - bottom, right - left, bottom - top};
+            };
+            auto set_secondary_region = [&](const DisplayRegion& region) {
+                const auto fb = framebuffer_region(region);
+                glViewport(fb.x, fb.y, fb.w, fb.h);
+                glScissor(fb.x, fb.y, fb.w, fb.h);
+                glEnable(GL_SCISSOR_TEST);
+            };
+            // 角色画布（GL 视口原点在左下）。
+            if (window->isDedicatedDisplay()) {
+                const auto canvas = framebuffer_region({(int)dedicated_canvas_x, (int)dedicated_canvas_y,
+                                                        (int)dedicated_canvas_w, (int)dedicated_canvas_h});
+                renderer.setCenterV(true);
+                gif.setCenterV(true);
+                renderer.setViewport(canvas.x, canvas.y, canvas.w, canvas.h);
+                gif.setViewport(canvas.x, canvas.y, canvas.w, canvas.h);
+            } else {
                 const float scale =
                     window->height() > 0
                         ? (float)fb_h / (float)window->height()
@@ -3028,6 +3289,8 @@ int main() {
                 const int margin_gl_x = static_cast<int>(margin_x * scale);
                 // 菜单增高窗口时角色整体下移 menu_top_offset（保持屏幕位置不变）
                 const int top_off_gl = (int)(menu_top_offset * scale);
+                renderer.setCenterV(false);
+                gif.setCenterV(false);
                 renderer.setViewport(margin_gl_x, fb_h - canvas_gl_h - top_off_gl,
                                      canvas_gl_w, canvas_gl_h);
                 gif.setViewport(margin_gl_x, fb_h - canvas_gl_h - top_off_gl,
@@ -3038,17 +3301,6 @@ int main() {
             //   横屏（WIN_W>=WIN_H，rotation 0/180）= 左右布局：人偶占左列
             //     （满高），时钟/日期/任务列表在右列自上而下；
             //   竖屏（rotation 90/270）= 沿用上下布局：角色区 + 底部面板。
-            const bool landscape = (WIN_W >= WIN_H);
-            // 角色视口（舞台光要画在同一块区域里）
-            int char_vx = 0, char_vy = 0, char_vw = WIN_W, char_vh = WIN_H;
-            auto set_char_vp = [&](int x, int y, int w, int h) {
-                char_vx = x; char_vy = y; char_vw = w; char_vh = h;
-                renderer.setViewport(x, y, w, h);
-                gif.setViewport(x, y, w, h);
-            };
-            const int left_w = landscape ? WIN_H : WIN_W;   // 横屏左列（正方形）宽
-            const int region_x = landscape ? left_w : 0;     // 信息区起点 x
-            const int region_w = landscape ? (WIN_W - left_w) : WIN_W;
             float panel_h = 0.f;  // 竖屏面板区高度（multi 任务列表 / 语音面板）
             // 语音交互模式：面板常驻——待机=唤醒提示行（单行矮面板）、
             // 会话=指令列表；底部（竖屏）/ 右列下半（横屏）让位
@@ -3056,31 +3308,19 @@ int main() {
             if (voice_active)
                 panel_h = task_panel.voicePanelHeight(
                     voice_sess == VoiceSess::None ? 0
-                                                  : (int)voice_names.size());
+                                                  : (int)voice_names.size(), WIN_W, WIN_H);
             renderer.setCenterV(true);
             gif.setCenterV(true);
-            if (landscape) {
-                // 左右布局：人偶占满高左列（列内居中），右列留给时钟/日期/任务；
-                // 语音面板画右列底部（叠加段），人偶不动
-                set_char_vp(0, 0, left_w, WIN_H);
-            } else if (voice_active) {
-                // 竖屏语音模式：上时钟（预留 110）+ 中人物 + 下面板
-                //（待机提示行 / 会话指令列表）
-                const int clock_reserve = (int)task_panel.headerHeight(false, false);
-                const int char_h = WIN_H - clock_reserve - (int)panel_h;
-                set_char_vp(0, (int)panel_h, WIN_W, char_h);
-            } else if (device_mode == "multi") {
-                // 竖屏多任务：动态分屏（角色区 = 时钟下沿 ~ 面板顶，内容
-                // 在该区域内垂直居中）。时钟区预留 ≈ 110px
-                panel_h = TaskPanel::heightForSessions(
-                    pc_ready ? (int)current_status.sessions.size() : 0);
-                const int clock_reserve = (int)task_panel.headerHeight(false, false);
-                const int char_h = WIN_H - clock_reserve - (int)panel_h;
-                set_char_vp(0, (int)panel_h, WIN_W, char_h);
-            } else {
-                // 竖屏单任务/相框：全屏 + 垂直居中
-                set_char_vp(0, 0, WIN_W, WIN_H);
-            }
+            const auto screen_layout = task_panel.screenLayout(device_mode, WIN_W, WIN_H,
+                pc_ready ? (int)current_status.sessions.size() : 0, panel_h);
+            const int char_vx = screen_layout.character_x;
+            const int char_vy = screen_layout.character_y;
+            const int char_vw = screen_layout.character_w;
+            const int char_vh = screen_layout.character_h;
+            const int region_x = screen_layout.region_x;
+            const int region_w = screen_layout.region_w;
+            renderer.setViewport(char_vx, char_vy, char_vw, char_vh);
+            gif.setViewport(char_vx, char_vy, char_vw, char_vh);
             // 相框模式播放：folder=照片逐张流式（PhotoPlayer）/ motion=动作
             // 轮播（现行）。无照片可显（PC 离线 / 首帧未就绪）时兜底跑动作
             // 轮播，避免黑屏。
@@ -3110,6 +3350,17 @@ int main() {
 
 #ifdef _WIN32
             const bool draw_character = true;
+            if (window->isDedicatedDisplay()) {
+                set_secondary_region(secondary_layout.pet);
+                task_panel.setClockColor(cfg.effectiveColor(cfg.active_character_id));
+                if (!using_gif)
+                    task_panel.renderBackdrop(cfg.device_mode != "frame"
+                        ? current_status.overall_state : std::string("sleeping"),
+                        secondary_layout.pet.w, secondary_layout.pet.h, dedicated_layout.character_x,
+                        dedicated_layout.character_y, dedicated_layout.character_w,
+                        dedicated_layout.character_h, true);
+                glDisable(GL_SCISSOR_TEST);
+            }
 #else
             // 设备端：仅"正常任务画面"渲染角色；配网/入网/配对引导画面
             //（WifiProvision/JoiningWifi/PairCode/FindingPc）不画 GIF/模型背景
@@ -3148,7 +3399,7 @@ int main() {
 #ifdef _WIN32
                 cr.x += (float)canvas_x_px();
                 // 角色视口下移了 menu_top_offset -> 头顶特效锚点同步下移
-                cr.y += menu_top_offset;
+                cr.y += window->isDedicatedDisplay() ? dedicated_canvas_y : menu_top_offset;
 #endif
                 // Live2D=紧贴内容包围盒；GIF=整图框（含透明留白）
                 ui.setModelRect(cr, !using_gif);
@@ -3159,7 +3410,7 @@ int main() {
 #ifdef _WIN32
             // 硬件显示端状态（菜单"设备模式"分组显示/隐藏 + 当前模式勾选）；
             // 颜色传当前角色的有效色（角色专属优先，否则全局），使颜色菜单勾选与之一致
-            ui.setDeviceStatus(backend.deviceOnline(), cfg.device_mode,
+            ui.setDeviceStatus(backend.deviceOnline() || window->isDedicatedDisplay() || turzx_display.available(), cfg.device_mode,
                                cfg.effectiveColor(cfg.active_character_id),
                                cfg.device_brightness, cfg.device_volume,
                                cfg.screen_rotation);
@@ -3174,6 +3425,7 @@ int main() {
                 // 云恢复已落盘（~/.dutyon 配置白名单字段 + 差异文件）：重载
                 // 配置、重建模型列表，复用角色切换分支（含 stateMotions 应用）
                 cfg = UserConfigStore::load();
+                window->setSecondaryCursorBlock(cfg.secondary_cursor_block);
                 model_entries = UserConfigStore::listModels(builtin_roots);
                 // cfg 重载后旧 gif_char 指针失效：先复位自定义形象再切换
                 using_gif = false;
@@ -3185,10 +3437,26 @@ int main() {
                 else if (!active.empty())
                     ui.menu_activate("model:" + active);  // Live2D 模型
             }
-            ui.beginFrame();
-            ui.renderStatus(current_status);
-            if (!mini_mode && has_metrics) ui.renderMetrics(current_metrics);
-            ui.renderHeadEffect(current_status);
+            if (window->isDedicatedDisplay()) {
+                const auto& pet = secondary_layout.pet;
+                set_secondary_region(pet);
+                task_panel.renderScreen(current_status, cfg.device_mode, pet.w, pet.h, dedicated_layout);
+                if (secondary_layout.metrics != SecondaryMetrics::Hidden) {
+                    const auto& monitor = secondary_layout.monitor;
+                    set_secondary_region(monitor);
+                    task_panel.renderSecondaryMetrics(has_metrics ? &current_metrics : nullptr,
+                        secondary_layout.metrics, monitor.w, monitor.h, monitor.y > 0);
+                }
+                glDisable(GL_SCISSOR_TEST);
+                glViewport(0, 0, fb_w, fb_h);
+                task_panel.renderDim(cfg.device_brightness, window->width(), window->height());
+            }
+            ui.beginFrame(!window->isDedicatedDisplay());
+            if (!window->isDedicatedDisplay()) {
+                ui.renderStatus(current_status);
+                if (!mini_mode && has_metrics) ui.renderMetrics(current_metrics);
+                ui.renderHeadEffect(current_status);
+            }
             ui.renderMenu();
             ui.endFrame();
 #else
@@ -3211,30 +3479,8 @@ int main() {
                     Clock::now() < wifi_ok_until, WIN_W, WIN_H);
             }
 
-            // ---- 正常画面：时间栏 + 任务牌 / 语音区（布局与
-            //      tools/ui-preview/ui_preview.cpp 保持一致）----
+            // ---- 正常画面：与专属副屏共用时间栏和任务牌 ----
             const bool normal = (dev_screen == DevScreen::Normal);
-            const bool multi = (device_mode == "multi");
-            const bool large_clock = !multi && !voice_active;
-            const float below_header =
-                (float)WIN_H - task_panel.headerHeight(large_clock, landscape);
-
-            // 有任务等确认：屏幕四边泛珊瑚色光（相框模式不响应任务状态）
-            if (normal && pc_ready && !photo_showing &&
-                device_mode != "frame" &&
-                current_status.overall_state == "alert")
-                task_panel.renderAlertEdge(WIN_W, WIN_H);
-
-            // 任务牌（multi；竖屏贴底、横屏接在时间栏下；语音会话中让位）
-            if (normal && multi && pc_ready && voice_sess == VoiceSess::None)
-                task_panel.render(current_status, WIN_W, WIN_H,
-                                  landscape ? below_header : panel_h, region_x,
-                                  region_w);
-            // 单任务：只亮出最要紧的一张牌（都空闲则不画）
-            if (normal && device_mode == "single" && pc_ready)
-                task_panel.renderFocus(current_status, WIN_W, WIN_H,
-                                       landscape ? below_header - 8.f : 150.f,
-                                       region_x, region_w);
 
             // 语音指令区（底部/右列下半，与任务牌互斥；语音模式常驻——
             // 待机只画唤醒提示行，会话中画指令列表）
@@ -3256,40 +3502,13 @@ int main() {
             // 时间栏（优先 PC 下发时间；设备无 RTC，本地钟不可信，断连才兜底
             // 本地时间）。相框照片满屏时隐藏；语音模式独立运行（无 PC）且
             // 从未同步过时间时不画，避免显示错误时钟
-            if (normal && !photo_showing &&
-                (device_mode != "voice" || clock_epoch > 0)) {
-                char time_buf[16] = {};
-                char date_buf[24] = {};
-                char week_buf[16] = {};
-                static const char* kWeek[] = {"日", "一", "二", "三",
-                                              "四", "五", "六"};
-                time_t local_sec = 0;  // 含时区偏移的 epoch
-                if (clock_epoch > 0) {
-                    const double t =
-                        clock_epoch +
-                        std::chrono::duration<double>(
-                            std::chrono::steady_clock::now() - clock_sync_tp)
-                            .count() +
-                        current_status.utc_offset_min * 60.0;
-                    const long secs = ((long)t % 86400 + 86400) % 86400;
-                    snprintf(time_buf, sizeof(time_buf), "%02ld:%02ld:%02ld",
-                             secs / 3600, secs / 60 % 60, secs % 60);
-                    local_sec = (time_t)t;
-                } else {
-                    local_sec = time(nullptr);
-                    strftime(time_buf, sizeof(time_buf), "%H:%M:%S",
-                             localtime(&local_sec));
-                }
-                // local_sec 已含时区偏移，用 gmtime 取其"本地"日历分量
-                struct tm tmv = {};
-                gmtime_r(&local_sec, &tmv);
-                snprintf(date_buf, sizeof(date_buf), "%d月%d日", tmv.tm_mon + 1,
-                         tmv.tm_mday);
-                snprintf(week_buf, sizeof(week_buf), "星期%s",
-                         kWeek[tmv.tm_wday]);
-                task_panel.renderHeader(time_buf, date_buf, week_buf,
-                                        large_clock, landscape, WIN_W, WIN_H,
-                                        region_x, region_w);
+            if (normal && !photo_showing) {
+                const double screen_clock = clock_epoch > 0.0
+                    ? clock_epoch + std::chrono::duration<double>(Clock::now() - clock_sync_tp).count()
+                    : 0.0;
+                task_panel.renderScreen(current_status, device_mode, WIN_W, WIN_H,
+                    screen_layout, screen_clock, current_status.utc_offset_min,
+                    device_mode != "voice" || clock_epoch > 0, pc_ready);
             }
             // 右上角两段链路：Wi-Fi（设备入网）与电脑（已连上 PC）
             task_panel.renderNetStatus(wifi.state() == WifiState::Online,
@@ -3298,6 +3517,16 @@ int main() {
             task_panel.renderDim(device_brightness, WIN_W, WIN_H);
 #endif
         }
+
+#ifdef _WIN32
+        if (window->isDedicatedDisplay()) {
+            glDisable(GL_SCISSOR_TEST);
+            glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        }
+#endif
 
 #ifndef _WIN32
         // 开机兜底模型延迟加载：前两帧先把 GIF 形象/面板推上屏（setCrtc），
@@ -3463,7 +3692,7 @@ int main() {
             static int last_x = 0, last_b = 0;
             if (++pos_tick >= 30) {
                 pos_tick = 0;
-                if (!window->isEdgeDocked() && !ui.isMenuOpen()) {
+                if (!window->isDedicatedDisplay() && !window->isEdgeDocked() && !ui.isMenuOpen()) {
                     int wx = 0, wy = 0;
                     window->windowPos(wx, wy);
                     const int bottom = wy + window->height();
@@ -3478,6 +3707,23 @@ int main() {
         }
 #endif
 
+#ifdef _WIN32
+        // Read back at a bounded cadence. The transfer worker keeps only the
+        // newest frame, so USB latency cannot stall the OpenGL/UI loop.
+        if (turzx_enabled && !window->isDedicatedDisplay()) {
+            static int turzx_frame = 0;
+            if (++turzx_frame % 3 == 0) {
+                GLFWwindow* gw = static_cast<GLFWwindow*>(window->nativeHandle());
+                int fb_w = 0, fb_h = 0;
+                glfwGetFramebufferSize(gw, &fb_w, &fb_h);
+                if (fb_w > 0 && fb_h > 0) {
+                    std::vector<std::uint8_t> pixels(static_cast<size_t>(fb_w) * fb_h * 4);
+                    glReadPixels(0, 0, fb_w, fb_h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                    turzx_display.submitRgba(pixels.data(), fb_w, fb_h);
+                }
+            }
+        }
+#endif
         window->swapBuffers();
 
         // 项目行点击处理（帧外执行，同步 HTTP 不卡 UI 帧）
@@ -3487,15 +3733,33 @@ int main() {
         }
 
         // 12. 帧率控制
+        const auto frame_duration = std::chrono::duration<double>(1.0 /
+            (window->isDedicatedDisplay() ? 60 : FPS));
         auto elapsed = Clock::now() - now;
         if (elapsed < frame_duration) {
             std::this_thread::sleep_for(frame_duration - elapsed);
         }
+#ifdef _WIN32
+        {
+            static auto fps_start = Clock::now();
+            static int rendered_frames = 0;
+            ++rendered_frames;
+            const double seconds = std::chrono::duration<double>(Clock::now() - fps_start).count();
+            if (seconds >= 10.0) {
+                if (window->isDedicatedDisplay())
+                    printf("[DedicatedDisplay] render %.1f fps (%dx%d), visible=%d\n",
+                           rendered_frames / seconds, window->width(), window->height(),
+                           (int)window->isVisible());
+                fps_start = Clock::now();
+                rendered_frames = 0;
+            }
+        }
+#endif
     }
 
     // 退出前最终保存位置（兜住最后一秒内的移动；吸附态不保存，同 1.x）
 #ifdef _WIN32
-    if (!window->isEdgeDocked() && !ui.isMenuOpen()) {
+    if (!window->isDedicatedDisplay() && !window->isEdgeDocked() && !ui.isMenuOpen()) {
         int wx = 0, wy = 0;
         window->windowPos(wx, wy);
         UserConfigStore::saveWindowPos(wx, wy + window->height());

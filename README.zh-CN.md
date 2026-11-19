@@ -8,6 +8,8 @@
 
 [English](README.md) · **简体中文**
 
+[官方下载](https://dutyon.megrezsoft.com/#download) · [GitHub 版本](https://github.com/marine841023/duty-on/releases/latest) · [Gitee 版本](https://gitee.com/megrezsoft/duty-on/releases) · [v2.0.21 更新说明](docs/release-notes/v2.0.21.md)
+
 ### 🚀 v2.0 — 原生 C++ 桌宠 + 硬件陪伴屏
 
 > **为中国 Trae 用户量身打造** — 原生 Trae CN / TraeCode CN 窗口标题识别，
@@ -36,6 +38,17 @@
 </div>
 
 ---
+
+## 给桌宠一块副屏
+
+| 模式 | 何时选 | 如何设置 |
+| --- | --- | --- |
+| **直连模式（USB）** | 希望兼容的 TURZX 屏只显示桌宠，不占用 Windows 桌面空间。 | 在图灵官方工具选「普通模式」，再到 DutyOn 的「设备 → 副屏设备 → 副屏模式」选择直连。当前为固定 720 × 1280 输出，仅支持已适配设备。 |
+| **Windows 副屏模式** | 希望通过扩展显示全屏展示桌宠，或在超宽屏上并排显示系统监控。 | 在官方工具选「桌面模式」并装好显示驱动，在 Windows 中启用「扩展这些显示器」，再在 DutyOn 选择 Windows 副屏模式，开启「TURZX 桌宠专属屏」。 |
+
+在 Windows 专属副屏上，可以禁止鼠标误入整块屏幕；按住 **Ctrl + Alt** 可临时进入。在「屏幕布局」中可以选自动、靠左或靠右，并单独开启系统监控。例如在 **2560 × 720** 的横屏上，桌宠可以占左半或右半，监控放另一半。标准 16:9 屏仍保留完整桌宠画面；余量不足时会精简或收起监控。
+
+Wi-Fi 配对设备另走「设备 → 无线设备」。更多设置见 [副屏指南](docs/secondary-display-layout.md) 和 [TURZX 接入说明](docs/turzx-display.md)。
 
 ## 它是什么？
 
@@ -145,6 +158,10 @@ cmake --build build --config Release --target dutyon-pet
 可执行文件位于 `device/build/Release/dutyon-pet.exe`。在仓库根目录执行
 `powershell -File tools/build-package.ps1`，安装器、分发 ZIP 和升级 ZIP 均输出到
 **`tools/dist/`**，包内包含自动安装所需的 Hook 脚本。
+
+图灵智显 TURZX 5.2 寸 USB 副屏的驱动与路由说明见
+[TURZX 副屏说明](docs/turzx-display.md)。安装器会在管理员权限下调用官方签名
+驱动；驱动二进制按官方软件包许可在构建时提供，不直接提交到仓库。
 
 ### 安装 Hook 集成
 

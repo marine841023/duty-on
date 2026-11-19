@@ -1,6 +1,8 @@
 #pragma once
 
-// 设备端界面（ARM Linux GLES 直绘，无 ImGui）。视觉语言：
+#include "ui/secondary_display_layout.h"
+
+// 独立设备和 Windows 专属副屏共用的界面（GL 直绘，无 ImGui）。视觉语言：
 //   - 屏幕是一个小舞台：角色身后一束随整体状态变色、呼吸的舞台光；
 //   - 任务是一排"值班牌"：圆角牌 + 状态灯 + 项目名 + 状态词。颜色只给状态灯
 //     和状态词，需要确认的牌整块反色成珊瑚红，隔着桌子一眼能看到；
@@ -11,9 +13,7 @@
 // 水平范围（横屏为右列，竖屏为整屏；region_w<0 = 整屏宽）。
 //
 // DUTYON_UI_PREVIEW：Windows 离屏预览工具（device/tools/ui-preview）用桌面 GL
-// 编译同一份代码出图，设备端与 PC 正式程序都不定义它。
-
-#if !defined(_WIN32) || defined(DUTYON_UI_PREVIEW)
+// 编译同一份代码出图，正式程序不定义它。
 
 #include <string>
 #include <vector>
@@ -21,6 +21,17 @@
 #include "api/client.h"
 
 namespace dutyon {
+
+struct TaskScreenLayout {
+    int character_x = 0;
+    int character_y = 0;
+    int character_w = 0;
+    int character_h = 0;
+    int region_x = 0;
+    int region_w = 0;
+    float panel_top = 0.0f;
+    bool landscape = false;
+};
 
 class TaskPanel {
 public:
@@ -35,15 +46,26 @@ public:
     // 主题色（PC 菜单下发）：amber(默认)/ice/white/green/pink，未知回退 amber
     void setClockColor(const std::string& name);
 
+    TaskScreenLayout screenLayout(const std::string& mode, int screen_w, int screen_h,
+                                  int session_count, float voice_height = 0.0f,
+                                  bool responsive = false) const;
+    void renderScreen(const PetStatus& status, const std::string& mode,
+                      int screen_w, int screen_h, const TaskScreenLayout& layout,
+                      double clock_epoch = 0.0, int utc_offset_min = 0,
+                      bool show_clock = true, bool show_tasks = true);
+
     // ---- 正常画面 ----
 
     // 舞台光：画在角色之前。vx/vy/vw/vh = 角色视口；overall_state =
     // sleeping/working/alert，决定光的颜色和呼吸节奏
     void renderBackdrop(const std::string& overall_state, int screen_w, int screen_h, int vx,
-                        int vy, int vw, int vh);
+                        int vy, int vw, int vh, bool use_current_viewport = false);
+    void renderSecondaryMetrics(const SysMetrics* metrics, SecondaryMetrics detail,
+                                int screen_w, int screen_h, bool bottom);
 
     // 顶部时间栏高度（主循环给角色视口让位用）。large = 单任务/相框的大时钟
-    float headerHeight(bool large, bool landscape) const;
+    float headerHeight(bool large, bool landscape,
+                       int screen_w = 480, int screen_h = 800) const;
 
     // 时间栏：时:分 大字 + 小号秒；date（如 11月12日）与 weekday（如 星期四）
     // 竖屏多任务排在右侧两行，其余排成一行。
@@ -53,7 +75,8 @@ public:
                       int region_w = -1);
 
     // 任务牌占用高度（竖屏多任务模式动态分屏）；0 个任务按 1 行算
-    static float heightForSessions(int session_count);
+    static float heightForSessions(int session_count,
+                                   int screen_w = 480, int screen_h = 800);
 
     // 任务牌列表：自 area_top 向下排，放不下的折叠成"还有 N 个"
     void render(const PetStatus& status, int screen_w, int screen_h, float area_top,
@@ -69,7 +92,7 @@ public:
     float renderVoicePanel(const std::vector<std::string>& commands, int highlight,
                            const std::string& hint, int screen_w, int screen_h, float area_top,
                            int region_x = 0, int region_w = -1);
-    float voicePanelHeight(int command_count);
+    float voicePanelHeight(int command_count, int screen_w = 480, int screen_h = 800);
 
     // ---- 引导画面（整屏，不画角色）----
 
@@ -101,5 +124,3 @@ private:
 };
 
 }  // namespace dutyon
-
-#endif  // !_WIN32 || DUTYON_UI_PREVIEW
