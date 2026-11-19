@@ -32,7 +32,7 @@
 | 🖥 Windows 桌面版 v2.0.16 | [安装器](https://dutyon.megrezsoft.com/api/app/artifact?kind=installer&sha256=acd0a4489a69387de4c5955d054a8f0ba35aba4af48fb2ffa3a3cb0cb995dcb8) · [安装器 ZIP](https://dutyon.megrezsoft.com/api/app/artifact?kind=bundle&sha256=5f187586040b1e43d69ca272cefab102b1ef76c2f175867db72199dbc1c02fd8) |
 | 📟 设备端源码 | [v2.0-dev 分支](https://gitee.com/megrezsoft/duty-on/tree/v2.0-dev) `device/` 目录（交叉编译，见下文"设备端构建"） |
 
-当前源码及云端发布版本：**v2.0.16**，见[变更与验证说明](docs/release-notes/v2.0.16.md)。
+当前 Windows 发行版本：**v2.0.21**，见[更新说明](docs/release-notes/v2.0.21.md)。
 [官方下载与个人云空间](https://dutyon.megrezsoft.com)；本地安装包输出到 `tools/dist/`。
 
 </div>
@@ -83,7 +83,7 @@ Wi-Fi 配对设备另走「设备 → 无线设备」。更多设置见 [副屏�
 - **Wi-Fi 配网**：设备开机即建热点（`DutyOn-XXXX`），手机连接后
   **自动弹出配网页**（captive portal）选家中 Wi-Fi，全程无需键盘；
   PC 端可下发"重新配网"指令切换网络
-- **配对与同步**：屏幕显示 6 位配对码，PC 端右键宠物 → 设备 → 配对设备
+- **配对与同步**：屏幕显示 6 位配对码，PC 端右键宠物 → 设备 → 无线设备 → 配对设备
   输入即完成配对；角色、Live2D 模型、状态音频自动从 PC 同步
 - **电子相框模式**：未连电脑开机自动进入照片轮播；连上后切回任务屏
 - **声音**：HDMI 输出，任务开始/结束/提醒各有提示音，可绑定自定义音频
@@ -160,8 +160,7 @@ cmake --build build --config Release --target dutyon-pet
 **`tools/dist/`**，包内包含自动安装所需的 Hook 脚本。
 
 图灵智显 TURZX 5.2 寸 USB 副屏的驱动与路由说明见
-[TURZX 副屏说明](docs/turzx-display.md)。安装器会在管理员权限下调用官方签名
-驱动；驱动二进制按官方软件包许可在构建时提供，不直接提交到仓库。
+[TURZX 副屏说明](docs/turzx-display.md)。Windows 副屏模式需要通过图灵官方工具安装配套显示驱动。
 
 ### 安装 Hook 集成
 

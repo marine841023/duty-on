@@ -41,7 +41,7 @@
 | 🖥 Windows desktop v2.0.16 | [Installer](https://dutyon.megrezsoft.com/api/app/artifact?kind=installer&sha256=acd0a4489a69387de4c5955d054a8f0ba35aba4af48fb2ffa3a3cb0cb995dcb8) · [Installer ZIP](https://dutyon.megrezsoft.com/api/app/artifact?kind=bundle&sha256=5f187586040b1e43d69ca272cefab102b1ef76c2f175867db72199dbc1c02fd8) |
 | 📟 Device source | [v2.0-dev branch](https://github.com/marine841023/duty-on/tree/v2.0-dev), `device/` dir (cross-compiled — see "Device build" below) |
 
-Current source and cloud release: **v2.0.16** — [changes and validation](docs/release-notes/v2.0.16.md).
+Current Windows release: **v2.0.21** — [release notes](docs/release-notes/v2.0.21.md).
 [Official downloads and private cloud space](https://dutyon.megrezsoft.com); local builds go to `tools/dist/`.
 
 </div>
